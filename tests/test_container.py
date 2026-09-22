@@ -25,7 +25,7 @@ def test_initialize_unlock_and_secret_material_stays_encrypted(tmp_path: Path):
         path,
         PASSWORD,
         PASSWORD,
-        {"private_seed": b"secret-seed", "owner": "alice"},
+        {"secret_value": b"secret-seed", "owner": "alice"},
     )
 
     raw = path.read_bytes()
@@ -98,7 +98,7 @@ def test_lock_background_and_inactivity_invalidate_session(tmp_path: Path):
 
 def test_password_rewrap_preserves_encrypted_payload(tmp_path: Path):
     path = tmp_path / "wallet.dw"
-    Wallet.create(path, PASSWORD, PASSWORD, {"private_seed": b"secret"})
+    Wallet.create_with_generated_key(path, PASSWORD, PASSWORD)
     before = json.loads(path.read_text())
 
     wallet = Wallet.open(path, PASSWORD)

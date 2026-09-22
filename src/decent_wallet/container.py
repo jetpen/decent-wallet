@@ -15,6 +15,7 @@ import os
 import secrets
 import tempfile
 import time
+import weakref
 from collections.abc import Mapping
 from threading import Lock
 from pathlib import Path
@@ -39,6 +40,8 @@ _MIN_PASSWORD_LENGTH = 16
 _MAX_AUTH_DELAY_SECONDS = 0.5
 _AUTH_FAILURES: dict[str, int] = {}
 _AUTH_FAILURES_LOCK = Lock()
+_WALLET_SECRETS: dict[object, bytearray] = {}
+_SIGNING_FIELDS = {"private_seed", "public_key"}
 
 
 class WalletError(Exception):
@@ -87,6 +90,12 @@ class StorageFailure(WalletError):
 def _wipe(buffer: bytearray | None) -> None:
     if buffer is not None:
         buffer[:] = b"\x00" * len(buffer)
+
+
+def _finalize_wallet_secret(handle: object) -> None:
+    seed = _WALLET_SECRETS.pop(handle, None)
+    if seed is not None:
+        _wipe(seed)
 
 
 def _b64_encode(value: bytes) -> str:
@@ -462,8 +471,16 @@ class Wallet:
     ) -> None:
         self._path = path
         self._dek = dek
-        self._payload = payload
+        self._secret_handle = object()
+        self._secret_finalizer = weakref.finalize(
+            self,
+            _finalize_wallet_secret,
+            self._secret_handle,
+        )
+        self._payload = dict(payload)
+        self._install_secret_material()
         self._envelope = envelope
+        self._capabilities: set[Any] = set()
         self._inactivity_seconds = inactivity_minutes * 60
         self._last_activity = time.monotonic()
 
@@ -477,13 +494,35 @@ class Wallet:
         *,
         inactivity_minutes: int = 5,
     ) -> "Wallet":
+        if not isinstance(payload, Mapping) or _SIGNING_FIELDS.intersection(payload):
+            raise InvalidContainer()
+        return cls._create_storage(
+            path,
+            password,
+            confirmation,
+            payload,
+            inactivity_minutes=inactivity_minutes,
+        )
+
+    @classmethod
+    def _create_storage(
+        cls,
+        path: str | os.PathLike[str],
+        password: str,
+        confirmation: str,
+        payload: Mapping[str, Any],
+        *,
+        inactivity_minutes: int = 5,
+    ) -> "Wallet":
         _validate_password(password, confirmation)
         _validate_inactivity(inactivity_minutes)
         if not isinstance(payload, Mapping):
             raise InvalidContainer()
         target = Path(path)
-        dek = bytearray(secrets.token_bytes(_KEY_LENGTH))
+        created = False
+        dek = bytearray()
         try:
+            dek = bytearray(secrets.token_bytes(_KEY_LENGTH))
             salt = secrets.token_bytes(_SALT_LENGTH)
             kdf = _kdf_header(salt)
             kek = _derive_kek(password, salt)
@@ -508,10 +547,48 @@ class Wallet:
                 },
             }
             _atomic_write(target, _serialize(envelope), replace=False)
+            created = True
             return cls(target, dek, dict(payload), envelope, inactivity_minutes)
-        except Exception:
+        except WalletError:
+            if created:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
             _wipe(dek)
             raise
+        except Exception:
+            if created:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+            _wipe(dek)
+            raise StorageFailure() from None
+
+    @classmethod
+    def create_with_generated_key(
+        cls,
+        path: str | os.PathLike[str],
+        password: str,
+        confirmation: str,
+        *,
+        inactivity_minutes: int = 5,
+    ) -> "Wallet":
+        from .signer import _generate_seed, _public_key_from_seed
+
+        seed = _generate_seed()
+        try:
+            public_key = _public_key_from_seed(bytes(seed))
+            return cls._create_storage(
+                path,
+                password,
+                confirmation,
+                {"private_seed": bytes(seed), "public_key": public_key},
+                inactivity_minutes=inactivity_minutes,
+            )
+        finally:
+            _wipe(seed)
 
     @classmethod
     def open(
@@ -533,9 +610,71 @@ class Wallet:
         _clear_unlock_failures(target)
         return cls(target, dek, payload, envelope, inactivity_minutes)
 
+    def _install_secret_material(self) -> None:
+        seed = self._payload.pop("private_seed", None)
+        if seed is None:
+            return
+        from .signer import _public_key_from_seed
+
+        public_key = self._payload.get("public_key")
+        if type(seed) is not bytes or len(seed) != _KEY_LENGTH:
+            raise InvalidContainer()
+        if type(public_key) is not bytes or len(public_key) != _KEY_LENGTH:
+            raise InvalidContainer()
+        try:
+            derived_public_key = _public_key_from_seed(seed)
+        except Exception:
+            raise InvalidContainer() from None
+        if public_key != derived_public_key:
+            raise InvalidContainer()
+        _WALLET_SECRETS[self._secret_handle] = bytearray(seed)
+
     @property
     def is_unlocked(self) -> bool:
         return self._dek is not None
+
+    @property
+    def public_key(self) -> bytes:
+        from .signer import SignerUnavailable, _public_key_from_seed
+
+        self._touch()
+        seed = _WALLET_SECRETS.get(self._secret_handle)
+        stored_public_key = self._payload.get("public_key")
+        if seed is None or type(stored_public_key) is not bytes:
+            raise SignerUnavailable()
+        if len(seed) != _KEY_LENGTH or len(stored_public_key) != _KEY_LENGTH:
+            raise SignerUnavailable()
+        try:
+            derived_public_key = _public_key_from_seed(bytes(seed))
+        except Exception:
+            raise SignerUnavailable() from None
+        if stored_public_key != derived_public_key:
+            raise SignerUnavailable()
+        return derived_public_key
+
+    def create_signer(self, *, timeout_seconds: float = 60.0) -> Any:
+        from .signer import SignerUnavailable, _create_capability_from_seed
+
+        self._touch()
+        seed = _WALLET_SECRETS.get(self._secret_handle)
+        stored_public_key = self._payload.get("public_key")
+        if seed is None or type(stored_public_key) is not bytes:
+            raise SignerUnavailable()
+        if len(seed) != _KEY_LENGTH or len(stored_public_key) != _KEY_LENGTH:
+            raise SignerUnavailable()
+        try:
+            capability = _create_capability_from_seed(
+                bytes(seed),
+                timeout_seconds=timeout_seconds,
+                on_invalidate=self._capabilities.discard,
+            )
+        except Exception:
+            raise SignerUnavailable() from None
+        if capability.public_key != stored_public_key:
+            capability.invalidate()
+            raise SignerUnavailable()
+        self._capabilities.add(capability)
+        return capability
 
     @property
     def last_activity(self) -> float:
@@ -545,12 +684,16 @@ class Wallet:
     def update_payload(self, payload: Mapping[str, Any]) -> None:
         """Replace wallet-local content and atomically persist it."""
         self._touch()
-        if not isinstance(payload, Mapping):
+        if not isinstance(payload, Mapping) or _SIGNING_FIELDS.intersection(payload):
             raise InvalidContainer()
-        envelope = self._build_envelope(dict(payload))
+        updated_payload = dict(payload)
+        if self._secret_handle in _WALLET_SECRETS:
+            updated_payload["public_key"] = self._payload["public_key"]
+        envelope = self._build_envelope(updated_payload)
         _atomic_write(self._path, _serialize(envelope))
-        self._payload = dict(payload)
+        self._payload = updated_payload
         self._envelope = envelope
+        self._invalidate_capabilities()
 
     def change_password(self, password: str, confirmation: str) -> None:
         """Rewrap the DEK without re-encrypting the authenticated payload."""
@@ -581,7 +724,17 @@ class Wallet:
         _atomic_write(self._path, _serialize(envelope))
         self._envelope = envelope
 
+    def _invalidate_capabilities(self) -> None:
+        for capability in tuple(self._capabilities):
+            capability.invalidate()
+        self._capabilities.clear()
+
     def lock(self) -> None:
+        self._invalidate_capabilities()
+        self._secret_finalizer.detach()
+        seed = _WALLET_SECRETS.pop(self._secret_handle, None)
+        if seed is not None:
+            _wipe(seed)
         _wipe(self._dek)
         self._dek = None
         self._payload = {}
@@ -620,7 +773,12 @@ class Wallet:
         dek = self._dek
         if dek is None:
             raise WalletLockedError()
-        payload_info, ciphertext, tag = _make_payload(bytes(dek), payload)
+        payload_for_storage = dict(payload)
+        seed = _WALLET_SECRETS.get(self._secret_handle)
+        if seed is not None:
+            payload_for_storage["private_seed"] = bytes(seed)
+            payload_for_storage["public_key"] = self._payload["public_key"]
+        payload_info, ciphertext, tag = _make_payload(bytes(dek), payload_for_storage)
         return {
             "format": _FORMAT,
             "version": CURRENT_FORMAT_VERSION,
