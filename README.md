@@ -8,5 +8,7 @@ Current specification work covers:
 - CSRNG-only key generation and signing integration with the Identity/Registry toolchain.
 - Explicit consent for application challenge signing, disclosure, and capability decisions.
 - Independent multisignature draft, signing, exchange, merge, finalization, and publication workflows.
+- Portable encrypted-container transfer across Android, iPhone, and optional desktop/Podman implementations.
+- Key rotation, password rewrapping, wallet-format migration, and mandatory security acceptance tests.
 
-The repository is currently defining implementation-ready specifications. Ecosystem-wide identity and account storage, Registry/DHT operation, site policy, and site sessions are out of scope.
+The implementation-ready specification is [docs/specs/wallet-implementation.md](docs/specs/wallet-implementation.md). The repository currently contains specification and research artifacts, not a wallet implementation. Ecosystem-wide identity and account storage, Registry/DHT operation, site policy, and site sessions are out of scope.
