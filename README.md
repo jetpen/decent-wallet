@@ -9,8 +9,9 @@ Current implementation includes:
 - CSRNG-only Ed25519 key generation and public-key derivation.
 - Canonical Identity SignedUpdate validation and protocol-specific signing.
 - One-operation, timeout-invalidated signer capabilities with concurrent-use protection.
+- Public-only Identity/Registry adapter with canonical consent transcripts, replay/expiry handling, stale-state conditional writes, detached threshold proofs, and exact read-back confirmation.
 
-The implementation-ready specification is [docs/specs/wallet-implementation.md](docs/specs/wallet-implementation.md). Consent workflows, multisignature orchestration, platform adapters, Registry/DHT integration, and command-line or graphical interfaces remain outside the current library implementation.
+The implementation-ready specification is [docs/specs/wallet-implementation.md](docs/specs/wallet-implementation.md). Interactive consent UI, multisignature orchestration, platform adapters, Registry/DHT transport implementations, and command-line or graphical interfaces remain outside the current library implementation.
 
 ## Deployment
 
@@ -82,6 +83,9 @@ finally:
 - `wallet.change_password(password, confirmation)` atomically rewraps the existing wallet DEK.
 - `wallet.background()` and `wallet.lock()` invalidate capabilities and clear active wallet secrets.
 - `wallet.check_inactivity()` enforces the configured inactivity timeout.
+- `RegistryAdapter(transport, replay_store=None)` accepts only public owner/signer keys and a signer factory; the transport receives canonical public envelopes, an expected-state precondition, and an atomic expiry deadline, never a wallet or private key.
+- `adapter.submit_identity(...)` returns confirmed, unknown, stale, consent, failure, or proof-ready outcomes. Thresholds greater than one return a detached public proof for the local multisignature workflow instead of publishing an incomplete envelope.
+- `InMemoryReplayNonceStore` is suitable for isolated processes; applications spanning restarts must inject a durable atomic `ReplayNonceStore` implementation.
 
 `Wallet.create()` is available for encrypted wallet-local metadata that does not contain signing material. Its public payload API rejects `private_seed` and `public_key`; generated signing wallets must use `create_with_generated_key()`.
 
