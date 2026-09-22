@@ -125,7 +125,9 @@ def _validate_authorization(authorization: Any, signer_public_key: bytes) -> Non
     predecessor = authorization[7]
     if type(predecessor) is not bytes or len(predecessor) != _ZERO_STATE_HASH_LENGTH:
         raise InvalidSigningInput()
-    if signer_public_key not in signer_keys:
+    # Replacement proofs are authorized by the predecessor signer set; the
+    # successor set may intentionally remove the signer performing this call.
+    if signer_public_key not in signer_keys and authorization[3] != 3:
         raise InvalidSigningInput()
 
 

@@ -2,7 +2,7 @@
 
 Status: implementation-ready proposed MVP design
 
-This document consolidates the accepted decisions from the wallet implementation wayfinder map, [Wallet implementation specification and security boundary](https://github.com/jetpen/decent-wallet/issues/1). It is a specification, not evidence that the behavior is implemented. The repository currently contains no wallet implementation.
+This document consolidates the accepted decisions from the wallet implementation wayfinder map, [Wallet implementation specification and security boundary](https://github.com/jetpen/decent-wallet/issues/1). It remains the contract for behavior that is not yet implemented; the repository now contains code-backed encrypted storage, CSRNG signing, and a public-only Identity adapter for the completed slices.
 
 ## 1. Destination and scope
 
@@ -26,11 +26,15 @@ The encrypted container, lifecycle, signer boundary, consent boundary, portabili
 
 ### Researched but unimplemented
 
-The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR, signed-envelope, sequence, and finalized-publication contracts described in `docs/research/issue-3-csrng-signing-boundary.md`. The wallet adapter and wallet storage are not implemented in this repository.
+The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR, signed-envelope, sequence, and finalized-publication contracts described in `docs/research/issue-3-csrng-signing-boundary.md`. Interactive consent UI, multisignature orchestration, platform adapters, Registry/DHT transport implementations, key rotation, and format migration remain unimplemented in this repository.
 
 ### Implemented/code-backed
 
-No wallet implementation is currently present in this repository. Existing code-backed behavior referenced by this specification belongs to external Identity/Registry components and must be consumed through their public, non-secret boundary.
+The repository currently provides:
+
+- Argon2id and XChaCha20-Poly1305 encrypted wallet containers with atomic persistence and lifecycle invalidation;
+- CSRNG-only Ed25519 generation and protocol-specific, one-operation signer capabilities;
+- canonical Identity SignedUpdate validation and a public-only Identity adapter with immutable consent transcripts, atomic replay-nonce consumption, expiry checks, stale-state conditional writes, detached threshold proofs, and exact-envelope read-back confirmation.
 
 ### Long-term vision
 

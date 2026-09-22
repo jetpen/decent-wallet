@@ -1,8 +1,9 @@
 # Issue #3: CSRNG key-generation and Identity/Registry signing boundary
 
-**Status:** research findings for `jetpen/decent-wallet#3` (not an implementation and not a
-GitHub issue resolution). The wallet repository currently contains specification and
-handoff documentation, but no wallet key-generation or signing implementation.
+**Status:** research findings for `jetpen/decent-wallet#3` (not a GitHub issue
+resolution). The repository now contains code-backed wallet storage, CSRNG signing, and a
+public-only Identity adapter; this document records the external wire-boundary findings and
+remaining integration constraints.
 
 ## Decision-oriented summary
 
@@ -58,12 +59,12 @@ normalization:
 
 ### Researched or documented but unimplemented in the wallet
 
-The ecosystem handoff explicitly assigns the wallet CSRNG policy, key lifecycle, secure
-storage, signing integration, finalized-envelope handoff, and secret-disclosure tests
-to the wallet repository. The wallet `README` states that private keys stay within the
-wallet boundary, but the repository has no implementation. The Registry's own CSRNG
-enhancement is also still an open issue and its implementation is on an unmerged branch,
-not current `main`:
+The ecosystem handoff assigns the wallet CSRNG policy, key lifecycle, secure storage,
+signing integration, finalized-envelope handoff, and secret-disclosure tests to the wallet
+repository. The wallet now implements encrypted storage, CSRNG signing, and a public-only
+Identity adapter; broader Registry/DHT transport, consent UI, and multisignature workflows
+remain outside the completed slices. The Registry's own CSRNG enhancement is also still an
+open issue and its implementation is on an unmerged branch, not current `main`:
 
 - [Wallet component handoff](https://github.com/jetpen/decent-ecosystem/blob/main/docs/components/decent-wallet.md)
 - [Wallet README](https://github.com/jetpen/decent-wallet/blob/main/README.md)
@@ -77,12 +78,12 @@ change, not a claim that the released/current `main` CLI already enforces it.
 
 ### Proposed MVP design
 
-The wallet should implement the secret boundary described below and use the existing
-Registry codec, signature, validation, and finalized-envelope paths. A small in-memory
-signer API or adapter is still required: the current legacy Registry builder is
-filesystem-path based, while the wallet must not hand a PEM path or private bytes to a
-separate Registry/Identity process. This report does not claim that such a wallet API
-exists today.
+The wallet implements the secret boundary described below and uses the established
+wire contract through a public-only Identity adapter. The adapter constructs canonical
+updates and consent transcripts, signs locally after approval, and exposes only complete
+public envelope bytes to an injected transport. The current legacy Registry builder remains
+filesystem-path based, so broader process/network integration is still outside this
+repository's completed adapter boundary.
 
 ### Long-term vision
 
