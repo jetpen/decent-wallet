@@ -11,6 +11,13 @@ from .container import (
     UnsupportedFormat,
     StorageFailure,
 )
+from .signer import (
+    InvalidSigningInput,
+    KeyGenerationError,
+    SignerCapability,
+    SignerError,
+    SignerUnavailable,
+)
 
 __all__ = [
     "CURRENT_FORMAT_VERSION",
@@ -22,4 +29,9 @@ __all__ = [
     "InvalidContainer",
     "UnsupportedFormat",
     "StorageFailure",
+    "InvalidSigningInput",
+    "KeyGenerationError",
+    "SignerCapability",
+    "SignerError",
+    "SignerUnavailable",
 ]
