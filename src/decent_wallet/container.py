@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 import secrets
@@ -19,11 +20,14 @@ import weakref
 from collections.abc import Mapping
 from threading import Lock, RLock
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from argon2 import Type
 from argon2.low_level import hash_secret_raw
 from Crypto.Cipher import ChaCha20_Poly1305
+
+if TYPE_CHECKING:
+    from .identity import IdentityDraft
 
 
 CURRENT_FORMAT_VERSION = 1
@@ -827,6 +831,87 @@ class Wallet:
         finally:
             if not persisted:
                 _wipe(pending_seed)
+
+    def prove_pending_signing_key_rotation(self, draft: IdentityDraft) -> None:
+        """Locally prove possession of the staged successor for one draft.
+
+        The signature is verified against the pending public key and discarded;
+        it is never returned, persisted, logged, or added to the public bundle.
+        """
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+            Ed25519PublicKey,
+        )
+
+        from .identity import (
+            IdentityDraft,
+            InvalidIdentityRequest,
+            _decode_signed_update,
+            _parse_previous_state_chain,
+        )
+        from .signer import SignerUnavailable
+
+        with self._rotation_lock:
+            self._touch()
+            pending_seed = _PENDING_WALLET_SECRETS.get(self._secret_handle)
+            active_seed = _WALLET_SECRETS.get(self._secret_handle)
+            pending_public_key = self._payload.get(_PENDING_PUBLIC_KEY)
+            active_public_key = self._payload.get("public_key")
+            if (
+                pending_seed is None
+                or active_seed is None
+                or type(pending_public_key) is not bytes
+                or type(active_public_key) is not bytes
+            ):
+                raise SignerUnavailable()
+
+            if not isinstance(draft, IdentityDraft):
+                raise InvalidIdentityRequest()
+            try:
+                validated_draft = IdentityDraft(
+                    signed_update_bytes=draft.signed_update_bytes,
+                    previous_state_envelope=draft.previous_state_envelope,
+                    previous_state_history=draft.previous_state_history,
+                )
+                record, payload, _sequence, authorization = _decode_signed_update(
+                    validated_draft.signed_update_bytes
+                )
+                previous = _parse_previous_state_chain(
+                    owner_name=validated_draft.owner_name,
+                    envelope=validated_draft.previous_state_envelope,
+                    history=validated_draft.previous_state_history,
+                )
+            except Exception:
+                raise InvalidIdentityRequest() from None
+
+            derived_active = _public_key_for_secret(active_seed, active_public_key)
+            derived_pending = _public_key_for_secret(pending_seed, pending_public_key)
+            if (
+                payload
+                or authorization is None
+                or authorization[3] != 5
+                or record[2] != derived_pending
+                or derived_pending == derived_active
+                or previous is None
+                or previous.owner_public_key != derived_active
+            ):
+                raise InvalidIdentityRequest()
+
+            signature: bytes | None = None
+            try:
+                digest = hashlib.sha256(validated_draft.signed_update_bytes).digest()
+                private_key = Ed25519PrivateKey.from_private_bytes(bytes(pending_seed))
+                signature = private_key.sign(digest)
+                Ed25519PublicKey.from_public_bytes(derived_pending).verify(
+                    signature, digest
+                )
+            except InvalidSignature:
+                raise SignerUnavailable() from None
+            except Exception:
+                raise SignerUnavailable() from None
+            finally:
+                signature = None
 
     def cancel_signing_key_rotation(self) -> None:
         """Remove an unfinalized successor without changing the active key."""

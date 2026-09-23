@@ -20,12 +20,13 @@ _SIGNATURE_LENGTH = 64
 _MAX_PREDECESSOR_DEPTH = 1024
 _AUTHORIZATION_KEYS = set(range(1, 8))
 _SIGNER_ENTRY_KEYS = {1, 2}
-_OPERATION_VALUES = {1, 2, 3, 4}
+_OPERATION_VALUES = {1, 2, 3, 4, 5}
 _OPERATION_NAMES = {
     1: "genesis",
     2: "ordinary-update",
     3: "replace-signers",
     4: "upgrade",
+    5: "owner-key-rotation",
 }
 
 
@@ -519,15 +520,42 @@ class IdentityBundle:
             envelope = _legacy_envelope(self.draft.signed_update_bytes, proof.signature)
         else:
             operation = authorization[3]
-            if operation == 3:
+            rotation_predecessor_owner_key = (
+                previous_state.owner_public_key
+                if operation == 5
+                and previous_state is not None
+                and not previous_state.signer_set
+                else None
+            )
+            rotation_from_legacy = rotation_predecessor_owner_key is not None
+            if operation == 3 or (operation == 5 and not rotation_from_legacy):
                 if previous_state is None or not previous_state.signer_set:
                     raise InvalidIdentityRequest()
                 authorized_keys = dict(previous_state.signer_set)
+            elif rotation_from_legacy:
+                if previous_state is None:
+                    raise InvalidIdentityRequest()
+                authorized_keys = {}
             else:
                 authorized_keys = _signer_map(authorization[6])
             valid_signers: set[str] = set()
             proof_values: list[dict[int, Any]] = []
             for proof in self.proofs:
+                if rotation_from_legacy:
+                    if rotation_predecessor_owner_key is None:
+                        raise InvalidIdentityRequest()
+                    if (
+                        proof.signer_id is not None
+                        or proof.signer_public_key != rotation_predecessor_owner_key
+                    ):
+                        raise InvalidIdentityRequest()
+                    _verify_bundle_signature(
+                        proof.signer_public_key,
+                        self.draft.signed_update_bytes,
+                        proof.signature,
+                    )
+                    proof_values.append({1: None, 2: proof.signature})
+                    continue
                 if proof.signer_id is None:
                     raise InvalidIdentityRequest()
                 expected_key = authorized_keys.get(proof.signer_id)
@@ -546,6 +574,9 @@ class IdentityBundle:
                     or len(valid_signers) != 1
                     or self.proofs[0].signer_public_key != record[2]
                 ):
+                    raise InvalidIdentityRequest()
+            elif rotation_from_legacy:
+                if len(self.proofs) != 1:
                     raise InvalidIdentityRequest()
             elif len(valid_signers) < authorization[5]:
                 raise InvalidIdentityRequest()
@@ -801,6 +832,30 @@ def _parse_identity_envelope(
             == previous_state.signer_set
         ):
             raise InvalidIdentityState()
+    elif operation == 5:
+        if (
+            previous_state is None
+            or previous_state.owner_name != owner_name
+            or previous_state.owner_public_key == record[2]
+            or previous_state.state_hash != authorization[7]
+            or sequence != previous_state.sequence + 1
+        ):
+            raise InvalidIdentityState()
+        candidate_signers = tuple((entry[1], entry[2]) for entry in signer_entries)
+        if previous_state.signer_set:
+            if (
+                authorization[4] != previous_state.generation
+                or authorization[5] != previous_state.threshold
+                or candidate_signers != previous_state.signer_set
+            ):
+                raise InvalidIdentityState()
+        elif (
+            authorization[4] != 1
+            or authorization[5] != 2
+            or len(signer_entries) != 3
+            or record[2] not in {entry[2] for entry in signer_entries}
+        ):
+            raise InvalidIdentityState()
     elif operation != 2:
         raise InvalidIdentityState()
     proof_list = _validate_proof_list(proofs)
@@ -816,21 +871,46 @@ def _parse_identity_envelope(
             or sequence != previous_state.sequence + 1
         ):
             raise InvalidIdentityState()
-    previous_keys = dict(previous_state.signer_set) if previous_state is not None else {}
-    verification_keys = previous_keys if operation in (2, 3) else candidate_keys
-    valid_signers: set[str] = set()
-    for proof in proof_list:
-        signer_id = proof[1]
-        public_key = verification_keys.get(signer_id)
-        if public_key is None:
+    rotation_from_legacy = (
+        operation == 5
+        and previous_state is not None
+        and not previous_state.signer_set
+    )
+    if rotation_from_legacy:
+        if previous_state is None:
             raise InvalidIdentityState()
-        _verify_signature(public_key, update_bytes, proof[2])
-        valid_signers.add(signer_id)
+        if (
+            len(proof_list) != 1
+            or proof_list[0][1] is not None
+        ):
+            raise InvalidIdentityState()
+        _verify_signature(
+            previous_state.owner_public_key,
+            update_bytes,
+            proof_list[0][2],
+        )
+        valid_signers: set[str] = set()
+    else:
+        previous_keys = dict(previous_state.signer_set) if previous_state is not None else {}
+        verification_keys = previous_keys if operation in (2, 3, 5) else candidate_keys
+        valid_signers = set()
+        for proof in proof_list:
+            signer_id = proof[1]
+            if signer_id is None:
+                raise InvalidIdentityState()
+            public_key = verification_keys.get(signer_id)
+            if public_key is None:
+                raise InvalidIdentityState()
+            _verify_signature(public_key, update_bytes, proof[2])
+            valid_signers.add(signer_id)
     if operation == 3:
         if len(valid_signers) < authorization[5]:
             raise InvalidIdentityState()
     elif operation == 4:
         if len(valid_signers) != 1:
+            raise InvalidIdentityState()
+    elif rotation_from_legacy:
+        if len(proof_list) != 1:
             raise InvalidIdentityState()
     elif len(valid_signers) < authorization[5]:
         raise InvalidIdentityState()
@@ -847,7 +927,7 @@ def _parse_identity_envelope(
         signer_set=tuple((entry[1], entry[2]) for entry in signer_entries),
         predecessor_envelopes=(
             (previous_state.envelope_bytes, *previous_state.predecessor_envelopes)
-            if operation in (2, 3, 4) and previous_state is not None
+            if operation in (2, 3, 4, 5) and previous_state is not None
             else ()
         ),
     )
@@ -857,22 +937,28 @@ def _validate_proof_list(proofs: Any) -> list[dict[int, Any]]:
     if not isinstance(proofs, list):
         raise InvalidIdentityState()
     normalized: list[dict[int, Any]] = []
-    seen: set[str] = set()
+    seen: set[str | None] = set()
     for proof in proofs:
         proof = _require_exact_keys(proof, {1, 2})
         signer_id = proof[1]
-        if not isinstance(signer_id, str) or not signer_id:
+        if signer_id is not None and (
+            not isinstance(signer_id, str) or not signer_id
+        ):
             raise InvalidIdentityState()
         signature = _require_bytes(proof[2], length=_SIGNATURE_LENGTH)
-        try:
-            signer_id.encode("utf-8")
-        except UnicodeEncodeError:
-            raise InvalidIdentityState() from None
+        if signer_id is not None:
+            try:
+                signer_id.encode("utf-8")
+            except UnicodeEncodeError:
+                raise InvalidIdentityState() from None
         if signer_id in seen:
             raise InvalidIdentityState()
         seen.add(signer_id)
         normalized.append({1: signer_id, 2: signature})
-    if normalized != sorted(normalized, key=lambda item: item[1].encode("utf-8")):
+    if normalized != sorted(
+        normalized,
+        key=lambda item: b"" if item[1] is None else item[1].encode("utf-8"),
+    ):
         raise InvalidIdentityState()
     return normalized
 
@@ -932,17 +1018,36 @@ def _validate_draft_transition(
         _require_complete_2_of_3(authorization)
         return
 
-    if (
-        owner_name != previous_state.owner_name
-        or owner_public_key != previous_state.owner_public_key
-        or sequence != previous_state.sequence + 1
-    ):
+    if owner_name != previous_state.owner_name or sequence != previous_state.sequence + 1:
         raise InvalidIdentityRequest()
     if authorization is None:
-        if previous_state.signer_set:
+        if previous_state.signer_set or owner_public_key != previous_state.owner_public_key:
             raise InvalidIdentityRequest()
         return
     if authorization[7] != previous_state.state_hash:
+        raise InvalidIdentityRequest()
+
+    if authorization[3] == 5:
+        if owner_public_key == previous_state.owner_public_key:
+            raise InvalidIdentityRequest()
+        candidate = tuple((entry[1], entry[2]) for entry in authorization[6])
+        if not previous_state.signer_set:
+            if (
+                authorization[4] != 1
+                or authorization[5] != 2
+                or len(candidate) != 3
+                or owner_public_key not in {key for _signer_id, key in candidate}
+            ):
+                raise InvalidIdentityRequest()
+        elif (
+            authorization[4] != previous_state.generation
+            or authorization[5] != previous_state.threshold
+            or candidate != previous_state.signer_set
+        ):
+            raise InvalidIdentityRequest()
+        return
+
+    if owner_public_key != previous_state.owner_public_key:
         raise InvalidIdentityRequest()
 
     candidate = tuple((entry[1], entry[2]) for entry in authorization[6])
@@ -976,7 +1081,7 @@ def _validate_transition(
     *,
     current: IdentityState | None,
     auth: dict[int, Any],
-    signer_id: str,
+    signer_id: str | None,
     signer_public_key: bytes,
 ) -> None:
     operation = auth[3]
@@ -985,7 +1090,30 @@ def _validate_transition(
         if operation != 1 or auth[4] != 1 or predecessor != bytes(_KEY_LENGTH):
             raise InvalidIdentityRequest()
         _require_complete_2_of_3(auth)
-        if _signer_map(auth[6]).get(signer_id) != signer_public_key:
+        if signer_id is None or _signer_map(auth[6]).get(signer_id) != signer_public_key:
+            raise InvalidIdentityRequest()
+        return
+
+    if operation == 5:
+        if not current.signer_set:
+            if (
+                auth[4] != 1
+                or auth[5] != 2
+                or len(auth[6]) != 3
+                or signer_id is not None
+                or signer_public_key != current.owner_public_key
+            ):
+                raise InvalidIdentityRequest()
+            return
+        current_signers = dict(current.signer_set)
+        if (
+            auth[4] != current.generation
+            or auth[5] != current.threshold
+            or tuple((entry[1], entry[2]) for entry in auth[6])
+            != current.signer_set
+            or signer_id is None
+            or current_signers.get(signer_id) != signer_public_key
+        ):
             raise InvalidIdentityRequest()
         return
 
@@ -995,11 +1123,13 @@ def _validate_transition(
         _require_complete_2_of_3(auth)
         if signer_public_key != current.owner_public_key:
             raise InvalidIdentityRequest()
-        if _signer_map(auth[6]).get(signer_id) != signer_public_key:
+        if signer_id is None or _signer_map(auth[6]).get(signer_id) != signer_public_key:
             raise InvalidIdentityRequest()
         return
 
     current_signers = dict(current.signer_set)
+    if signer_id is None:
+        raise InvalidIdentityRequest()
     if operation == 2:
         if auth[4] != current.generation or auth[5] != current.threshold:
             raise InvalidIdentityRequest()
@@ -1066,7 +1196,7 @@ class RegistryAdapter:
                 and type(value.get(2)) is bytes
             ):
                 _, _, _, authorization = _decode_signed_update(value[2])
-            if authorization is None or authorization[3] not in (2, 3, 4):
+            if authorization is None or authorization[3] not in (2, 3, 4, 5):
                 state = _parse_identity_envelope(
                     owner_name=owner_name,
                     envelope_bytes=current_envelope,
@@ -1115,6 +1245,67 @@ class RegistryAdapter:
             previous_state_history=(
                 current.predecessor_envelopes if current is not None else ()
             ),
+        )
+
+    def create_owner_key_rotation_draft(
+        self,
+        *,
+        owner_name: bytes,
+        successor_owner_public_key: bytes,
+        successor_signer_set: list[dict[int, Any]] | None = None,
+    ) -> IdentityDraft:
+        """Build a local operation-5 draft from the verified accepted state.
+
+        Legacy predecessors require the complete successor 2-of-3 signer set.
+        Version-1 predecessors preserve their existing signer governance and do
+        not accept a caller-supplied replacement set.
+        """
+        owner_name = _validate_owner_name(owner_name)
+        successor_owner_public_key = _require_bytes(
+            successor_owner_public_key, length=_KEY_LENGTH
+        )
+        previous = self.read_state(owner_name=owner_name)
+        if previous is None or successor_owner_public_key == previous.owner_public_key:
+            raise InvalidIdentityRequest()
+
+        if previous.signer_set:
+            if successor_signer_set is not None:
+                raise InvalidIdentityRequest()
+            epoch = previous.generation
+            threshold = previous.threshold
+            signer_entries = [
+                {1: signer_id, 2: public_key}
+                for signer_id, public_key in previous.signer_set
+            ]
+        else:
+            if not isinstance(successor_signer_set, list):
+                raise InvalidIdentityRequest()
+            try:
+                signer_entries = sorted(
+                    successor_signer_set,
+                    key=lambda entry: entry[1].encode("utf-8"),
+                )
+            except Exception:
+                raise InvalidIdentityRequest() from None
+            epoch = 1
+            threshold = 2
+
+        authorization = {
+            1: 1,
+            2: 1,
+            3: 5,
+            4: epoch,
+            5: threshold,
+            6: signer_entries,
+            7: previous.state_hash,
+        }
+        return IdentityDraft.create(
+            owner_name=owner_name,
+            owner_public_key=successor_owner_public_key,
+            sequence=previous.sequence + 1,
+            authorization=authorization,
+            previous_state_envelope=previous.envelope_bytes,
+            previous_state_history=previous.predecessor_envelopes,
         )
 
     def sign_draft(
@@ -1171,6 +1362,8 @@ class RegistryAdapter:
         replay_nonce: bytes,
     ) -> PublicationResult:
         if not isinstance(bundle, IdentityBundle) or not bundle.proofs:
+            raise InvalidIdentityRequest()
+        if bundle.draft.authorization is not None and bundle.draft.authorization[3] == 5:
             raise InvalidIdentityRequest()
         envelope = bundle.finalize()
         owner_name = bundle.draft.owner_name
@@ -1268,6 +1461,8 @@ class RegistryAdapter:
 
     def confirm_bundle(self, bundle: IdentityBundle) -> PublicationResult:
         if not isinstance(bundle, IdentityBundle):
+            raise InvalidIdentityRequest()
+        if bundle.draft.authorization is not None and bundle.draft.authorization[3] == 5:
             raise InvalidIdentityRequest()
         envelope = bundle.finalize()
         previous_state = _draft_previous_state(bundle.draft)
@@ -1395,23 +1590,34 @@ class RegistryAdapter:
         authorization_epoch: int | None = None
         auth: dict[int, Any] | None = None
 
-        if current is not None and current.owner_public_key != owner_public_key:
-            raise InvalidIdentityRequest()
-        if authorization is None and current is not None and current.signer_set:
-            raise InvalidIdentityRequest()
-        if authorization is None and signer_public_key != owner_public_key:
-            raise InvalidIdentityRequest()
         record_public_key = owner_public_key
         if authorization is not None:
             auth = _validate_authorization(dict(authorization))
             if operation != _OPERATION_NAMES[auth[3]]:
+                raise InvalidIdentityRequest()
+            if (
+                current is not None
+                and current.owner_public_key != owner_public_key
+                and auth[3] != 5
+            ):
+                raise InvalidIdentityRequest()
+            if auth[3] == 5 and draft is None:
                 raise InvalidIdentityRequest()
             authorization_epoch = auth[4]
             if current is not None and auth[7] != current.state_hash:
                 raise InvalidIdentityRequest()
             if current is None and auth[7] != bytes(_KEY_LENGTH):
                 raise InvalidIdentityRequest()
-            if signer_id is None or not isinstance(signer_id, str) or not signer_id:
+            legacy_owner_rotation_proof = (
+                auth[3] == 5
+                and current is not None
+                and not current.signer_set
+            )
+            if not legacy_owner_rotation_proof and (
+                signer_id is None
+                or not isinstance(signer_id, str)
+                or not signer_id
+            ):
                 raise InvalidIdentityRequest()
             _validate_transition(
                 current=current,
@@ -1426,6 +1632,12 @@ class RegistryAdapter:
                 authorization=auth,
             )
         else:
+            if current is not None and current.owner_public_key != owner_public_key:
+                raise InvalidIdentityRequest()
+            if current is not None and current.signer_set:
+                raise InvalidIdentityRequest()
+            if signer_public_key != owner_public_key:
+                raise InvalidIdentityRequest()
             if signer_id is not None:
                 raise InvalidIdentityRequest()
             update = build_identity_update(

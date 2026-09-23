@@ -21,7 +21,7 @@ _APPROVED_CSRNG = secrets.token_bytes
 _CONSTRUCTOR_TOKEN = object()
 _AUTHORIZATION_KEYS = set(range(1, 8))
 _SIGNER_ENTRY_KEYS = {1, 2}
-_OPERATION_VALUES = {1, 2, 3, 4}
+_OPERATION_VALUES = {1, 2, 3, 4, 5}
 _SIGNER_ID_MAX_BYTES = 256
 _ZERO_STATE_HASH_LENGTH = 32
 _PRIVATE_KEYS: dict[object, Ed25519PrivateKey] = {}
@@ -127,7 +127,7 @@ def _validate_authorization(authorization: Any, signer_public_key: bytes) -> Non
         raise InvalidSigningInput()
     # Replacement proofs are authorized by the predecessor signer set; the
     # successor set may intentionally remove the signer performing this call.
-    if signer_public_key not in signer_keys and authorization[3] != 3:
+    if signer_public_key not in signer_keys and authorization[3] not in (3, 5):
         raise InvalidSigningInput()
 
 
