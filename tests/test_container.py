@@ -281,3 +281,23 @@ def test_export_container_rejects_external_replacement(tmp_path: Path):
 
     wallet.lock()
     other.lock()
+
+
+def test_import_directory_sync_failure_removes_new_container_and_temp_file(
+    tmp_path: Path, monkeypatch
+):
+    source = tmp_path / "source.dw"
+    destination = tmp_path / "imported.dw"
+    original = Wallet.create(source, PASSWORD, PASSWORD, {"owner": "alice"})
+    container = original.export_container()
+    original.lock()
+
+    def fail_directory_sync(_directory):
+        raise OSError("simulated directory sync failure")
+
+    monkeypatch.setattr(container_module, "_fsync_directory", fail_directory_sync)
+    with pytest.raises(StorageFailure):
+        Wallet.import_container(destination, container, PASSWORD)
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(".decent-wallet-*")) == []

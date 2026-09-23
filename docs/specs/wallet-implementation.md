@@ -32,7 +32,7 @@ The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR
 
 The repository currently provides:
 
-- Argon2id and XChaCha20-Poly1305 encrypted wallet containers with atomic persistence and lifecycle invalidation;
+- Argon2id and XChaCha20-Poly1305 encrypted wallet containers with atomic persistence, password rewrapping, and lifecycle invalidation;
 - exact encrypted-container export/import in the Python core: export returns the existing bytes from an unlocked wallet; import authenticates and atomically writes the unchanged artifact only to an absent destination, without touching Registry state (Issue #18 partial);
 - CSRNG-only Ed25519 generation and protocol-specific, one-operation signer capabilities;
 - canonical Identity SignedUpdate validation and a public-only Identity adapter with immutable consent transcripts, atomic replay-nonce consumption, expiry checks, stale-state conditional writes, detached threshold proofs, and exact-envelope read-back confirmation;
@@ -237,7 +237,7 @@ Implementation should proceed as vertical slices, each preserving the security i
 2. CSRNG-only Ed25519 generation and non-exporting signer capability (implemented, issue #15);
 3. canonical Identity request construction, consent, sequence validation, and finalized-envelope adapter (implemented, issue #16);
 4. local multisignature draft, proof, merge, finalize, and publication rejection paths (implemented, issue #17);
-5. exact encrypted-container export/import core (implemented as a partial slice of Issue #18), followed by format migration, password rewrap, signing-key rotation state machines, and platform adapters;
+5. exact encrypted-container export/import core (implemented as a partial slice of Issue #18); password rewrap (implemented with Issue #14); remaining format migration, signing-key rotation state machines, and platform adapters;
 6. cross-platform conformance and the complete security acceptance matrix.
 
 No slice may introduce a private-key export or a network-facing private-key boundary. The repository issue tracker should carry the implementation slices and their blocking relationships before code work begins.
