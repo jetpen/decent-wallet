@@ -6,14 +6,14 @@ Current implementation includes:
 
 - Argon2id-protected, XChaCha20-Poly1305 encrypted wallet containers.
 - Atomic container writes, exact encrypted-container export/import, password rewrapping, bounded authentication delay, and lock/inactivity handling.
-- Local signing-key rotation preparation: persist one encrypted pending successor while preserving the active key; inspect its public key, cancel it, and retain it across reopen/export/import. Rotation signing and Registry publication/finalization are not implemented.
+- Local owner-key rotation preparation: persist one encrypted pending successor while preserving the active owner key; inspect its public key, cancel it, and retain it across reopen/export/import. Owner-key transition signing and Registry publication/finalization are not implemented.
 - CSRNG-only Ed25519 key generation and public-key derivation.
 - Canonical Identity SignedUpdate validation and protocol-specific signing.
 - One-operation, timeout-invalidated signer capabilities with concurrent-use protection.
 - Public-only Identity/Registry adapter with canonical consent transcripts, replay/expiry handling, stale-state conditional writes, detached threshold proofs, and exact read-back confirmation.
 - Immutable public Identity drafts and portable proof bundles with independent signing, canonical exchange, merge, threshold validation, finalization, conditional publication, and exact read-back confirmation.
 
-The implementation-ready specification is [docs/specs/wallet-implementation.md](docs/specs/wallet-implementation.md). Interactive consent UI, platform adapters, Registry/DHT transport implementations, and command-line or graphical interfaces remain outside the current library implementation.
+The canonical accepted specification is [docs/specs/wallet-implementation.md](docs/specs/wallet-implementation.md). Interactive consent UI, platform adapters, Registry/DHT transport implementations, and command-line or graphical interfaces remain outside the current library implementation.
 
 ## Deployment
 
@@ -93,7 +93,7 @@ finally:
 - `adapter.submit_identity(...)` returns confirmed, unknown, stale, consent, failure, or proof-ready outcomes. Thresholds greater than one return a detached public proof instead of publishing an incomplete envelope.
 - `adapter.create_draft(...)` derives the next sequence and binds the canonical update to the current public state. `adapter.sign_draft(...)` obtains consent and returns one local `IdentityProof` without publishing. Consent callbacks receive the exact non-secret `review_payload` bytes and matching payload hash for application rendering.
 - `IdentityBundle.from_submission(...)`, `bundle.merge(...)`, `bundle.to_cbor()` / `IdentityBundle.from_cbor(...)`, and `bundle.finalize()` support public bundle exchange and threshold validation. Drafts and partial bundles are local artifacts; only complete envelopes can reach `adapter.publish_bundle(...)`.
-- `adapter.publish_bundle(...)` requires a fresh purpose-bound publication consent, replay nonce, and expiry; the expiry is not trusted from exchanged bundle metadata. It uses the expected-state hash and independently confirms the exact envelope. Ambiguous writes return `unknown`; `adapter.confirm_bundle(...)` performs read-back only and never retries publication.
+- `adapter.publish_bundle(...)` requires a fresh purpose-bound publication consent, replay nonce, and expiry; the expiry is not trusted from exchanged bundle metadata. It uses the expected-state hash and reads back the exact envelope through the injected transport. This interface does not itself guarantee that the transport bypasses a Registry-local durable cache; operation-5 rotation confirmation requires the uncached fresh remote read specified in §10.2. Ambiguous writes return `unknown`; `adapter.confirm_bundle(...)` performs read-back only and never retries publication.
 - Legacy drafts finalize to the existing two-field envelope. Version-1 drafts finalize to the existing explicit-signer envelope; local draft/bundle CBOR v2 carries predecessor history and remains separate from both Registry envelopes. V1 local bundles are accepted only when their included history is sufficient to verify the transition.
 - `InMemoryReplayNonceStore` is suitable for isolated processes; applications spanning restarts must inject a durable atomic `ReplayNonceStore` implementation.
 
