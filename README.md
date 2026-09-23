@@ -6,6 +6,7 @@ Current implementation includes:
 
 - Argon2id-protected, XChaCha20-Poly1305 encrypted wallet containers.
 - Atomic container writes, exact encrypted-container export/import, password rewrapping, bounded authentication delay, and lock/inactivity handling.
+- Local signing-key rotation preparation: persist one encrypted pending successor while preserving the active key; inspect its public key, cancel it, and retain it across reopen/export/import. Rotation signing and Registry publication/finalization are not implemented.
 - CSRNG-only Ed25519 key generation and public-key derivation.
 - Canonical Identity SignedUpdate validation and protocol-specific signing.
 - One-operation, timeout-invalidated signer capabilities with concurrent-use protection.
@@ -84,6 +85,8 @@ finally:
 - `wallet.create_signer(*, timeout_seconds=60.0)` creates a one-operation signer capability.
 - `signer.sign_identity_update(canonical_update)` validates and signs one canonical Identity update, then invalidates the capability.
 - `wallet.change_password(password, confirmation)` atomically rewraps the existing wallet DEK.
+- `wallet.prepare_signing_key_rotation()` creates and durably stores one pending successor key and returns only its public key. Repeated calls return the same pending key until cancellation; the active key remains unchanged.
+- `wallet.pending_signing_public_key` returns the pending successor's public key or `None`; `wallet.cancel_signing_key_rotation()` atomically removes an unfinalized successor. No pending-key signing or Registry rotation workflow is provided.
 - `wallet.background()` and `wallet.lock()` invalidate capabilities and clear active wallet secrets.
 - `wallet.check_inactivity()` enforces the configured inactivity timeout.
 - `RegistryAdapter(transport, replay_store=None)` accepts only public owner/signer keys and a signer factory; the transport receives canonical public envelopes, an expected-state precondition, and an atomic expiry deadline, never a wallet or private key. Every non-genesis version-1 state requires the transport to retrieve its exact public predecessor history by state hash back to the signed anchor; incomplete history or chains exceeding 1,024 transitions fail closed.

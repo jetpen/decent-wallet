@@ -1,10 +1,14 @@
+import base64
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, BrokenBarrierError
 
 import pytest
 
 from decent_wallet import (
     InvalidContainer,
+    KeyGenerationError,
     PasswordPolicyError,
     StorageFailure,
     UnlockFailed,
@@ -13,6 +17,7 @@ from decent_wallet import (
     WalletLockedError,
 )
 import decent_wallet.container as container_module
+import decent_wallet.signer as signer_module
 
 
 PASSWORD = "correct horse battery staple"
@@ -330,3 +335,187 @@ def test_import_staging_unlink_failure_rolls_back_linked_destination(
     assert failed_once
     assert not destination.exists()
     assert list(tmp_path.glob(".decent-wallet-*")) == []
+
+
+def test_pending_key_rotation_persists_encrypted_successor_without_changing_active_key(
+    tmp_path: Path,
+):
+    path = tmp_path / "wallet.dw"
+    wallet = Wallet.create_with_generated_key(path, PASSWORD, PASSWORD)
+    active_public_key = wallet.public_key
+
+    active_signer = wallet.create_signer()
+    pending_public_key = wallet.prepare_signing_key_rotation()
+
+    assert pending_public_key != active_public_key
+    assert wallet.pending_signing_public_key == pending_public_key
+    assert wallet.public_key == active_public_key
+    assert not active_signer.is_active
+    assert wallet.create_signer().public_key == active_public_key
+    raw = wallet.export_container()
+    assert b"pending_private_seed" not in raw
+    assert b"pending_public_key" not in raw
+    assert base64.b64encode(pending_public_key) not in raw
+    wallet.lock()
+
+    reopened = Wallet.open(path, PASSWORD)
+    assert reopened.public_key == active_public_key
+    assert reopened.pending_signing_public_key == pending_public_key
+    reopened.lock()
+
+
+def test_pending_key_rotation_is_idempotent_until_cancelled(tmp_path: Path):
+    wallet = Wallet.create_with_generated_key(tmp_path / "wallet.dw", PASSWORD, PASSWORD)
+
+    first = wallet.prepare_signing_key_rotation()
+    second = wallet.prepare_signing_key_rotation()
+
+    assert second == first
+    assert wallet.pending_signing_public_key == first
+    wallet.lock()
+
+
+def test_cancel_pending_key_rotation_preserves_active_key_across_reopen(tmp_path: Path):
+    path = tmp_path / "wallet.dw"
+    wallet = Wallet.create_with_generated_key(path, PASSWORD, PASSWORD)
+    active_public_key = wallet.public_key
+    pending_public_key = wallet.prepare_signing_key_rotation()
+    assert pending_public_key != active_public_key
+    wallet.lock()
+
+    reopened = Wallet.open(path, PASSWORD)
+    reopened.cancel_signing_key_rotation()
+    assert reopened.pending_signing_public_key is None
+    assert reopened.public_key == active_public_key
+    reopened.lock()
+
+    reopened = Wallet.open(path, PASSWORD)
+    assert reopened.pending_signing_public_key is None
+    assert reopened.public_key == active_public_key
+    reopened.lock()
+
+
+def test_failed_pending_key_rotation_write_leaves_no_staged_key(tmp_path: Path, monkeypatch):
+    path = tmp_path / "wallet.dw"
+    wallet = Wallet.create_with_generated_key(path, PASSWORD, PASSWORD)
+    active_public_key = wallet.public_key
+    before = path.read_bytes()
+
+    def fail(_path, _data, *, replace=True):
+        raise StorageFailure()
+
+    monkeypatch.setattr(container_module, "_atomic_write", fail)
+    with pytest.raises(StorageFailure):
+        wallet.prepare_signing_key_rotation()
+
+    assert path.read_bytes() == before
+    assert wallet.pending_signing_public_key is None
+    assert wallet.public_key == active_public_key
+    wallet.lock()
+
+
+def test_public_payload_apis_reject_internal_rotation_material(tmp_path: Path):
+    with pytest.raises(InvalidContainer):
+        Wallet.create(
+            tmp_path / "create.dw",
+            PASSWORD,
+            PASSWORD,
+            {"pending_private_seed": bytes(32)},
+        )
+
+    wallet = Wallet.create_with_generated_key(tmp_path / "wallet.dw", PASSWORD, PASSWORD)
+    with pytest.raises(InvalidContainer):
+        wallet.update_payload({"pending_public_key": bytes(32)})
+    with pytest.raises(InvalidContainer):
+        wallet.update_payload({"pending_private_seed": bytes(32)})
+    wallet.lock()
+
+
+def test_payload_update_and_import_preserve_pending_key_rotation(tmp_path: Path):
+    source = tmp_path / "source.dw"
+    destination = tmp_path / "imported.dw"
+    wallet = Wallet.create_with_generated_key(source, PASSWORD, PASSWORD)
+    active_public_key = wallet.public_key
+    pending_public_key = wallet.prepare_signing_key_rotation()
+
+    wallet.update_payload({"owner": "alice"})
+    exported = wallet.export_container()
+    wallet.lock()
+
+    imported = Wallet.import_container(destination, exported, PASSWORD)
+    assert destination.read_bytes() == exported
+    assert imported.public_key == active_public_key
+    assert imported.pending_signing_public_key == pending_public_key
+    imported.lock()
+
+
+def test_failed_cancel_write_keeps_pending_key_rotation(tmp_path: Path, monkeypatch):
+    path = tmp_path / "wallet.dw"
+    wallet = Wallet.create_with_generated_key(path, PASSWORD, PASSWORD)
+    active_public_key = wallet.public_key
+    pending_public_key = wallet.prepare_signing_key_rotation()
+    before = path.read_bytes()
+
+    def fail(_path, _data, *, replace=True):
+        raise StorageFailure()
+
+    monkeypatch.setattr(container_module, "_atomic_write", fail)
+    with pytest.raises(StorageFailure):
+        wallet.cancel_signing_key_rotation()
+
+    assert path.read_bytes() == before
+    assert wallet.pending_signing_public_key == pending_public_key
+    assert wallet.public_key == active_public_key
+    wallet.lock()
+
+
+def test_pending_key_rotation_rejects_csrng_provider_replacement(
+    tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "wallet.dw"
+    wallet = Wallet.create_with_generated_key(path, PASSWORD, PASSWORD)
+    before = path.read_bytes()
+    calls: list[int] = []
+
+    def replacement(size: int) -> bytes:
+        calls.append(size)
+        return b"x" * size
+
+    monkeypatch.setattr(signer_module.secrets, "token_bytes", replacement)
+    with pytest.raises(KeyGenerationError):
+        wallet.prepare_signing_key_rotation()
+
+    assert calls == []
+    assert path.read_bytes() == before
+    assert wallet.pending_signing_public_key is None
+    wallet.lock()
+
+
+def test_concurrent_rotation_preparation_persists_one_pending_key(
+    tmp_path: Path, monkeypatch
+):
+    wallet = Wallet.create_with_generated_key(tmp_path / "wallet.dw", PASSWORD, PASSWORD)
+    generation_barrier = Barrier(2)
+    generated_seeds: list[bytearray] = []
+
+    def synchronized_seed() -> bytearray:
+        seed = bytearray(bytes([len(generated_seeds) + 1]) * 32)
+        generated_seeds.append(seed)
+        try:
+            generation_barrier.wait(timeout=1)
+        except BrokenBarrierError:
+            pass
+        return seed
+
+    monkeypatch.setattr(signer_module, "_generate_seed", synchronized_seed)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(wallet.prepare_signing_key_rotation)
+            for _ in range(2)
+        ]
+        results = [future.result(timeout=5) for future in futures]
+
+    assert len(generated_seeds) == 1
+    assert results[0] == results[1]
+    assert wallet.pending_signing_public_key == results[0]
+    wallet.lock()

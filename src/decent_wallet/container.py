@@ -17,7 +17,7 @@ import tempfile
 import time
 import weakref
 from collections.abc import Mapping
-from threading import Lock
+from threading import Lock, RLock
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +41,15 @@ _MAX_AUTH_DELAY_SECONDS = 0.5
 _AUTH_FAILURES: dict[str, int] = {}
 _AUTH_FAILURES_LOCK = Lock()
 _WALLET_SECRETS: dict[object, bytearray] = {}
-_SIGNING_FIELDS = {"private_seed", "public_key"}
+_PENDING_WALLET_SECRETS: dict[object, bytearray] = {}
+_PENDING_PRIVATE_SEED = "pending_private_seed"
+_PENDING_PUBLIC_KEY = "pending_public_key"
+_SIGNING_FIELDS = {
+    "private_seed",
+    "public_key",
+    _PENDING_PRIVATE_SEED,
+    _PENDING_PUBLIC_KEY,
+}
 
 
 class WalletError(Exception):
@@ -92,10 +100,44 @@ def _wipe(buffer: bytearray | None) -> None:
         buffer[:] = b"\x00" * len(buffer)
 
 
+def _validate_seed_public_key_pair(seed: Any, public_key: Any) -> None:
+    from .signer import _public_key_from_seed
+
+    if type(seed) is not bytes or len(seed) != _KEY_LENGTH:
+        raise InvalidContainer()
+    if type(public_key) is not bytes or len(public_key) != _KEY_LENGTH:
+        raise InvalidContainer()
+    try:
+        derived_public_key = _public_key_from_seed(seed)
+    except Exception:
+        raise InvalidContainer() from None
+    if public_key != derived_public_key:
+        raise InvalidContainer()
+
+
+def _public_key_for_secret(seed: bytearray | None, stored_public_key: Any) -> bytes:
+    from .signer import SignerUnavailable, _public_key_from_seed
+
+    if type(seed) is not bytearray or len(seed) != _KEY_LENGTH:
+        raise SignerUnavailable()
+    if type(stored_public_key) is not bytes or len(stored_public_key) != _KEY_LENGTH:
+        raise SignerUnavailable()
+    try:
+        derived_public_key = _public_key_from_seed(bytes(seed))
+    except Exception:
+        raise SignerUnavailable() from None
+    if stored_public_key != derived_public_key:
+        raise SignerUnavailable()
+    return derived_public_key
+
+
 def _finalize_wallet_secret(handle: object) -> None:
     seed = _WALLET_SECRETS.pop(handle, None)
     if seed is not None:
         _wipe(seed)
+    pending_seed = _PENDING_WALLET_SECRETS.pop(handle, None)
+    if pending_seed is not None:
+        _wipe(pending_seed)
 
 
 def _b64_encode(value: bytes) -> str:
@@ -480,6 +522,7 @@ class Wallet:
         inactivity_minutes: int,
     ) -> None:
         self._path = path
+        self._rotation_lock = RLock()
         self._dek = dek
         self._secret_handle = object()
         self._secret_finalizer = weakref.finalize(
@@ -659,22 +702,29 @@ class Wallet:
 
     def _install_secret_material(self) -> None:
         seed = self._payload.pop("private_seed", None)
-        if seed is None:
-            return
-        from .signer import _public_key_from_seed
-
+        pending_seed = self._payload.pop(_PENDING_PRIVATE_SEED, None)
         public_key = self._payload.get("public_key")
-        if type(seed) is not bytes or len(seed) != _KEY_LENGTH:
-            raise InvalidContainer()
-        if type(public_key) is not bytes or len(public_key) != _KEY_LENGTH:
-            raise InvalidContainer()
-        try:
-            derived_public_key = _public_key_from_seed(seed)
-        except Exception:
-            raise InvalidContainer() from None
-        if public_key != derived_public_key:
-            raise InvalidContainer()
+        pending_public_key = self._payload.get(_PENDING_PUBLIC_KEY)
+
+        if seed is None:
+            if public_key is not None or pending_seed is not None or pending_public_key is not None:
+                raise InvalidContainer()
+            return
+        _validate_seed_public_key_pair(seed, public_key)
+
+        if pending_seed is None:
+            if pending_public_key is not None:
+                raise InvalidContainer()
+            pending_secret = None
+        else:
+            _validate_seed_public_key_pair(pending_seed, pending_public_key)
+            if pending_public_key == public_key:
+                raise InvalidContainer()
+            pending_secret = bytearray(pending_seed)
+
         _WALLET_SECRETS[self._secret_handle] = bytearray(seed)
+        if pending_secret is not None:
+            _PENDING_WALLET_SECRETS[self._secret_handle] = pending_secret
 
     @property
     def is_unlocked(self) -> bool:
@@ -682,22 +732,10 @@ class Wallet:
 
     @property
     def public_key(self) -> bytes:
-        from .signer import SignerUnavailable, _public_key_from_seed
-
         self._touch()
         seed = _WALLET_SECRETS.get(self._secret_handle)
         stored_public_key = self._payload.get("public_key")
-        if seed is None or type(stored_public_key) is not bytes:
-            raise SignerUnavailable()
-        if len(seed) != _KEY_LENGTH or len(stored_public_key) != _KEY_LENGTH:
-            raise SignerUnavailable()
-        try:
-            derived_public_key = _public_key_from_seed(bytes(seed))
-        except Exception:
-            raise SignerUnavailable() from None
-        if stored_public_key != derived_public_key:
-            raise SignerUnavailable()
-        return derived_public_key
+        return _public_key_for_secret(seed, stored_public_key)
 
     def create_signer(self, *, timeout_seconds: float = 60.0) -> Any:
         from .signer import SignerUnavailable, _create_capability_from_seed
@@ -724,18 +762,116 @@ class Wallet:
         return capability
 
     @property
+    def pending_signing_public_key(self) -> bytes | None:
+        """Return the staged successor's public key, if one is persisted."""
+        from .signer import SignerUnavailable
+
+        with self._rotation_lock:
+            self._touch()
+            seed = _PENDING_WALLET_SECRETS.get(self._secret_handle)
+            stored_public_key = self._payload.get(_PENDING_PUBLIC_KEY)
+            if seed is None:
+                if stored_public_key is not None:
+                    raise SignerUnavailable()
+                return None
+            return _public_key_for_secret(seed, stored_public_key)
+
+    def prepare_signing_key_rotation(self) -> bytes:
+        """Persist one encrypted successor while leaving the active key unchanged."""
+        with self._rotation_lock:
+            return self._prepare_signing_key_rotation()
+
+    def _prepare_signing_key_rotation(self) -> bytes:
+        from .signer import (
+            KeyGenerationError,
+            SignerUnavailable,
+            _generate_seed,
+            _public_key_from_seed,
+        )
+
+        self._touch()
+        existing_pending_seed = _PENDING_WALLET_SECRETS.get(self._secret_handle)
+        if existing_pending_seed is not None:
+            pending_public_key = self.pending_signing_public_key
+            if pending_public_key is None:
+                raise SignerUnavailable()
+            return pending_public_key
+
+        active_seed = _WALLET_SECRETS.get(self._secret_handle)
+        active_public_key = self._payload.get("public_key")
+        if active_seed is None or type(active_public_key) is not bytes:
+            raise SignerUnavailable()
+        pending_seed = _generate_seed()
+        persisted = False
+        try:
+            try:
+                pending_public_key = _public_key_from_seed(bytes(pending_seed))
+            except Exception:
+                raise KeyGenerationError() from None
+            if pending_public_key == active_public_key:
+                raise KeyGenerationError()
+
+            updated_payload = dict(self._payload)
+            updated_payload[_PENDING_PUBLIC_KEY] = pending_public_key
+            envelope = self._build_envelope(
+                updated_payload,
+                pending_seed_override=pending_seed,
+            )
+            _atomic_write(self._path, _serialize(envelope))
+            persisted = True
+            _PENDING_WALLET_SECRETS[self._secret_handle] = pending_seed
+            self._payload = updated_payload
+            self._envelope = envelope
+            self._invalidate_capabilities()
+            return pending_public_key
+        finally:
+            if not persisted:
+                _wipe(pending_seed)
+
+    def cancel_signing_key_rotation(self) -> None:
+        """Remove an unfinalized successor without changing the active key."""
+        with self._rotation_lock:
+            self._cancel_signing_key_rotation()
+
+    def _cancel_signing_key_rotation(self) -> None:
+        self._touch()
+        pending_seed = _PENDING_WALLET_SECRETS.get(self._secret_handle)
+        if pending_seed is None:
+            if self._payload.get(_PENDING_PUBLIC_KEY) is not None:
+                from .signer import SignerUnavailable
+
+                raise SignerUnavailable()
+            return
+
+        updated_payload = dict(self._payload)
+        updated_payload.pop(_PENDING_PUBLIC_KEY, None)
+        envelope = self._build_envelope(updated_payload, include_pending=False)
+        _atomic_write(self._path, _serialize(envelope))
+        self._payload = updated_payload
+        self._envelope = envelope
+        _PENDING_WALLET_SECRETS.pop(self._secret_handle, None)
+        _wipe(pending_seed)
+        self._invalidate_capabilities()
+
+    @property
     def last_activity(self) -> float:
         self._require_unlocked()
         return self._last_activity
 
     def update_payload(self, payload: Mapping[str, Any]) -> None:
         """Replace wallet-local content and atomically persist it."""
+        with self._rotation_lock:
+            self._update_payload(payload)
+
+    def _update_payload(self, payload: Mapping[str, Any]) -> None:
         self._touch()
         if not isinstance(payload, Mapping) or _SIGNING_FIELDS.intersection(payload):
             raise InvalidContainer()
         updated_payload = dict(payload)
         if self._secret_handle in _WALLET_SECRETS:
             updated_payload["public_key"] = self._payload["public_key"]
+        if self._secret_handle in _PENDING_WALLET_SECRETS:
+            updated_payload[_PENDING_PUBLIC_KEY] = self._payload[_PENDING_PUBLIC_KEY]
         envelope = self._build_envelope(updated_payload)
         _atomic_write(self._path, _serialize(envelope))
         self._payload = updated_payload
@@ -744,6 +880,10 @@ class Wallet:
 
     def export_container(self) -> bytes:
         """Return the exact encrypted container bytes for explicit transfer."""
+        with self._rotation_lock:
+            return self._export_container()
+
+    def _export_container(self) -> bytes:
         self._touch()
         raw = _read(self._path)
         envelope = _parse_container(raw)
@@ -753,6 +893,10 @@ class Wallet:
 
     def change_password(self, password: str, confirmation: str) -> None:
         """Rewrap the DEK without re-encrypting the authenticated payload."""
+        with self._rotation_lock:
+            self._change_password(password, confirmation)
+
+    def _change_password(self, password: str, confirmation: str) -> None:
         self._touch()
         _validate_password(password, confirmation)
         salt = secrets.token_bytes(_SALT_LENGTH)
@@ -786,11 +930,18 @@ class Wallet:
         self._capabilities.clear()
 
     def lock(self) -> None:
+        with self._rotation_lock:
+            self._lock()
+
+    def _lock(self) -> None:
         self._invalidate_capabilities()
         self._secret_finalizer.detach()
         seed = _WALLET_SECRETS.pop(self._secret_handle, None)
         if seed is not None:
             _wipe(seed)
+        pending_seed = _PENDING_WALLET_SECRETS.pop(self._secret_handle, None)
+        if pending_seed is not None:
+            _wipe(pending_seed)
         _wipe(self._dek)
         self._dek = None
         self._payload = {}
@@ -821,7 +972,13 @@ class Wallet:
         if self._dek is None:
             raise WalletLockedError()
 
-    def _build_envelope(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _build_envelope(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        pending_seed_override: bytearray | None = None,
+        include_pending: bool = True,
+    ) -> dict[str, Any]:
         self._require_unlocked()
         salt = _b64_decode(self._envelope["kdf"]["salt"], _SALT_LENGTH)
         kdf = _kdf_header(salt)
@@ -834,6 +991,21 @@ class Wallet:
         if seed is not None:
             payload_for_storage["private_seed"] = bytes(seed)
             payload_for_storage["public_key"] = self._payload["public_key"]
+        if include_pending:
+            pending_seed = (
+                pending_seed_override
+                if pending_seed_override is not None
+                else _PENDING_WALLET_SECRETS.get(self._secret_handle)
+            )
+            if pending_seed is not None:
+                pending_public_key = payload_for_storage.get(_PENDING_PUBLIC_KEY)
+                if type(pending_public_key) is not bytes or len(pending_public_key) != _KEY_LENGTH:
+                    raise InvalidContainer()
+                payload_for_storage[_PENDING_PRIVATE_SEED] = bytes(pending_seed)
+                payload_for_storage[_PENDING_PUBLIC_KEY] = pending_public_key
+        else:
+            payload_for_storage.pop(_PENDING_PRIVATE_SEED, None)
+            payload_for_storage.pop(_PENDING_PUBLIC_KEY, None)
         payload_info, ciphertext, tag = _make_payload(bytes(dek), payload_for_storage)
         return {
             "format": _FORMAT,

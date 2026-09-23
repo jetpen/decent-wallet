@@ -1,6 +1,6 @@
 # Decent Wallet Implementation Specification
 
-Status: implementation-ready MVP design with completed storage, signing, Identity adapter, and multisignature slices
+Status: implementation-ready MVP design with completed storage, signing, Identity adapter, multisignature, and partial local key-rotation preparation slices
 
 This document consolidates the accepted decisions from the wallet implementation wayfinder map, [Wallet implementation specification and security boundary](https://github.com/jetpen/decent-wallet/issues/1). It remains the contract for behavior that is not yet implemented; the repository now contains code-backed encrypted storage, CSRNG signing, a public-only Identity adapter, and the local public-bundle multisignature workflow for the completed slices.
 
@@ -22,11 +22,11 @@ This specification covers the wallet MVP across Android, iPhone, and an optional
 
 ### Proposed MVP design
 
-The remaining migration, signing-key rotation, platform-adapter/conformance, and security-acceptance requirements in this document are proposed implementation requirements derived from the accepted map decisions. Exact encrypted-container export/import is implemented in the Python core as a partial slice of Issue #18; it does not complete the broader portability, migration, or rotation scope.
+The remaining migration, signing-key rotation, platform-adapter/conformance, and security-acceptance requirements in this document are proposed implementation requirements derived from the accepted map decisions. Exact encrypted-container export/import and local pending-key preparation are implemented in the Python core as partial slices of Issue #18; they do not complete the broader portability, migration, or rotation scope.
 
 ### Researched but unimplemented
 
-The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR, signed-envelope, sequence, and finalized-publication contracts described in `docs/research/issue-3-csrng-signing-boundary.md`. Interactive consent UI, platform adapters, Registry/DHT transport implementations, key rotation, and format migration remain unimplemented in this repository.
+The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR, signed-envelope, sequence, and finalized-publication contracts described in `docs/research/issue-3-csrng-signing-boundary.md`. Interactive consent UI, platform adapters, Registry/DHT transport implementations, rotation publication/finalization, and format migration remain unimplemented in this repository.
 
 ### Implemented/code-backed
 
@@ -34,6 +34,7 @@ The repository currently provides:
 
 - Argon2id and XChaCha20-Poly1305 encrypted wallet containers with atomic persistence, password rewrapping, and lifecycle invalidation;
 - exact encrypted-container export/import in the Python core: export returns the existing bytes from an unlocked wallet; import authenticates and atomically writes the unchanged artifact only to an absent destination, without touching Registry state (Issue #18 partial);
+- local signing-key rotation preparation in the Python core: one CSRNG-generated successor seed is encrypted with the wallet container before its public key is returned; the active key remains unchanged, preparation is idempotent while a successor is pending, cancellation removes only the pending successor, and pending state survives reopen/export/import. No pending-key signer, Registry publication, or finalization is implemented (Issue #18 partial);
 - CSRNG-only Ed25519 generation and protocol-specific, one-operation signer capabilities;
 - canonical Identity SignedUpdate validation and a public-only Identity adapter with immutable consent transcripts, atomic replay-nonce consumption, expiry checks, stale-state conditional writes, detached threshold proofs, and exact-envelope read-back confirmation;
 - immutable public drafts and local CBOR proof bundles for independent legacy and version-1 signing, strict proof merge/threshold validation, finalization to the established envelope formats, conditional complete-envelope publication, and exact read-back confirmation. Bundle encoding is not a Registry/DHT wire format.
@@ -170,6 +171,8 @@ An ordinary password change preserves the existing wallet DEK and encrypted payl
 
 Signing-key rotation preserves the existing Identity, raw owner-name bytes, DHT lookup key, and state lineage. The current owner key, or the current version-1 signer threshold, authorizes the successor transition. New-key proof-of-possession is local-only.
 
+The Python core implements only local preparation: `Wallet.prepare_signing_key_rotation()` creates and atomically persists one encrypted pending successor while preserving the active signing key, `wallet.pending_signing_public_key` exposes only its public key, and `wallet.cancel_signing_key_rotation()` removes an unfinalized successor. A repeated preparation returns the existing pending public key. The wallet does not yet provide a pending-key signer or a Registry rotation/publication/finalization workflow; these operations do not complete Issue #18.
+
 The local state machine is:
 
 1. generate a successor through the approved CSRNG boundary;
@@ -198,7 +201,7 @@ Backup and portability use explicit export/import of the exact encrypted contain
 - no merge, overwrite, Registry publication, or Identity rollback occurs;
 - the artifact is never disclosed to logs or the clipboard, intentionally persisted in general-purpose temporary storage, or placed in automatic synchronization. Atomic persistence uses a restrictive same-directory staging file for encrypted bytes. It is removed on success; failure paths attempt cleanup, though an unrecoverable filesystem unlink failure can leave an encrypted staging artifact.
 
-The Python core exposes `Wallet.export_container() -> bytes` for exact bytes from an unlocked wallet and `Wallet.import_container(path, data, password, *, inactivity_minutes=5)` to authenticate and atomically create an imported wallet only at an absent destination. Import preserves the provided bytes and returns the new wallet unlocked. This implements the local portable-container core only; format migration, signing-key rotation, native platform adapters, and cross-platform conformance remain unimplemented under Issue #18.
+The Python core exposes `Wallet.export_container() -> bytes` for exact bytes from an unlocked wallet and `Wallet.import_container(path, data, password, *, inactivity_minutes=5)` to authenticate and atomically create an imported wallet only at an absent destination. Import preserves the provided bytes and returns the new wallet unlocked. Pending rotation state is encrypted within the container and is preserved by exact export/import. This implements the local portable-container and pending-key-preparation cores only; format migration, rotation signing/publication/finalization, native platform adapters, and cross-platform conformance remain unimplemented under Issue #18.
 
 Android, iPhone, and optional desktop/Podman implementations use the same portable container and cryptographic contract. OS keystores, desktop keyrings, and hardware facilities are optional defense-in-depth adapters and cannot be the only recovery path or alter the portable format. Hardware-backed non-exportable signing is deferred.
 
