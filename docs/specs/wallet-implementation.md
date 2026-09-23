@@ -1,8 +1,8 @@
 # Decent Wallet Implementation Specification
 
-Status: implementation-ready proposed MVP design
+Status: implementation-ready MVP design with completed storage, signing, Identity adapter, and multisignature slices
 
-This document consolidates the accepted decisions from the wallet implementation wayfinder map, [Wallet implementation specification and security boundary](https://github.com/jetpen/decent-wallet/issues/1). It remains the contract for behavior that is not yet implemented; the repository now contains code-backed encrypted storage, CSRNG signing, and a public-only Identity adapter for the completed slices.
+This document consolidates the accepted decisions from the wallet implementation wayfinder map, [Wallet implementation specification and security boundary](https://github.com/jetpen/decent-wallet/issues/1). It remains the contract for behavior that is not yet implemented; the repository now contains code-backed encrypted storage, CSRNG signing, a public-only Identity adapter, and the local public-bundle multisignature workflow for the completed slices.
 
 ## 1. Destination and scope
 
@@ -26,7 +26,7 @@ The encrypted container, lifecycle, signer boundary, consent boundary, portabili
 
 ### Researched but unimplemented
 
-The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR, signed-envelope, sequence, and finalized-publication contracts described in `docs/research/issue-3-csrng-signing-boundary.md`. Interactive consent UI, multisignature orchestration, platform adapters, Registry/DHT transport implementations, key rotation, and format migration remain unimplemented in this repository.
+The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR, signed-envelope, sequence, and finalized-publication contracts described in `docs/research/issue-3-csrng-signing-boundary.md`. Interactive consent UI, platform adapters, Registry/DHT transport implementations, key rotation, and format migration remain unimplemented in this repository.
 
 ### Implemented/code-backed
 
@@ -34,7 +34,8 @@ The repository currently provides:
 
 - Argon2id and XChaCha20-Poly1305 encrypted wallet containers with atomic persistence and lifecycle invalidation;
 - CSRNG-only Ed25519 generation and protocol-specific, one-operation signer capabilities;
-- canonical Identity SignedUpdate validation and a public-only Identity adapter with immutable consent transcripts, atomic replay-nonce consumption, expiry checks, stale-state conditional writes, detached threshold proofs, and exact-envelope read-back confirmation.
+- canonical Identity SignedUpdate validation and a public-only Identity adapter with immutable consent transcripts, atomic replay-nonce consumption, expiry checks, stale-state conditional writes, detached threshold proofs, and exact-envelope read-back confirmation;
+- immutable public drafts and local CBOR proof bundles for independent legacy and version-1 signing, strict proof merge/threshold validation, finalization to the established envelope formats, conditional complete-envelope publication, and exact read-back confirmation. Bundle encoding is not a Registry/DHT wire format.
 
 ### Long-term vision
 
@@ -115,11 +116,11 @@ The wallet reuses the established Identity/Registry wire contract:
 
 The wallet obtains or verifies the accepted Registry state before drafting. It derives the next sequence and, for version-1 transitions, the predecessor state together. It then obtains consent over immutable canonical bytes and signs only those exact bytes. Stale state, changed bytes, or changed authorization metadata causes rejection; the wallet never auto-rebases or silently re-signs.
 
-The network-facing adapter receives only public material and a complete signed envelope or detached public proof. Registry remains responsible for canonical validation, signature validation, owner binding, sequence monotonicity, transition rules, and publication.
+The network-facing adapter receives only public material and a complete signed envelope or detached public proof. Registry remains responsible for canonical validation, signature validation, owner binding, sequence monotonicity, transition rules, and publication; the wallet adapter independently verifies the retained version-1 predecessor chain before treating a fetched state as current.
 
 ## 7. Consent and authentication-neutral requests
 
-A signing or disclosure request is an immutable canonical transcript. It binds the applicable authenticated origin or domain, network/environment, contract or operation identifier, payload or artifact hash, purpose, requested capability, expiry, replay-protection data, and Identity sequence/generation when applicable.
+A signing or disclosure request is an immutable canonical transcript. It binds the applicable authenticated origin or domain, network/environment, contract or operation identifier, payload or artifact hash, purpose, requested capability, expiry, replay-protection data, and Identity sequence/generation when applicable. Identity consent callbacks also receive the exact non-secret canonical review payload bytes; the adapter verifies that their hash equals the transcript payload hash so the host UI can render the same bytes that are signed or published.
 
 Consent is:
 
@@ -151,7 +152,10 @@ The workflow is:
 5. merge and validate proofs without importing private material;
 6. require the configured threshold and operation-specific rules;
 7. finalize one complete publishable envelope;
-8. submit only the finalized envelope through the Registry adapter.
+8. obtain fresh purpose-bound consent for the final publication, with an atomic deadline and replay nonce;
+9. submit only the finalized envelope through the Registry adapter.
+
+The public implementation uses `RegistryAdapter.create_draft()` and `sign_draft()`, immutable `IdentityDraft`, `IdentityProof`, and `IdentityBundle` values, `IdentityBundle.merge()` / `finalize()`, and `RegistryAdapter.publish_bundle()` / `confirm_bundle()`. Local draft/bundle CBOR v2 carries predecessor history and is separate from the unchanged legacy and version-1 Registry envelopes; v1 local bundles are accepted only when their history is sufficient to verify the transition. Exchanged proof metadata does not carry or control the final publication deadline. Publication compares the draft's predecessor state, consumes a fresh consent nonce, supplies an expected-state hash and deadline to the transport, and confirms the exact finalized envelope by independent read-back. Every non-genesis version-1 state requires exact predecessor-envelope lookup by state hash back to its signed anchor; missing or mismatched history is rejected. History walks are capped at 1,024 version-1 transitions and fail closed beyond that bound.
 
 Partial, duplicate, out-of-order, revoked, conflicting, wrong-signer, wrong-bytes, and below-threshold proofs remain non-publishable. A disconnect or timeout after dispatch is `unknown` until independent read-back verifies the exact accepted target.
 
@@ -226,10 +230,10 @@ Identity and Registry own public-record validation, sequence/state-transition va
 
 Implementation should proceed as vertical slices, each preserving the security invariants:
 
-1. encrypted container creation, unlock, lock, atomic persistence, and tamper rejection;
-2. CSRNG-only Ed25519 generation and non-exporting signer capability;
-3. canonical Identity request construction, consent, sequence validation, and finalized-envelope adapter;
-4. local multisignature draft, proof, merge, finalize, and publication rejection paths;
+1. encrypted container creation, unlock, lock, atomic persistence, and tamper rejection (implemented, issue #14);
+2. CSRNG-only Ed25519 generation and non-exporting signer capability (implemented, issue #15);
+3. canonical Identity request construction, consent, sequence validation, and finalized-envelope adapter (implemented, issue #16);
+4. local multisignature draft, proof, merge, finalize, and publication rejection paths (implemented, issue #17);
 5. backup/import, portability, migration, password rewrap, and rotation state machines;
 6. cross-platform conformance and the complete security acceptance matrix.
 
