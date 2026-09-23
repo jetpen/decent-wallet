@@ -206,6 +206,7 @@ def test_import_container_preserves_exact_ciphertext_and_signing_identity(tmp_pa
 
     assert destination.read_bytes() == original_bytes
     assert source.read_bytes() == original_bytes
+    assert list(tmp_path.glob(".decent-wallet-*")) == []
     assert imported.is_unlocked
     assert imported.public_key == original_public_key
     signer = imported.create_signer()
@@ -299,5 +300,33 @@ def test_import_directory_sync_failure_removes_new_container_and_temp_file(
     with pytest.raises(StorageFailure):
         Wallet.import_container(destination, container, PASSWORD)
 
+    assert not destination.exists()
+    assert list(tmp_path.glob(".decent-wallet-*")) == []
+
+
+def test_import_staging_unlink_failure_rolls_back_linked_destination(
+    tmp_path: Path, monkeypatch
+):
+    source = tmp_path / "source.dw"
+    destination = tmp_path / "imported.dw"
+    original = Wallet.create(source, PASSWORD, PASSWORD, {"owner": "alice"})
+    container = original.export_container()
+    original.lock()
+
+    real_unlink = Path.unlink
+    failed_once = False
+
+    def fail_once_for_staging(path, *args, **kwargs):
+        nonlocal failed_once
+        if path.name.startswith(".decent-wallet-") and not failed_once:
+            failed_once = True
+            raise OSError("simulated staging unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_once_for_staging)
+    with pytest.raises(StorageFailure):
+        Wallet.import_container(destination, container, PASSWORD)
+
+    assert failed_once
     assert not destination.exists()
     assert list(tmp_path.glob(".decent-wallet-*")) == []

@@ -196,7 +196,7 @@ Backup and portability use explicit export/import of the exact encrypted contain
 - import is accepted only by a new or uninitialized wallet;
 - import requires the owner password and verifies format, version, integrity, and compatibility;
 - no merge, overwrite, Registry publication, or Identity rollback occurs;
-- the artifact is never placed in logs, the clipboard, temporary files, or automatic synchronization.
+- the artifact is never disclosed to logs or the clipboard, intentionally persisted in general-purpose temporary storage, or placed in automatic synchronization. Atomic persistence uses a restrictive same-directory staging file for encrypted bytes. It is removed on success; failure paths attempt cleanup, though an unrecoverable filesystem unlink failure can leave an encrypted staging artifact.
 
 The Python core exposes `Wallet.export_container() -> bytes` for exact bytes from an unlocked wallet and `Wallet.import_container(path, data, password, *, inactivity_minutes=5)` to authenticate and atomically create an imported wallet only at an absent destination. Import preserves the provided bytes and returns the new wallet unlocked. This implements the local portable-container core only; format migration, signing-key rotation, native platform adapters, and cross-platform conformance remain unimplemented under Issue #18.
 

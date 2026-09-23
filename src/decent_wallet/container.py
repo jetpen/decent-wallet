@@ -299,6 +299,7 @@ def _stage_file(path: Path, data: bytes, *, replace: bool) -> None:
     directory = path.parent
     temporary_path: Path | None = None
     fd: int | None = None
+    linked_target = False
     try:
         fd, name = tempfile.mkstemp(prefix=".decent-wallet-", dir=directory)
         temporary_path = Path(name)
@@ -313,8 +314,10 @@ def _stage_file(path: Path, data: bytes, *, replace: bool) -> None:
             temporary_path = None
         else:
             os.link(temporary_path, path)
+            linked_target = True
             temporary_path.unlink()
             temporary_path = None
+            linked_target = False
     finally:
         if fd is not None:
             try:
@@ -322,6 +325,13 @@ def _stage_file(path: Path, data: bytes, *, replace: bool) -> None:
             except OSError:
                 pass
         if temporary_path is not None:
+            if linked_target:
+                # Roll back only our own no-replace link, not a pre-existing target.
+                try:
+                    if temporary_path.samefile(path):
+                        path.unlink()
+                except OSError:
+                    pass
             try:
                 temporary_path.unlink()
             except OSError:
