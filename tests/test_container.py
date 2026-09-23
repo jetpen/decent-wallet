@@ -37,7 +37,7 @@ def test_initialize_unlock_and_secret_material_stays_encrypted(tmp_path: Path):
     assert b"secret-seed" not in raw
     assert b"private_seed" not in raw
     envelope = json.loads(raw)
-    assert envelope["version"] == 1
+    assert envelope["version"] == 2
     assert envelope["kdf"] == {
         "algorithm": "argon2id",
         "memory_kib": 65536,
@@ -81,10 +81,11 @@ def test_malformed_and_unsupported_containers_are_distinguished(tmp_path: Path):
     valid_path = tmp_path / "valid.dw"
     Wallet.create(valid_path, PASSWORD, PASSWORD, {})
     envelope = json.loads(valid_path.read_text())
-    envelope["version"] = 99
-    valid_path.write_text(json.dumps(envelope, separators=(",", ":")))
-    with pytest.raises(UnsupportedFormat):
-        Wallet.open(valid_path, PASSWORD)
+    for version in (1, 99):
+        envelope["version"] = version
+        valid_path.write_text(json.dumps(envelope, separators=(",", ":")))
+        with pytest.raises(UnsupportedFormat):
+            Wallet.open(valid_path, PASSWORD)
 
 
 def test_lock_background_and_inactivity_invalidate_session(tmp_path: Path):
@@ -169,6 +170,18 @@ def test_password_policy_and_confirmation(tmp_path: Path):
         Wallet.create(path, "too short", "too short", {})
     with pytest.raises(PasswordPolicyError):
         Wallet.create(path, PASSWORD, NEW_PASSWORD, {})
+
+
+def test_generic_wallet_payload_cannot_inject_dispatch_intent(tmp_path: Path):
+    path = tmp_path / "wallet.dw"
+    with pytest.raises(InvalidContainer):
+        Wallet.create(
+            path,
+            PASSWORD,
+            PASSWORD,
+            {"rotation_dispatch_intent": {}},
+        )
+    assert not path.exists()
 
 
 def test_initialization_does_not_overwrite_an_existing_container(tmp_path: Path):
@@ -264,7 +277,7 @@ def test_import_container_rejects_unsupported_version_without_creating_target(tm
     original = Wallet.create(source, PASSWORD, PASSWORD, {"owner": "alice"})
     envelope = json.loads(original.export_container())
     original.lock()
-    envelope["version"] = 2
+    envelope["version"] = 1
 
     with pytest.raises(UnsupportedFormat):
         Wallet.import_container(

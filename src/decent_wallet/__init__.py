@@ -2,6 +2,8 @@
 
 from .container import (
     CURRENT_FORMAT_VERSION,
+    RotationDispatchIntent,
+    RotationInProgress,
     Wallet,
     WalletError,
     WalletLockedError,
@@ -44,6 +46,8 @@ from .identity import (
 
 __all__ = [
     "CURRENT_FORMAT_VERSION",
+    "RotationDispatchIntent",
+    "RotationInProgress",
     "Wallet",
     "WalletError",
     "WalletLockedError",
