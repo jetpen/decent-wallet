@@ -610,6 +610,43 @@ class Wallet:
         _clear_unlock_failures(target)
         return cls(target, dek, payload, envelope, inactivity_minutes)
 
+    @classmethod
+    def import_container(
+        cls,
+        path: str | os.PathLike[str],
+        data: bytes,
+        password: str,
+        *,
+        inactivity_minutes: int = 5,
+    ) -> "Wallet":
+        """Authenticate and atomically import exact encrypted-container bytes."""
+        _validate_password(password)
+        _validate_inactivity(inactivity_minutes)
+        if type(data) is not bytes:
+            raise InvalidContainer()
+        target = Path(path)
+        envelope = _parse_container(data)
+        wallet: Wallet | None = None
+        dek: bytearray | None = None
+        try:
+            try:
+                dek, payload = _unlock_envelope(envelope, password)
+            except UnlockFailed:
+                _record_unlock_failure(target)
+                raise
+            _clear_unlock_failures(target)
+            wallet = cls(target, dek, payload, envelope, inactivity_minutes)
+            _atomic_write(target, data, replace=False)
+            return wallet
+        except Exception as error:
+            if wallet is not None:
+                wallet.lock()
+            elif dek is not None:
+                _wipe(dek)
+            if isinstance(error, WalletError):
+                raise
+            raise StorageFailure() from None
+
     def _install_secret_material(self) -> None:
         seed = self._payload.pop("private_seed", None)
         if seed is None:
@@ -694,6 +731,15 @@ class Wallet:
         self._payload = updated_payload
         self._envelope = envelope
         self._invalidate_capabilities()
+
+    def export_container(self) -> bytes:
+        """Return the exact encrypted container bytes for explicit transfer."""
+        self._touch()
+        raw = _read(self._path)
+        envelope = _parse_container(raw)
+        if envelope != self._envelope:
+            raise InvalidContainer()
+        return raw
 
     def change_password(self, password: str, confirmation: str) -> None:
         """Rewrap the DEK without re-encrypting the authenticated payload."""
