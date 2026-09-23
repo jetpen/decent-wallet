@@ -847,8 +847,6 @@ class Wallet:
         from .identity import (
             IdentityDraft,
             InvalidIdentityRequest,
-            _decode_signed_update,
-            _parse_previous_state_chain,
         )
         from .signer import SignerUnavailable
 
@@ -868,35 +866,20 @@ class Wallet:
 
             if not isinstance(draft, IdentityDraft):
                 raise InvalidIdentityRequest()
+            derived_active = _public_key_for_secret(active_seed, active_public_key)
+            derived_pending = _public_key_for_secret(pending_seed, pending_public_key)
             try:
                 validated_draft = IdentityDraft(
                     signed_update_bytes=draft.signed_update_bytes,
                     previous_state_envelope=draft.previous_state_envelope,
                     previous_state_history=draft.previous_state_history,
                 )
-                record, payload, _sequence, authorization = _decode_signed_update(
-                    validated_draft.signed_update_bytes
-                )
-                previous = _parse_previous_state_chain(
-                    owner_name=validated_draft.owner_name,
-                    envelope=validated_draft.previous_state_envelope,
-                    history=validated_draft.previous_state_history,
+                validated_draft.validate_owner_key_rotation_binding(
+                    predecessor_owner_public_key=derived_active,
+                    successor_owner_public_key=derived_pending,
                 )
             except Exception:
                 raise InvalidIdentityRequest() from None
-
-            derived_active = _public_key_for_secret(active_seed, active_public_key)
-            derived_pending = _public_key_for_secret(pending_seed, pending_public_key)
-            if (
-                payload
-                or authorization is None
-                or authorization[3] != 5
-                or record[2] != derived_pending
-                or derived_pending == derived_active
-                or previous is None
-                or previous.owner_public_key != derived_active
-            ):
-                raise InvalidIdentityRequest()
 
             signature: bytes | None = None
             try:

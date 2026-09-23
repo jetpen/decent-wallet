@@ -327,6 +327,31 @@ class IdentityDraft:
         authorization = _decode_signed_update(self.signed_update_bytes)[3]
         return authorization
 
+    def validate_owner_key_rotation_binding(
+        self,
+        *,
+        predecessor_owner_public_key: bytes,
+        successor_owner_public_key: bytes,
+    ) -> None:
+        """Require this draft to rotate between the supplied public keys."""
+        if (
+            type(predecessor_owner_public_key) is not bytes
+            or len(predecessor_owner_public_key) != _KEY_LENGTH
+            or type(successor_owner_public_key) is not bytes
+            or len(successor_owner_public_key) != _KEY_LENGTH
+        ):
+            raise InvalidIdentityRequest()
+        authorization = self.authorization
+        previous = _draft_previous_state(self)
+        if (
+            authorization is None
+            or authorization[3] != 5
+            or previous is None
+            or previous.owner_public_key != predecessor_owner_public_key
+            or self.owner_public_key != successor_owner_public_key
+        ):
+            raise InvalidIdentityRequest()
+
     def to_cbor(self) -> bytes:
         return _canonical(
             {
