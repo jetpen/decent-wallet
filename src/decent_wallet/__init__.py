@@ -13,6 +13,7 @@ from .container import (
     InvalidContainer,
     UnsupportedFormat,
     StorageFailure,
+    StorageOutcomeUnknown,
 )
 from .signer import (
     InvalidSigningInput,
@@ -62,6 +63,7 @@ __all__ = [
     "InvalidContainer",
     "UnsupportedFormat",
     "StorageFailure",
+    "StorageOutcomeUnknown",
     "InvalidSigningInput",
     "KeyGenerationError",
     "SignerCapability",

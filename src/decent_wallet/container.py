@@ -108,6 +108,11 @@ class StorageFailure(WalletError):
     message = "wallet storage operation failed"
 
 
+class StorageOutcomeUnknown(WalletError):
+    code = "storage-outcome-unknown"
+    message = "wallet storage outcome is unknown"
+
+
 class RotationInProgress(WalletError):
     code = "rotation-in-progress"
     message = "signing-key rotation dispatch is unresolved"
@@ -384,12 +389,16 @@ def _kdf_header(salt: bytes) -> dict[str, Any]:
     }
 
 
-def _wrap_aad(kdf: dict[str, Any]) -> bytes:
-    return _canonical_json({"format": _FORMAT, "version": CURRENT_FORMAT_VERSION, "kdf": kdf})
+def _wrap_aad(
+    kdf: dict[str, Any], *, version: int = CURRENT_FORMAT_VERSION
+) -> bytes:
+    return _canonical_json({"format": _FORMAT, "version": version, "kdf": kdf})
 
 
-def _payload_aad(payload_info: dict[str, Any]) -> bytes:
-    return _canonical_json({"format": _FORMAT, "version": CURRENT_FORMAT_VERSION, "payload": payload_info})
+def _payload_aad(
+    payload_info: dict[str, Any], *, version: int = CURRENT_FORMAT_VERSION
+) -> bytes:
+    return _canonical_json({"format": _FORMAT, "version": version, "payload": payload_info})
 
 
 def _seal(key: bytes, plaintext: bytes, aad: bytes, nonce: bytes | None = None) -> tuple[dict[str, str], bytes, bytes]:
@@ -415,21 +424,32 @@ def _open(key: bytes, ciphertext: bytes, tag: bytes, info: dict[str, Any], aad: 
         raise UnlockFailed() from None
 
 
-def _make_payload(dek: bytes, payload: Mapping[str, Any]) -> tuple[dict[str, str], bytes, bytes]:
+def _make_payload(
+    dek: bytes,
+    payload: Mapping[str, Any],
+    *,
+    version: int = CURRENT_FORMAT_VERSION,
+) -> tuple[dict[str, str], bytes, bytes]:
     encoded = _canonical_json(_encode_value(dict(payload)))
     info = {"algorithm": "xchacha20-poly1305", "nonce": _b64_encode(secrets.token_bytes(_NONCE_LENGTH))}
     nonce = _b64_decode(info["nonce"], _NONCE_LENGTH)
     try:
         cipher = ChaCha20_Poly1305.new(key=dek, nonce=nonce)
-        cipher.update(_payload_aad(info))
+        cipher.update(_payload_aad(info, version=version))
         ciphertext, tag = cipher.encrypt_and_digest(encoded)
     except Exception:
         raise StorageFailure() from None
     return info, ciphertext, tag
 
 
-def _wrap_dek(kek: bytes, dek: bytes, kdf: dict[str, Any]) -> tuple[dict[str, str], bytes, bytes]:
-    return _seal(kek, dek, _wrap_aad(kdf))
+def _wrap_dek(
+    kek: bytes,
+    dek: bytes,
+    kdf: dict[str, Any],
+    *,
+    version: int = CURRENT_FORMAT_VERSION,
+) -> tuple[dict[str, str], bytes, bytes]:
+    return _seal(kek, dek, _wrap_aad(kdf, version=version))
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -440,11 +460,14 @@ def _fsync_directory(directory: Path) -> None:
         os.close(directory_fd)
 
 
-def _stage_file(path: Path, data: bytes, *, replace: bool) -> None:
+def _stage_file(
+    path: Path, data: bytes, *, replace: bool
+) -> tuple[int, int]:
     directory = path.parent
     temporary_path: Path | None = None
     fd: int | None = None
     linked_target = False
+    staged_identity: tuple[int, int] | None = None
     try:
         fd, name = tempfile.mkstemp(prefix=".decent-wallet-", dir=directory)
         temporary_path = Path(name)
@@ -454,6 +477,10 @@ def _stage_file(path: Path, data: bytes, *, replace: bool) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+            staged_stat = os.fstat(handle.fileno())
+            staged_identity = (staged_stat.st_dev, staged_stat.st_ino)
+        if staged_identity is None:
+            raise StorageFailure()
         if replace:
             os.replace(temporary_path, path)
             temporary_path = None
@@ -481,6 +508,54 @@ def _stage_file(path: Path, data: bytes, *, replace: bool) -> None:
                 temporary_path.unlink()
             except OSError:
                 pass
+    return staged_identity
+
+
+def _restore_previous_after_failed_sync(
+    path: Path,
+    previous_data: bytes | None,
+    installed_identity: tuple[int, int],
+) -> bool:
+    try:
+        installed_stat = path.lstat()
+    except FileNotFoundError:
+        if previous_data is not None:
+            return False
+    except OSError:
+        return False
+    else:
+        if (installed_stat.st_dev, installed_stat.st_ino) != installed_identity:
+            return False
+        try:
+            if previous_data is None:
+                path.unlink()
+            else:
+                _stage_file(path, previous_data, replace=True)
+        except FileNotFoundError:
+            if previous_data is not None:
+                return False
+        except (OSError, ValueError, WalletError):
+            pass
+
+    try:
+        current_data = path.read_bytes()
+    except FileNotFoundError:
+        current_data = None
+    except OSError:
+        return False
+    if current_data != previous_data:
+        return False
+    try:
+        _fsync_directory(path.parent)
+    except OSError:
+        return False
+    try:
+        current_data = path.read_bytes()
+    except FileNotFoundError:
+        current_data = None
+    except OSError:
+        return False
+    return current_data == previous_data
 
 
 def _atomic_write(path: Path, data: bytes, *, replace: bool = True) -> None:
@@ -491,22 +566,14 @@ def _atomic_write(path: Path, data: bytes, *, replace: bool = True) -> None:
         except OSError:
             raise StorageFailure() from None
     try:
-        _stage_file(path, data, replace=replace)
+        installed_identity = _stage_file(path, data, replace=replace)
         try:
             _fsync_directory(path.parent)
         except OSError:
-            # A directory fsync can fail after the rename has succeeded. Put
-            # the last valid bytes back before reporting storage failure.
-            if previous_data is not None:
-                try:
-                    _stage_file(path, previous_data, replace=True)
-                except OSError:
-                    pass
-            else:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+            if not _restore_previous_after_failed_sync(
+                path, previous_data, installed_identity
+            ):
+                raise StorageOutcomeUnknown() from None
             raise StorageFailure() from None
     except WalletError:
         raise
@@ -518,7 +585,9 @@ def _serialize(envelope: dict[str, Any]) -> bytes:
     return _canonical_json(envelope)
 
 
-def _parse_container(raw: bytes) -> dict[str, Any]:
+def _parse_container(
+    raw: bytes, *, expected_version: int = CURRENT_FORMAT_VERSION
+) -> dict[str, Any]:
     if len(raw) > _MAX_CONTAINER_BYTES:
         raise InvalidContainer()
     try:
@@ -530,7 +599,7 @@ def _parse_container(raw: bytes) -> dict[str, Any]:
     if decoded.get("format") != _FORMAT or type(decoded.get("version")) is not int:
         raise InvalidContainer()
     version = decoded["version"]
-    if version != CURRENT_FORMAT_VERSION:
+    if version != expected_version:
         raise UnsupportedFormat()
     kdf = decoded["kdf"]
     if not isinstance(kdf, dict) or set(kdf) != {"algorithm", "memory_kib", "time_cost", "parallelism", "salt"}:
@@ -564,12 +633,19 @@ def _read(path: Path) -> bytes:
     return raw
 
 
-def _decode_payload(envelope: dict[str, Any], dek: bytes) -> dict[str, Any]:
+def _decode_payload(
+    envelope: dict[str, Any],
+    dek: bytes,
+    *,
+    version: int = CURRENT_FORMAT_VERSION,
+) -> dict[str, Any]:
     payload = envelope["payload"]
     info = {"algorithm": payload["algorithm"], "nonce": payload["nonce"]}
     ciphertext = _b64_decode(payload["ciphertext"])
     tag = _b64_decode(payload["tag"], _TAG_LENGTH)
-    plaintext = bytearray(_open(dek, ciphertext, tag, info, _payload_aad(info)))
+    plaintext = bytearray(
+        _open(dek, ciphertext, tag, info, _payload_aad(info, version=version))
+    )
     try:
         try:
             decoded = json.loads(bytes(plaintext).decode("utf-8"))
@@ -583,7 +659,12 @@ def _decode_payload(envelope: dict[str, Any], dek: bytes) -> dict[str, Any]:
         _wipe(plaintext)
 
 
-def _unlock_envelope(envelope: dict[str, Any], password: str) -> tuple[bytearray, dict[str, Any]]:
+def _unlock_envelope(
+    envelope: dict[str, Any],
+    password: str,
+    *,
+    version: int = CURRENT_FORMAT_VERSION,
+) -> tuple[bytearray, dict[str, Any]]:
     salt = _b64_decode(envelope["kdf"]["salt"], _SALT_LENGTH)
     kek = _derive_kek(password, salt)
     dek: bytearray | None = None
@@ -595,18 +676,48 @@ def _unlock_envelope(envelope: dict[str, Any], password: str) -> tuple[bytearray
             _b64_decode(wrap["ciphertext"]),
             _b64_decode(wrap["tag"], _TAG_LENGTH),
             wrap_info,
-            _wrap_aad(envelope["kdf"]),
+            _wrap_aad(envelope["kdf"], version=version),
         )
         dek = bytearray(dek_bytes)
         if len(dek) != _KEY_LENGTH:
             raise UnlockFailed()
-        payload = _decode_payload(envelope, bytes(dek))
+        payload = _decode_payload(envelope, bytes(dek), version=version)
         return dek, payload
     except Exception:
         _wipe(dek)
         raise
     finally:
         _wipe(kek)
+
+
+def _build_v2_envelope(
+    password: str,
+    dek: bytes,
+    kdf: dict[str, Any],
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    salt = _b64_decode(kdf["salt"], _SALT_LENGTH)
+    kek = _derive_kek(password, salt)
+    try:
+        wrapped = _wrap_dek(bytes(kek), dek, kdf)
+    finally:
+        _wipe(kek)
+    payload_info, ciphertext, tag = _make_payload(dek, payload)
+    return {
+        "format": _FORMAT,
+        "version": CURRENT_FORMAT_VERSION,
+        "kdf": kdf,
+        "wrap": {
+            **wrapped[0],
+            "ciphertext": _b64_encode(wrapped[1]),
+            "tag": _b64_encode(wrapped[2]),
+        },
+        "payload": {
+            **payload_info,
+            "ciphertext": _b64_encode(ciphertext),
+            "tag": _b64_encode(tag),
+        },
+    }
 
 
 def _read_envelope(path: Path) -> dict[str, Any]:
@@ -681,27 +792,7 @@ class Wallet:
             dek = bytearray(secrets.token_bytes(_KEY_LENGTH))
             salt = secrets.token_bytes(_SALT_LENGTH)
             kdf = _kdf_header(salt)
-            kek = _derive_kek(password, salt)
-            try:
-                wrapped = _wrap_dek(bytes(kek), bytes(dek), kdf)
-            finally:
-                _wipe(kek)
-            payload_info, ciphertext, tag = _make_payload(bytes(dek), payload)
-            envelope = {
-                "format": _FORMAT,
-                "version": CURRENT_FORMAT_VERSION,
-                "kdf": kdf,
-                "wrap": {
-                    **wrapped[0],
-                    "ciphertext": _b64_encode(wrapped[1]),
-                    "tag": _b64_encode(wrapped[2]),
-                },
-                "payload": {
-                    **payload_info,
-                    "ciphertext": _b64_encode(ciphertext),
-                    "tag": _b64_encode(tag),
-                },
-            }
+            envelope = _build_v2_envelope(password, bytes(dek), kdf, payload)
             _atomic_write(target, _serialize(envelope), replace=False)
             created = True
             return cls(target, dek, dict(payload), envelope, inactivity_minutes)
@@ -765,6 +856,52 @@ class Wallet:
             raise
         _clear_unlock_failures(target)
         return cls(target, dek, payload, envelope, inactivity_minutes)
+
+    @classmethod
+    def migrate_container(
+        cls,
+        path: str | os.PathLike[str],
+        password: str,
+        *,
+        inactivity_minutes: int = 5,
+    ) -> "Wallet":
+        """Authenticate and migrate one version-1 container in place to v2."""
+        _validate_password(password)
+        _validate_inactivity(inactivity_minutes)
+        target = Path(path)
+        envelope = _parse_container(_read(target), expected_version=1)
+        wallet: Wallet | None = None
+        dek: bytearray | None = None
+        try:
+            try:
+                dek, payload = _unlock_envelope(envelope, password, version=1)
+            except UnlockFailed:
+                _record_unlock_failure(target)
+                raise
+            _clear_unlock_failures(target)
+            migrated_envelope = _build_v2_envelope(
+                password,
+                bytes(dek),
+                envelope["kdf"],
+                payload,
+            )
+            wallet = cls(
+                target,
+                dek,
+                payload,
+                migrated_envelope,
+                inactivity_minutes,
+            )
+            _atomic_write(target, _serialize(migrated_envelope))
+            return wallet
+        except Exception as error:
+            if wallet is not None:
+                wallet.lock()
+            elif dek is not None:
+                _wipe(dek)
+            if isinstance(error, WalletError):
+                raise
+            raise StorageFailure() from None
 
     @classmethod
     def import_container(
@@ -950,7 +1087,7 @@ class Wallet:
                 updated_payload,
                 pending_seed_override=pending_seed,
             )
-            _atomic_write(self._path, _serialize(envelope))
+            self._persist_envelope(envelope)
             persisted = True
             _PENDING_WALLET_SECRETS[self._secret_handle] = pending_seed
             self._payload = updated_payload
@@ -1083,7 +1220,7 @@ class Wallet:
                 updated_payload = dict(self._payload)
                 updated_payload[_ROTATION_DISPATCH_INTENT] = intent._to_payload()
                 envelope = self._build_envelope(updated_payload)
-                _atomic_write(self._path, _serialize(envelope))
+                self._persist_envelope(envelope)
                 self._payload = updated_payload
                 self._envelope = envelope
                 if not publication._mark_latched(intent):
@@ -1146,7 +1283,7 @@ class Wallet:
                     active_seed_override=pending_seed,
                     include_pending=False,
                 )
-                _atomic_write(self._path, _serialize(envelope))
+                self._persist_envelope(envelope)
                 _WALLET_SECRETS[self._secret_handle] = pending_seed
                 _PENDING_WALLET_SECRETS.pop(self._secret_handle, None)
                 self._payload = updated_payload
@@ -1195,7 +1332,7 @@ class Wallet:
                 updated_payload.pop(_ROTATION_DISPATCH_INTENT, None)
                 try:
                     envelope = self._build_envelope(updated_payload)
-                    _atomic_write(self._path, _serialize(envelope))
+                    self._persist_envelope(envelope)
                 except Exception:
                     rejection._release()
                     raise
@@ -1223,7 +1360,7 @@ class Wallet:
         updated_payload = dict(self._payload)
         updated_payload.pop(_PENDING_PUBLIC_KEY, None)
         envelope = self._build_envelope(updated_payload, include_pending=False)
-        _atomic_write(self._path, _serialize(envelope))
+        self._persist_envelope(envelope)
         self._payload = updated_payload
         self._envelope = envelope
         _PENDING_WALLET_SECRETS.pop(self._secret_handle, None)
@@ -1254,7 +1391,7 @@ class Wallet:
                 _ROTATION_DISPATCH_INTENT
             ]
         envelope = self._build_envelope(updated_payload)
-        _atomic_write(self._path, _serialize(envelope))
+        self._persist_envelope(envelope)
         self._payload = updated_payload
         self._envelope = envelope
         self._invalidate_capabilities()
@@ -1302,8 +1439,15 @@ class Wallet:
             },
             "payload": current_payload,
         }
-        _atomic_write(self._path, _serialize(envelope))
+        self._persist_envelope(envelope)
         self._envelope = envelope
+
+    def _persist_envelope(self, envelope: dict[str, Any]) -> None:
+        try:
+            _atomic_write(self._path, _serialize(envelope))
+        except StorageOutcomeUnknown:
+            self.lock()
+            raise
 
     def _invalidate_capabilities(self) -> None:
         for capability in tuple(self._capabilities):

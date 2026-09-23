@@ -5,8 +5,8 @@ A Python wallet library for a decentralized ecosystem. It keeps private keys wit
 Current implementation includes:
 
 - Argon2id-protected, XChaCha20-Poly1305 encrypted wallet containers.
-- Version-2 authenticated container format. Version-1 and other unsupported formats are rejected without migration, as recorded in [ADR-0002](docs/adr/0002-wallet-container-v2-dispatch-intent.md).
-- Atomic container writes, exact encrypted-container export/import, password rewrapping, bounded authentication delay, and lock/inactivity handling.
+- Version-2 authenticated container format. Version 1 is accepted only through explicit one-way migration; `Wallet.open()` and `Wallet.import_container()` remain v2-only. Other unsupported versions fail closed. See [ADR-0002](docs/adr/0002-wallet-container-v2-dispatch-intent.md) and [ADR-0003](docs/adr/0003-wallet-container-v1-to-v2-migration.md).
+- Atomic container writes, explicit authenticated v1-to-v2 migration, exact encrypted-container export/import, password rewrapping, bounded authentication delay, and lock/inactivity handling.
 - Local owner-key rotation: persist one encrypted pending successor; build and validate operation-5 drafts; locally prove possession without returning the proof signature; prepare publication consent, latch the exact envelope hash, conditionally dispatch, independently confirm via a fresh remote read, and promote the successor only from adapter-issued confirmation. Ambiguous outcomes retain both keys and the encrypted intent. This is a Python-core API over an injected transport; no production Registry transport is included, and Registry deployment compatibility is not verified.
 - CSRNG-only Ed25519 key generation and public-key derivation.
 - Canonical Identity SignedUpdate validation and protocol-specific signing.
@@ -80,6 +80,8 @@ finally:
 
 - `Wallet.create_with_generated_key(path, password, confirmation, *, inactivity_minutes=5)` creates a new encrypted wallet and generates its Ed25519 key through the approved CSRNG boundary.
 - `Wallet.open(path, password, *, inactivity_minutes=5)` opens an existing encrypted wallet.
+- `Wallet.migrate_container(path, password, *, inactivity_minutes=5)` explicitly authenticates a v1 container, atomically upgrades it in place to v2 using the same password, and returns the migrated unlocked wallet. It rejects all versions other than v1; migration never happens implicitly during open or import.
+- `StorageOutcomeUnknown` means a post-write rollback could not be verified; stop using the session and inspect/reopen the container before continuing.
 - `wallet.export_container()` returns the exact encrypted-container bytes from an unlocked wallet for explicit transfer; it does not decrypt or reserialize the artifact.
 - `Wallet.import_container(path, data, password, *, inactivity_minutes=5)` authenticates the exact container bytes and atomically creates a new file only when `path` does not already exist; it returns the imported unlocked wallet.
 - `wallet.public_key` returns the raw public key for a generated signing wallet.
