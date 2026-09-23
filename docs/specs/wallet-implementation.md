@@ -22,7 +22,7 @@ This specification covers the wallet MVP across Android, iPhone, and an optional
 
 ### Proposed MVP design
 
-The encrypted container, lifecycle, signer boundary, consent boundary, portability behavior, rotation/migration behavior, and acceptance matrix in this document are proposed implementation requirements derived from the accepted map decisions.
+The remaining migration, signing-key rotation, platform-adapter/conformance, and security-acceptance requirements in this document are proposed implementation requirements derived from the accepted map decisions. Exact encrypted-container export/import is implemented in the Python core as a partial slice of Issue #18; it does not complete the broader portability, migration, or rotation scope.
 
 ### Researched but unimplemented
 
@@ -32,7 +32,8 @@ The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR
 
 The repository currently provides:
 
-- Argon2id and XChaCha20-Poly1305 encrypted wallet containers with atomic persistence and lifecycle invalidation;
+- Argon2id and XChaCha20-Poly1305 encrypted wallet containers with atomic persistence, password rewrapping, and lifecycle invalidation;
+- exact encrypted-container export/import in the Python core: export returns the existing bytes from an unlocked wallet; import authenticates and atomically writes the unchanged artifact only to an absent destination, without touching Registry state (Issue #18 partial);
 - CSRNG-only Ed25519 generation and protocol-specific, one-operation signer capabilities;
 - canonical Identity SignedUpdate validation and a public-only Identity adapter with immutable consent transcripts, atomic replay-nonce consumption, expiry checks, stale-state conditional writes, detached threshold proofs, and exact-envelope read-back confirmation;
 - immutable public drafts and local CBOR proof bundles for independent legacy and version-1 signing, strict proof merge/threshold validation, finalization to the established envelope formats, conditional complete-envelope publication, and exact read-back confirmation. Bundle encoding is not a Registry/DHT wire format.
@@ -195,7 +196,9 @@ Backup and portability use explicit export/import of the exact encrypted contain
 - import is accepted only by a new or uninitialized wallet;
 - import requires the owner password and verifies format, version, integrity, and compatibility;
 - no merge, overwrite, Registry publication, or Identity rollback occurs;
-- the artifact is never placed in logs, the clipboard, temporary files, or automatic synchronization.
+- the artifact is never disclosed to logs or the clipboard, intentionally persisted in general-purpose temporary storage, or placed in automatic synchronization. Atomic persistence uses a restrictive same-directory staging file for encrypted bytes. It is removed on success; failure paths attempt cleanup, though an unrecoverable filesystem unlink failure can leave an encrypted staging artifact.
+
+The Python core exposes `Wallet.export_container() -> bytes` for exact bytes from an unlocked wallet and `Wallet.import_container(path, data, password, *, inactivity_minutes=5)` to authenticate and atomically create an imported wallet only at an absent destination. Import preserves the provided bytes and returns the new wallet unlocked. This implements the local portable-container core only; format migration, signing-key rotation, native platform adapters, and cross-platform conformance remain unimplemented under Issue #18.
 
 Android, iPhone, and optional desktop/Podman implementations use the same portable container and cryptographic contract. OS keystores, desktop keyrings, and hardware facilities are optional defense-in-depth adapters and cannot be the only recovery path or alter the portable format. Hardware-backed non-exportable signing is deferred.
 
@@ -234,7 +237,7 @@ Implementation should proceed as vertical slices, each preserving the security i
 2. CSRNG-only Ed25519 generation and non-exporting signer capability (implemented, issue #15);
 3. canonical Identity request construction, consent, sequence validation, and finalized-envelope adapter (implemented, issue #16);
 4. local multisignature draft, proof, merge, finalize, and publication rejection paths (implemented, issue #17);
-5. backup/import, portability, migration, password rewrap, and rotation state machines;
+5. exact encrypted-container export/import core (implemented as a partial slice of Issue #18); password rewrap (implemented with Issue #14); remaining format migration, signing-key rotation state machines, and platform adapters;
 6. cross-platform conformance and the complete security acceptance matrix.
 
 No slice may introduce a private-key export or a network-facing private-key boundary. The repository issue tracker should carry the implementation slices and their blocking relationships before code work begins.

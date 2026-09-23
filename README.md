@@ -5,7 +5,7 @@ A Python wallet library for a decentralized ecosystem. It keeps private keys wit
 Current implementation includes:
 
 - Argon2id-protected, XChaCha20-Poly1305 encrypted wallet containers.
-- Atomic container writes, password rewrapping, bounded authentication delay, and lock/inactivity handling.
+- Atomic container writes, exact encrypted-container export/import, password rewrapping, bounded authentication delay, and lock/inactivity handling.
 - CSRNG-only Ed25519 key generation and public-key derivation.
 - Canonical Identity SignedUpdate validation and protocol-specific signing.
 - One-operation, timeout-invalidated signer capabilities with concurrent-use protection.
@@ -78,6 +78,8 @@ finally:
 
 - `Wallet.create_with_generated_key(path, password, confirmation, *, inactivity_minutes=5)` creates a new encrypted wallet and generates its Ed25519 key through the approved CSRNG boundary.
 - `Wallet.open(path, password, *, inactivity_minutes=5)` opens an existing encrypted wallet.
+- `wallet.export_container()` returns the exact encrypted-container bytes from an unlocked wallet for explicit transfer; it does not decrypt or reserialize the artifact.
+- `Wallet.import_container(path, data, password, *, inactivity_minutes=5)` authenticates the exact container bytes and atomically creates a new file only when `path` does not already exist; it returns the imported unlocked wallet.
 - `wallet.public_key` returns the raw public key for a generated signing wallet.
 - `wallet.create_signer(*, timeout_seconds=60.0)` creates a one-operation signer capability.
 - `signer.sign_identity_update(canonical_update)` validates and signs one canonical Identity update, then invalidates the capability.
