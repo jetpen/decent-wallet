@@ -16,6 +16,10 @@ _Avoid_: account key, signer-set key
 Replacement of an Identity Owner Key with a successor while retaining the same Owner Name and Registry lookup key.
 _Avoid_: signer-set replacement, key update
 
+**Rotation Dispatch Intent**:
+Encrypted wallet-local binding of a finalized operation-5 envelope to its Owner Name, predecessor/successor keys, predecessor state hash, and sequence; its presence means dispatch may have occurred and blocks further signing or cancellation until resolved.
+_Avoid_: publication confirmation, Registry acceptance
+
 **Signer-Set Replacement**:
 A change to the version-1 set of public keys authorized to sign Identity updates, distinct from changing the Identity Owner Key.
 _Avoid_: owner-key rotation

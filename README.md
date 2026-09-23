@@ -5,8 +5,9 @@ A Python wallet library for a decentralized ecosystem. It keeps private keys wit
 Current implementation includes:
 
 - Argon2id-protected, XChaCha20-Poly1305 encrypted wallet containers.
+- Version-2 authenticated container format. Version-1 and other unsupported formats are rejected without migration, as recorded in [ADR-0002](docs/adr/0002-wallet-container-v2-dispatch-intent.md).
 - Atomic container writes, exact encrypted-container export/import, password rewrapping, bounded authentication delay, and lock/inactivity handling.
-- Local owner-key rotation: persist one encrypted pending successor; build operation-5 drafts from verified legacy or version-1 state; locally prove possession of the pending key without returning its signature; collect predecessor-authorized proofs and finalize canonical local envelopes. Operation-5 publication, remote confirmation, dispatch-intent persistence, and active-key promotion remain disabled pending Registry operation-5 and fresh remote-read support.
+- Local owner-key rotation: persist one encrypted pending successor; build operation-5 drafts from verified legacy or version-1 state; locally prove possession of the pending key without returning its signature; collect predecessor-authorized proofs and finalize canonical local envelopes. The wallet can latch the exact finalized operation-5 envelope hash in an encrypted dispatch intent, invalidating outstanding signer capabilities and blocking further signing, preparation, and cancellation. Registry publication, remote confirmation, latch resolution, and active-key promotion remain disabled pending Registry operation-5 and fresh remote-read support.
 - CSRNG-only Ed25519 key generation and public-key derivation.
 - Canonical Identity SignedUpdate validation and protocol-specific signing.
 - One-operation, timeout-invalidated signer capabilities with concurrent-use protection.
@@ -87,6 +88,8 @@ finally:
 - `wallet.change_password(password, confirmation)` atomically rewraps the existing wallet DEK.
 - `wallet.prepare_signing_key_rotation()` creates and durably stores one pending successor key and returns only its public key. Repeated calls return the same pending key until cancellation; the active key remains unchanged.
 - `wallet.pending_signing_public_key` returns the pending successor's public key or `None`; `wallet.cancel_signing_key_rotation()` atomically removes an unfinalized successor. `wallet.prove_pending_signing_key_rotation(draft)` signs and verifies the exact operation-5 update locally, then discards the proof-of-possession signature and returns no signing material.
+- `wallet.latch_signing_key_rotation_dispatch_intent(bundle)` accepts only a complete, locally validated operation-5 bundle bound to the active and pending keys. Call it only after fresh publication consent and immediately before a dispatch attempt. It atomically persists the envelope hash and public transition metadata, invalidates existing signer capabilities, and leaves the wallet blocked until a future confirmation/finalization API exists. It does not publish or confirm anything; the current Registry main does not support operation 5.
+- `wallet.signing_key_rotation_dispatch_intent` returns the persisted non-secret intent or `None`. The intent survives lock/reopen and exact encrypted-container export/import.
 - `wallet.background()` and `wallet.lock()` invalidate capabilities and clear active wallet secrets.
 - `wallet.check_inactivity()` enforces the configured inactivity timeout.
 - `RegistryAdapter(transport, replay_store=None)` accepts only public owner/signer keys and a signer factory; the transport receives canonical public envelopes, an expected-state precondition, and an atomic expiry deadline, never a wallet or private key. Every non-genesis version-1 state requires the transport to retrieve its exact public predecessor history by state hash back to the signed anchor; incomplete history or chains exceeding 1,024 transitions fail closed.

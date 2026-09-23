@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Barrier
 from typing import Any
 
 import cbor2
@@ -18,8 +20,12 @@ from decent_wallet import (
     InvalidIdentityState,
     PublishStatus,
     RegistryAdapter,
+    RotationDispatchIntent,
+    RotationInProgress,
     StalePublication,
     ExpiredPublication,
+    SignerUnavailable,
+    StorageFailure,
     Wallet,
     build_identity_update,
 )
@@ -344,6 +350,8 @@ def test_legacy_to_versioned_upgrade_uses_one_legacy_owner_proof(tmp_path):
     assert result.accepted_state is not None
     assert result.accepted_state.generation == 1
     readback = adapter.read_state(owner_name=OWNER_NAME)
+    assert readback is not None
+    assert readback.generation is not None
     assert readback == result.accepted_state
 
     next_draft = adapter.create_draft(
@@ -1141,5 +1149,210 @@ def test_versioned_owner_key_rotation_preserves_signer_governance_and_stays_loca
     assert local_state.generation == predecessor.generation
     assert local_state.threshold == predecessor.threshold
     assert local_state.signer_set == predecessor.signer_set
+
+    intent = alice.latch_signing_key_rotation_dispatch_intent(bundle)
+    assert intent.owner_name == OWNER_NAME
+    assert intent.predecessor_state_hash == predecessor.state_hash
+    assert intent.sequence == predecessor.sequence + 1
+    assert intent.envelope_hash == hashlib.sha256(envelope).digest()
+    with pytest.raises(RotationInProgress):
+        alice.create_signer()
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def make_legacy_rotation_bundle(tmp_path):
+    wallets = make_wallets(tmp_path, names=("alice", "bob", "carol"))
+    adapter = RegistryAdapter(MemoryTransport())
+    owner = wallets["alice"]
+    active_public_key = owner.public_key
+    successor_public_key = owner.prepare_signing_key_rotation()
+
+    initial_draft = adapter.create_draft(
+        owner_name=OWNER_NAME,
+        owner_public_key=active_public_key,
+    )
+    initial = adapter.sign_draft(
+        draft=initial_draft,
+        signer_public_key=active_public_key,
+        signer_factory=owner.create_signer,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="create Identity",
+        capability="identity.write",
+        expires_at=EXPIRY,
+        replay_nonce=b"dispatch-latch-initial",
+    )
+    assert publish_bundle(
+        adapter,
+        IdentityBundle.from_submission(initial),
+        b"dispatch-latch-publish-initial",
+    ).status is PublishStatus.CONFIRMED
+    predecessor = adapter.read_state(owner_name=OWNER_NAME)
+    assert predecessor is not None
+
+    rotation_draft = adapter.create_owner_key_rotation_draft(
+        owner_name=OWNER_NAME,
+        successor_owner_public_key=successor_public_key,
+        successor_signer_set=[
+            {1: "alice", 2: successor_public_key},
+            {1: "bob", 2: wallets["bob"].public_key},
+            {1: "carol", 2: wallets["carol"].public_key},
+        ],
+    )
+    rotation_result = adapter.sign_draft(
+        draft=rotation_draft,
+        signer_public_key=active_public_key,
+        signer_factory=owner.create_signer,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="authorize owner-key rotation",
+        capability="identity.rotate-owner-key",
+        expires_at=EXPIRY,
+        replay_nonce=b"dispatch-latch-rotation",
+    )
+    return (
+        wallets,
+        owner,
+        predecessor,
+        rotation_draft,
+        IdentityBundle.from_submission(rotation_result),
+        active_public_key,
+        successor_public_key,
+    )
+
+
+def test_rotation_dispatch_intent_is_bound_to_finalized_envelope_and_survives_transfer(
+    tmp_path,
+):
+    (
+        wallets,
+        owner,
+        predecessor,
+        draft,
+        bundle,
+        active_public_key,
+        successor_public_key,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    envelope = bundle.finalize()
+
+    intent = owner.latch_signing_key_rotation_dispatch_intent(bundle)
+
+    assert isinstance(intent, RotationDispatchIntent)
+    assert intent.owner_name == OWNER_NAME
+    assert intent.predecessor_owner_public_key == active_public_key
+    assert intent.successor_owner_public_key == successor_public_key
+    assert intent.predecessor_state_hash == predecessor.state_hash
+    assert intent.sequence == draft.sequence == predecessor.sequence + 1
+    assert intent.envelope_hash == hashlib.sha256(envelope).digest()
+    assert owner.signing_key_rotation_dispatch_intent == intent
+
+    exported = owner.export_container()
+    assert b"rotation_dispatch_intent" not in exported
+    assert OWNER_NAME not in exported
+    assert active_public_key not in exported
+    owner.lock()
+    reopened = Wallet.open(tmp_path / "alice.dw", PASSWORD)
+    assert reopened.signing_key_rotation_dispatch_intent == intent
+    with pytest.raises(RotationInProgress):
+        reopened.create_signer()
+    imported = Wallet.import_container(tmp_path / "imported.dw", exported, PASSWORD)
+    assert imported.signing_key_rotation_dispatch_intent == intent
+    with pytest.raises(RotationInProgress):
+        imported.create_signer()
+
+    for wallet in wallets.values():
+        wallet.lock()
+    reopened.lock()
+    imported.lock()
+
+
+def test_latched_rotation_invalidates_and_blocks_signing_cancellation_and_replacement(
+    tmp_path,
+):
+    wallets, owner, _, draft, bundle, _, _ = make_legacy_rotation_bundle(tmp_path)
+    outstanding_signer = owner.create_signer()
+    intent = owner.latch_signing_key_rotation_dispatch_intent(bundle)
+
+    assert owner.signing_key_rotation_dispatch_intent == intent
+    with pytest.raises(SignerUnavailable):
+        outstanding_signer.sign_identity_update(draft.signed_update_bytes)
+    with pytest.raises(RotationInProgress):
+        owner.create_signer()
+    with pytest.raises(RotationInProgress):
+        owner.prepare_signing_key_rotation()
+    with pytest.raises(RotationInProgress):
+        owner.prove_pending_signing_key_rotation(draft)
+    with pytest.raises(RotationInProgress):
+        owner.cancel_signing_key_rotation()
+    with pytest.raises(RotationInProgress):
+        owner.latch_signing_key_rotation_dispatch_intent(bundle)
+
+    owner.update_payload({"local_note": "retained with unresolved intent"})
+    assert owner.signing_key_rotation_dispatch_intent == intent
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_invalid_or_incomplete_rotation_bundle_does_not_latch(tmp_path):
+    wallets, owner, _, _, bundle, _, _ = make_legacy_rotation_bundle(tmp_path)
+    invalid_bundle = replace(
+        bundle,
+        proofs=(replace(bundle.proofs[0], signature=bytes(64)),),
+    )
+
+    with pytest.raises(InvalidIdentityRequest):
+        owner.latch_signing_key_rotation_dispatch_intent(invalid_bundle)
+
+    assert owner.signing_key_rotation_dispatch_intent is None
+    assert owner.create_signer().is_active
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_failed_dispatch_intent_persistence_leaves_wallet_unlatched(
+    tmp_path, monkeypatch
+):
+    import decent_wallet.container as container_module
+
+    wallets, owner, _, _, bundle, _, _ = make_legacy_rotation_bundle(tmp_path)
+    before = owner.export_container()
+    outstanding_signer = owner.create_signer()
+
+    def fail_write(_path, _data):
+        raise StorageFailure()
+
+    monkeypatch.setattr(container_module, "_atomic_write", fail_write)
+    with pytest.raises(StorageFailure):
+        owner.latch_signing_key_rotation_dispatch_intent(bundle)
+
+    assert owner.export_container() == before
+    assert owner.signing_key_rotation_dispatch_intent is None
+    assert not outstanding_signer.is_active
+    assert owner.create_signer().is_active
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_concurrent_dispatch_latch_attempts_have_one_durable_winner(tmp_path):
+    wallets, owner, _, _, bundle, _, _ = make_legacy_rotation_bundle(tmp_path)
+    barrier = Barrier(2)
+
+    def latch_after_barrier():
+        barrier.wait(timeout=5)
+        try:
+            return owner.latch_signing_key_rotation_dispatch_intent(bundle)
+        except RotationInProgress:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: latch_after_barrier(), range(2)))
+
+    successful = [result for result in results if result is not None]
+    assert len(successful) == 1
+    assert owner.signing_key_rotation_dispatch_intent == successful[0]
+    assert owner.pending_signing_public_key == successful[0].successor_owner_public_key
     for wallet in wallets.values():
         wallet.lock()

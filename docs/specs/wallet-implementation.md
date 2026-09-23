@@ -1,8 +1,8 @@
 # Decent Wallet Implementation Specification
 
-Status: accepted MVP design with completed storage, signing, Identity adapter, multisignature, and partial owner-key rotation support; Registry operation-5 support, dispatch/finalization, migration, and platform adapters remain incomplete
+Status: accepted MVP design with completed storage, signing, Identity adapter, multisignature, and partial owner-key rotation support; Registry operation-5 support, remote dispatch/confirmation, key promotion, migration, and platform adapters remain incomplete
 
-This document consolidates the accepted decisions from the wallet implementation wayfinder map, [Wallet implementation specification and security boundary](https://github.com/jetpen/decent-wallet/issues/1). It remains the contract for behavior that is not yet implemented; the repository now contains code-backed encrypted storage, CSRNG signing, a public-only Identity adapter, and the local public-bundle multisignature workflow for the completed slices.
+This document consolidates the accepted decisions from the wallet implementation wayfinder map, [Wallet implementation specification and security boundary](https://github.com/jetpen/decent-wallet/issues/1). It remains the contract for behavior that is not yet implemented; the repository now contains code-backed encrypted storage, CSRNG signing, a public-only Identity adapter, the local public-bundle multisignature workflow, and a wallet-local rotation dispatch-intent latch. Wallet-container version 2 is current; version 1 is unsupported without migration under [ADR-0002](../adr/0002-wallet-container-v2-dispatch-intent.md).
 
 ## 1. Destination and scope
 
@@ -22,19 +22,19 @@ This specification covers the wallet MVP across Android, iPhone, and an optional
 
 ### Proposed MVP design
 
-Format migration, platform-adapter/conformance, and security-acceptance requirements remain proposed implementation requirements derived from the accepted map decisions. The owner-key rotation contract in §10.2 is accepted. Exact encrypted-container export/import, pending-key preparation, and wallet-local operation-5 draft/proof/envelope construction are implemented in the Python core as partial slices of Issue #18; they do not complete Registry publication, independent confirmation, key promotion, migration, or platform support.
+Format migration, platform-adapter/conformance, and security-acceptance requirements remain proposed implementation requirements derived from the accepted map decisions. The owner-key rotation contract in §10.2 is accepted. Exact encrypted-container export/import, pending-key preparation, wallet-local operation-5 draft/proof/envelope construction, and local dispatch-intent latching are implemented in the Python core as partial slices of Issue #18; they do not complete Registry publication, independent confirmation, key promotion, migration, or platform support.
 
 ### Researched but unimplemented
 
-The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR, signed-envelope, sequence, and finalized-publication contracts described in `docs/research/issue-3-csrng-signing-boundary.md`. Interactive consent UI, platform adapters, Registry/DHT transport implementations, the accepted operation-5 Registry change, durable rotation dispatch intent, wallet rotation publication/confirmation/finalization, and format migration remain unimplemented in this repository.
+The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR, signed-envelope, sequence, and finalized-publication contracts described in `docs/research/issue-3-csrng-signing-boundary.md`. Interactive consent UI, platform adapters, Registry/DHT transport implementations, the accepted operation-5 Registry change, wallet rotation publication/confirmation/finalization, and format migration remain unimplemented in this repository. The wallet-local dispatch intent is persisted, but it does not dispatch, resolve, or confirm a rotation.
 
 ### Implemented/code-backed
 
 The repository currently provides:
 
-- Argon2id and XChaCha20-Poly1305 encrypted wallet containers with atomic persistence, password rewrapping, and lifecycle invalidation;
+- Argon2id and XChaCha20-Poly1305 encrypted wallet-container v2 with atomic persistence, authenticated format-version binding, password rewrapping, and lifecycle invalidation; version 1 and other unsupported versions are rejected without migration under ADR-0002;
 - exact encrypted-container export/import in the Python core: export returns the existing bytes from an unlocked wallet; import authenticates and atomically writes the unchanged artifact only to an absent destination, without touching Registry state (Issue #18 partial);
-- local owner-key rotation in the Python core: one CSRNG-generated successor seed is encrypted with the wallet container before its public key is returned; the active key remains unchanged, preparation is idempotent while a successor is pending, cancellation removes only the pending successor, and pending state survives reopen/export/import. The wallet constructs operation-5 drafts from verified legacy or version-1 predecessors, performs and discards the staged key's proof-of-possession signature, builds predecessor-authorized proofs, and locally finalizes canonical envelopes. The adapter rejects operation-5 publication and confirmation. Durable dispatch intent, Registry publication, independent confirmation, and active-key promotion remain unimplemented (Issue #18 partial);
+- local owner-key rotation in the Python core: one CSRNG-generated successor seed is encrypted with the wallet container before its public key is returned; the active key remains unchanged, preparation is idempotent while a successor is pending, cancellation removes only the pending successor, and pending state survives reopen/export/import. The wallet constructs operation-5 drafts from verified legacy or version-1 predecessors, performs and discards the staged key's proof-of-possession signature, builds predecessor-authorized proofs, and locally finalizes canonical envelopes. `Wallet.latch_signing_key_rotation_dispatch_intent(bundle)` validates the complete operation-5 bundle and predecessor chain, binds the exact envelope hash, persists the non-secret intent atomically, invalidates outstanding signer capabilities, and blocks signing, re-preparation, and cancellation. The intent survives reopen/export/import. The adapter still rejects operation-5 publication and confirmation; dispatch resolution, Registry publication, independent confirmation, and active-key promotion remain unimplemented (Issue #18 partial);
 - CSRNG-only Ed25519 generation and protocol-specific, one-operation signer capabilities;
 - canonical Identity SignedUpdate validation and a public-only Identity adapter with immutable consent transcripts, atomic replay-nonce consumption, expiry checks, stale-state conditional writes, detached threshold proofs, and exact-envelope read-back confirmation;
 - immutable public drafts and local CBOR proof bundles for independent legacy and version-1 signing, strict proof merge/threshold validation, finalization to the established envelope formats, conditional complete-envelope publication, and exact read-back confirmation. Bundle encoding is not a Registry/DHT wire format.
@@ -81,7 +81,7 @@ Produces values-free security-test receipts and non-secret result metadata. It i
 
 ## 5. Encrypted wallet container
 
-The container is versioned and authenticated. Outside ciphertext, it contains only the minimum envelope fields required for format recognition and unlock, such as the format version, KDF profile identifier and parameters, salt, wrapped-DEK metadata, encryption nonce, and authentication data required by the selected format. Private material and wallet metadata remain inside authenticated ciphertext.
+The container is versioned and authenticated. The current wallet-container format is version 2. Outside ciphertext, it contains only the minimum envelope fields required for format recognition and unlock, such as the format version, KDF profile identifier and parameters, salt, wrapped-DEK metadata, encryption nonce, and authentication data required by the selected format. Private material and wallet metadata remain inside authenticated ciphertext. Version 1 is rejected; there is no compatibility or migration path in this implementation.
 
 The MVP cryptographic profile is:
 
@@ -89,7 +89,7 @@ The MVP cryptographic profile is:
 - 64 MiB memory, `t=3`, `p=4`, and a 16-byte salt in the initial versioned profile;
 - a randomly generated wallet DEK wrapped by the KEK;
 - XChaCha20-Poly1305 authenticated encryption for the wallet payload;
-- a versioned format identifier so parameters can be changed only through explicit migration.
+- a versioned format identifier so parameters can be changed only through explicit migration; v2 authentication binds the format version.
 
 The encrypted payload contains the typed 32-byte Ed25519 private input, public identity metadata, local signer state, pending rotation state and dispatch intent when present, and other wallet-local authorization state. It never contains Registry/DHT state as an authority or a plaintext backup of secrets outside the authenticated payload.
 
@@ -185,19 +185,17 @@ The existing version-1 signing message remains SHA-256 of canonical `SignedUpdat
 
 `Wallet.prepare_signing_key_rotation()` creates and atomically persists one encrypted pending successor while preserving the active key. `wallet.pending_signing_public_key` exposes only its public key; repeated preparation returns the existing pending public key. Cancellation is available only before a dispatch intent is latched.
 
-After predecessor authorization, local proof-of-possession, final envelope construction, and fresh publication consent are ready—but before any Registry write—persist an encrypted dispatch intent binding the exact owner-name bytes, predecessor/successor public keys, predecessor state hash, sequence, and SHA-256 of the exact finalized envelope bytes. This latch makes the rotation outcome recoverable after process failure.
+After predecessor authorization, local proof-of-possession, final envelope construction, and fresh publication consent are ready—but before any Registry write—persist an encrypted dispatch intent binding the exact owner-name bytes, predecessor/successor public keys, predecessor state hash, sequence, and SHA-256 of the exact finalized envelope bytes. This latch makes the rotation outcome recoverable after process failure. The Python core implements this local latch as `Wallet.latch_signing_key_rotation_dispatch_intent(bundle)`; callers must obtain fresh publication consent and invoke it immediately before dispatch. It performs no Registry I/O.
 
-Once latched, the wallet blocks Identity signing and publication, cancellation, and republishing until the result is resolved. A definitive pre-write rejection may clear the latch while leaving the pending key available for a fresh explicit attempt. If a write may have reached the Registry, return `unknown`, retain both keys and the intent, and allow only read-only confirmation. Observing the predecessor state alone does not prove non-acceptance; there is no automatic retry or replacement.
+Once latched, the wallet blocks Identity signing and publication, cancellation, and republishing until the result is resolved. A definitive pre-write rejection may clear the latch while leaving the pending key available for a fresh explicit attempt. If a write may have reached the Registry, return `unknown`, retain both keys and the intent, and allow only read-only confirmation. Observing the predecessor state alone does not prove non-acceptance; there is no automatic retry or replacement. This partial implementation has no latch-resolution API, so the wallet remains blocked until a later approved confirmation/finalization slice.
 
 The public-only `RegistryAdapter` may issue an opaque `RotationConfirmation` only after a fresh remote DHT read validates the exact target envelope, new owner key, sequence, predecessor hash, owner-name bytes, and complete verified state chain. The read must bypass the client's local durable cache and must not rely on the write response or a locally installed candidate. If the transport cannot provide this independent remote evidence, no confirmation capability is issued and the result remains `unknown`. `Wallet.finalize_signing_key_rotation(confirmation)` accepts only that adapter-issued capability and verifies that its predecessor/successor keys match the active and pending wallet keys. It atomically persists the successor as active and clears the pending key and intent; predecessor secret buffers are wiped only after the durable write succeeds. A failed local write preserves the valid predecessor-plus-pending container. The wallet is never passed to the Registry adapter, and the adapter never receives private material.
 
-The Python core implements local preparation/cancellation and local operation-5 draft, proof-of-possession, predecessor-proof, and envelope construction. Operation-5 envelopes are not sent through `RegistryAdapter.publish_bundle()` or confirmed through `confirm_bundle()`; their existence is not evidence of Registry acceptance. Durable dispatch intent, Registry publication, fresh uncached remote confirmation, and key promotion remain unimplemented, and the current Registry main does not support operation 5. This accepted contract does not complete Issue #18. A suspected compromised device cannot be remotely erased through this workflow; rotation must be explicitly completed from a restored wallet.
+The Python core implements local preparation/cancellation, operation-5 draft/proof-of-possession/predecessor-proof/envelope construction, and the encrypted v2 dispatch-intent latch. Operation-5 envelopes are not sent through `RegistryAdapter.publish_bundle()` or confirmed through `confirm_bundle()`; the latch and envelope are not evidence of Registry acceptance. Registry publication, fresh uncached remote confirmation, latch resolution, and key promotion remain unimplemented, and the current Registry main does not support operation 5. This accepted contract does not complete Issue #18. A suspected compromised device cannot be remotely erased through this workflow; rotation must be explicitly completed from a restored wallet.
 
-### 10.3 Wallet-format migration
+### 10.3 Wallet-format migration and compatibility
 
-The wallet supports the current format and one immediately preceding format. Migration is explicit, one-way, authenticated, semantically validated, and preserves key material, local state, and Identity meaning. Unknown newer versions and downgrades are rejected.
-
-Migration writes and validates a new container before atomic replacement. A failure preserves the prior valid container. Migration does not rotate keys, change owner-name bytes, alter Registry state, or silently rewrite an initialized wallet.
+Wallet-container v2 is the only supported format in this implementation. Version 1 and all other unsupported versions are rejected by open/import; no automatic or explicit v1 migration is provided. The repository owner explicitly accepted this compatibility break to ensure older implementations cannot ignore the dispatch-intent latch. This does not satisfy the broader current-plus-predecessor migration criterion in Issue #18; any future migration requires a separate contract.
 
 ## 11. Backup, portability, and platform adapters
 
@@ -205,11 +203,11 @@ Backup and portability use explicit export/import of the exact encrypted contain
 
 - export never decrypts or re-encrypts the payload;
 - import is accepted only by a new or uninitialized wallet;
-- import requires the owner password and verifies format, version, integrity, and compatibility;
+- import requires the owner password and verifies format, version, and integrity; only container v2 is accepted and older versions are unsupported;
 - no merge, overwrite, Registry publication, or Identity rollback occurs;
 - the artifact is never disclosed to logs or the clipboard, intentionally persisted in general-purpose temporary storage, or placed in automatic synchronization. Atomic persistence uses a restrictive same-directory staging file for encrypted bytes. It is removed on success; failure paths attempt cleanup, though an unrecoverable filesystem unlink failure can leave an encrypted staging artifact.
 
-The Python core exposes `Wallet.export_container() -> bytes` for exact bytes from an unlocked wallet and `Wallet.import_container(path, data, password, *, inactivity_minutes=5)` to authenticate and atomically create an imported wallet only at an absent destination. Import preserves the provided bytes and returns the new wallet unlocked. Pending rotation state is encrypted within the container and is preserved by exact export/import. This implements the local portable-container and pending-key-preparation cores only; format migration, rotation signing/publication/finalization, native platform adapters, and cross-platform conformance remain unimplemented under Issue #18.
+The Python core exposes `Wallet.export_container() -> bytes` for exact bytes from an unlocked wallet and `Wallet.import_container(path, data, password, *, inactivity_minutes=5)` to authenticate and atomically create an imported wallet only at an absent destination. Import preserves the provided bytes and returns the new wallet unlocked. Pending rotation state and the dispatch intent are encrypted within v2 and preserved by exact export/import. Version-1 containers are rejected without migration. This implements the local portable-container and pending-key-preparation cores only; Registry publication, independent confirmation, key promotion, migration, native platform adapters, and cross-platform conformance remain incomplete under Issue #18.
 
 Android, iPhone, and optional desktop/Podman implementations use the same portable container and cryptographic contract. OS keystores, desktop keyrings, and hardware facilities are optional defense-in-depth adapters and cannot be the only recovery path or alter the portable format. Hardware-backed non-exportable signing is deferred.
 
@@ -252,7 +250,7 @@ Implementation should proceed as vertical slices, each preserving the security i
 2. CSRNG-only Ed25519 generation and non-exporting signer capability (implemented, issue #15);
 3. canonical Identity request construction, consent, sequence validation, and finalized-envelope adapter (implemented, issue #16);
 4. local multisignature draft, proof, merge, finalize, and publication rejection paths (implemented, issue #17);
-5. exact encrypted-container export/import, local pending-key preparation, and local operation-5 draft/proof/envelope construction (implemented as partial slices of Issue #18); Registry operation-5 support, dispatch latch, publication, independent confirmation, key promotion, format migration, and platform adapters remain;
+5. exact encrypted-container export/import, local pending-key preparation, operation-5 draft/proof/envelope construction, and the v2 local dispatch-intent latch (implemented as partial slices of Issue #18); Registry operation-5 support, publication, independent confirmation, latch resolution, key promotion, format migration, and platform adapters remain;
 6. cross-platform conformance and the complete security acceptance matrix.
 
 No slice may introduce a private-key export or a network-facing private-key boundary. The repository issue tracker should carry the implementation slices and their blocking relationships before code work begins.

@@ -18,6 +18,7 @@ import tempfile
 import time
 import weakref
 from collections.abc import Mapping
+from dataclasses import dataclass
 from threading import Lock, RLock
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,10 +28,10 @@ from argon2.low_level import hash_secret_raw
 from Crypto.Cipher import ChaCha20_Poly1305
 
 if TYPE_CHECKING:
-    from .identity import IdentityDraft
+    from .identity import IdentityBundle, IdentityDraft
 
 
-CURRENT_FORMAT_VERSION = 1
+CURRENT_FORMAT_VERSION = 2
 _FORMAT = "decent-wallet"
 _KDF_MEMORY_KIB = 64 * 1024
 _KDF_TIME_COST = 3
@@ -48,11 +49,13 @@ _WALLET_SECRETS: dict[object, bytearray] = {}
 _PENDING_WALLET_SECRETS: dict[object, bytearray] = {}
 _PENDING_PRIVATE_SEED = "pending_private_seed"
 _PENDING_PUBLIC_KEY = "pending_public_key"
+_ROTATION_DISPATCH_INTENT = "rotation_dispatch_intent"
 _SIGNING_FIELDS = {
     "private_seed",
     "public_key",
     _PENDING_PRIVATE_SEED,
     _PENDING_PUBLIC_KEY,
+    _ROTATION_DISPATCH_INTENT,
 }
 
 
@@ -97,6 +100,67 @@ class UnsupportedFormat(WalletError):
 class StorageFailure(WalletError):
     code = "storage-failure"
     message = "wallet storage operation failed"
+
+
+class RotationInProgress(WalletError):
+    code = "rotation-in-progress"
+    message = "signing-key rotation dispatch is unresolved"
+
+
+@dataclass(frozen=True, slots=True)
+class RotationDispatchIntent:
+    """Public, non-secret binding for a possibly dispatched owner-key rotation."""
+
+    owner_name: bytes
+    predecessor_owner_public_key: bytes
+    successor_owner_public_key: bytes
+    predecessor_state_hash: bytes
+    sequence: int
+    envelope_hash: bytes
+
+    def __post_init__(self) -> None:
+        if type(self.owner_name) is not bytes or not self.owner_name:
+            raise InvalidContainer()
+        try:
+            self.owner_name.decode("utf-8")
+        except UnicodeDecodeError:
+            raise InvalidContainer() from None
+        for value in (
+            self.predecessor_owner_public_key,
+            self.successor_owner_public_key,
+            self.predecessor_state_hash,
+            self.envelope_hash,
+        ):
+            if type(value) is not bytes or len(value) != _KEY_LENGTH:
+                raise InvalidContainer()
+        if type(self.sequence) is not int or self.sequence < 1:
+            raise InvalidContainer()
+
+    def _to_payload(self) -> dict[str, Any]:
+        return {
+            "owner_name": self.owner_name,
+            "predecessor_owner_public_key": self.predecessor_owner_public_key,
+            "successor_owner_public_key": self.successor_owner_public_key,
+            "predecessor_state_hash": self.predecessor_state_hash,
+            "sequence": self.sequence,
+            "envelope_hash": self.envelope_hash,
+        }
+
+    @classmethod
+    def _from_payload(cls, value: Any) -> "RotationDispatchIntent":
+        if not isinstance(value, dict) or set(value) != {
+            "owner_name",
+            "predecessor_owner_public_key",
+            "successor_owner_public_key",
+            "predecessor_state_hash",
+            "sequence",
+            "envelope_hash",
+        }:
+            raise InvalidContainer()
+        try:
+            return cls(**value)
+        except (TypeError, ValueError):
+            raise InvalidContainer() from None
 
 
 def _wipe(buffer: bytearray | None) -> None:
@@ -709,9 +773,15 @@ class Wallet:
         pending_seed = self._payload.pop(_PENDING_PRIVATE_SEED, None)
         public_key = self._payload.get("public_key")
         pending_public_key = self._payload.get(_PENDING_PUBLIC_KEY)
+        has_dispatch_intent = _ROTATION_DISPATCH_INTENT in self._payload
 
         if seed is None:
-            if public_key is not None or pending_seed is not None or pending_public_key is not None:
+            if (
+                public_key is not None
+                or pending_seed is not None
+                or pending_public_key is not None
+                or has_dispatch_intent
+            ):
                 raise InvalidContainer()
             return
         _validate_seed_public_key_pair(seed, public_key)
@@ -719,13 +789,24 @@ class Wallet:
         if pending_seed is None:
             if pending_public_key is not None:
                 raise InvalidContainer()
-            pending_secret = None
         else:
             _validate_seed_public_key_pair(pending_seed, pending_public_key)
             if pending_public_key == public_key:
                 raise InvalidContainer()
-            pending_secret = bytearray(pending_seed)
 
+        if has_dispatch_intent:
+            if pending_public_key is None:
+                raise InvalidContainer()
+            intent = RotationDispatchIntent._from_payload(
+                self._payload[_ROTATION_DISPATCH_INTENT]
+            )
+            if (
+                intent.predecessor_owner_public_key != public_key
+                or intent.successor_owner_public_key != pending_public_key
+            ):
+                raise InvalidContainer()
+
+        pending_secret = bytearray(pending_seed) if pending_seed is not None else None
         _WALLET_SECRETS[self._secret_handle] = bytearray(seed)
         if pending_secret is not None:
             _PENDING_WALLET_SECRETS[self._secret_handle] = pending_secret
@@ -744,26 +825,38 @@ class Wallet:
     def create_signer(self, *, timeout_seconds: float = 60.0) -> Any:
         from .signer import SignerUnavailable, _create_capability_from_seed
 
-        self._touch()
-        seed = _WALLET_SECRETS.get(self._secret_handle)
-        stored_public_key = self._payload.get("public_key")
-        if seed is None or type(stored_public_key) is not bytes:
-            raise SignerUnavailable()
-        if len(seed) != _KEY_LENGTH or len(stored_public_key) != _KEY_LENGTH:
-            raise SignerUnavailable()
-        try:
-            capability = _create_capability_from_seed(
-                bytes(seed),
-                timeout_seconds=timeout_seconds,
-                on_invalidate=self._capabilities.discard,
+        with self._rotation_lock:
+            self._touch()
+            self._ensure_rotation_dispatch_not_latched()
+            seed = _WALLET_SECRETS.get(self._secret_handle)
+            stored_public_key = self._payload.get("public_key")
+            if seed is None or type(stored_public_key) is not bytes:
+                raise SignerUnavailable()
+            if len(seed) != _KEY_LENGTH or len(stored_public_key) != _KEY_LENGTH:
+                raise SignerUnavailable()
+            try:
+                capability = _create_capability_from_seed(
+                    bytes(seed),
+                    timeout_seconds=timeout_seconds,
+                    on_invalidate=self._capabilities.discard,
+                )
+            except Exception:
+                raise SignerUnavailable() from None
+            if capability.public_key != stored_public_key:
+                capability.invalidate()
+                raise SignerUnavailable()
+            self._capabilities.add(capability)
+            return capability
+
+    @property
+    def signing_key_rotation_dispatch_intent(self) -> RotationDispatchIntent | None:
+        with self._rotation_lock:
+            self._touch()
+            if _ROTATION_DISPATCH_INTENT not in self._payload:
+                return None
+            return RotationDispatchIntent._from_payload(
+                self._payload[_ROTATION_DISPATCH_INTENT]
             )
-        except Exception:
-            raise SignerUnavailable() from None
-        if capability.public_key != stored_public_key:
-            capability.invalidate()
-            raise SignerUnavailable()
-        self._capabilities.add(capability)
-        return capability
 
     @property
     def pending_signing_public_key(self) -> bytes | None:
@@ -794,6 +887,7 @@ class Wallet:
         )
 
         self._touch()
+        self._ensure_rotation_dispatch_not_latched()
         existing_pending_seed = _PENDING_WALLET_SECRETS.get(self._secret_handle)
         if existing_pending_seed is not None:
             pending_public_key = self.pending_signing_public_key
@@ -852,6 +946,7 @@ class Wallet:
 
         with self._rotation_lock:
             self._touch()
+            self._ensure_rotation_dispatch_not_latched()
             pending_seed = _PENDING_WALLET_SECRETS.get(self._secret_handle)
             active_seed = _WALLET_SECRETS.get(self._secret_handle)
             pending_public_key = self._payload.get(_PENDING_PUBLIC_KEY)
@@ -896,6 +991,54 @@ class Wallet:
             finally:
                 signature = None
 
+    def latch_signing_key_rotation_dispatch_intent(
+        self,
+        bundle: "IdentityBundle",
+    ) -> RotationDispatchIntent:
+        """Persist the exact authorized operation-5 artifact before dispatch."""
+        from .identity import IdentityBundle, InvalidIdentityRequest
+        from .signer import SignerUnavailable
+
+        with self._rotation_lock:
+            self._touch()
+            self._ensure_rotation_dispatch_not_latched()
+            if not isinstance(bundle, IdentityBundle):
+                raise InvalidIdentityRequest()
+            try:
+                validated_bundle = IdentityBundle.from_cbor(bundle.to_cbor())
+                finalized_envelope = validated_bundle.finalize()
+            except InvalidIdentityRequest:
+                raise
+            except Exception:
+                raise InvalidIdentityRequest() from None
+
+            draft = validated_bundle.draft
+            authorization = draft.authorization
+            if authorization is None or authorization[3] != 5:
+                raise InvalidIdentityRequest()
+            self.prove_pending_signing_key_rotation(draft)
+            active_public_key = self.public_key
+            successor_public_key = self.pending_signing_public_key
+            if successor_public_key is None:
+                raise SignerUnavailable()
+            intent = RotationDispatchIntent(
+                owner_name=draft.owner_name,
+                predecessor_owner_public_key=active_public_key,
+                successor_owner_public_key=successor_public_key,
+                predecessor_state_hash=authorization[7],
+                sequence=draft.sequence,
+                envelope_hash=hashlib.sha256(finalized_envelope).digest(),
+            )
+
+            self._invalidate_capabilities()
+            updated_payload = dict(self._payload)
+            updated_payload[_ROTATION_DISPATCH_INTENT] = intent._to_payload()
+            envelope = self._build_envelope(updated_payload)
+            _atomic_write(self._path, _serialize(envelope))
+            self._payload = updated_payload
+            self._envelope = envelope
+            return intent
+
     def cancel_signing_key_rotation(self) -> None:
         """Remove an unfinalized successor without changing the active key."""
         with self._rotation_lock:
@@ -903,6 +1046,7 @@ class Wallet:
 
     def _cancel_signing_key_rotation(self) -> None:
         self._touch()
+        self._ensure_rotation_dispatch_not_latched()
         pending_seed = _PENDING_WALLET_SECRETS.get(self._secret_handle)
         if pending_seed is None:
             if self._payload.get(_PENDING_PUBLIC_KEY) is not None:
@@ -940,6 +1084,10 @@ class Wallet:
             updated_payload["public_key"] = self._payload["public_key"]
         if self._secret_handle in _PENDING_WALLET_SECRETS:
             updated_payload[_PENDING_PUBLIC_KEY] = self._payload[_PENDING_PUBLIC_KEY]
+        if _ROTATION_DISPATCH_INTENT in self._payload:
+            updated_payload[_ROTATION_DISPATCH_INTENT] = self._payload[
+                _ROTATION_DISPATCH_INTENT
+            ]
         envelope = self._build_envelope(updated_payload)
         _atomic_write(self._path, _serialize(envelope))
         self._payload = updated_payload
@@ -1039,6 +1187,10 @@ class Wallet:
     def _require_unlocked(self) -> None:
         if self._dek is None:
             raise WalletLockedError()
+
+    def _ensure_rotation_dispatch_not_latched(self) -> None:
+        if _ROTATION_DISPATCH_INTENT in self._payload:
+            raise RotationInProgress()
 
     def _build_envelope(
         self,
