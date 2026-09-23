@@ -63,6 +63,10 @@ The public-only `RegistryAdapter` issues an opaque `RotationConfirmation` only a
 
 `decent-registry` must implement and deploy operation 5 before any wallet publishes it. The Registry change must add the operation-specific owner-key transition, exact owner-name byte equality, legacy-predecessor proof validation (including parsing `signer_id: null` while accepting it only in this branch and preserving deterministic envelope validation), version-1 predecessor threshold validation with authenticated provenance to the signed anchor, exact sequence increment, state-hash checks, and rejection of owner-key changes under other operations. Registry read-back used to mint `RotationConfirmation` must perform a fresh remote DHT read that bypasses the local durable cache; a local write-through value or write result is not confirmation. Mixed or old validators fail closed; there is no fallback path.
 
+### Implementation status
+
+`decent-registry` main now implements operation 5 in PR #109 and independent owner-key read-back in PR #110, at commit [`dde0730482076cd00e6f115bdd25f4534ae5e927`](https://github.com/jetpen/decent-registry/commit/dde0730482076cd00e6f115bdd25f4534ae5e927). This confirms source support, not deployment. `decent-wallet` exposes the two-phase prepare/latch/dispatch/confirm/promote flow through an injected `IdentityTransport`; the concrete production transport and target deployment must be verified before use. The original compatibility analysis above remains pinned to the pre-change Registry commit.
+
 This reuses the existing canonical SignedUpdate digest, authorization map, and version-1 envelope while requiring a coordinated protocol deployment. The direct legacy path intentionally transitions to the existing 2-of-3 version-1 policy; the version-1 path does not also mutate signer governance.
 
 ## Alternatives considered

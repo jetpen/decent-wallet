@@ -4,7 +4,7 @@ import hashlib
 import time
 from dataclasses import dataclass
 from enum import StrEnum
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, Callable, Mapping, Protocol, TYPE_CHECKING
 
 import cbor2
@@ -12,6 +12,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 if TYPE_CHECKING:
+    from .container import RotationDispatchIntent, RotationDispatchPermit
     from .signer import SignerCapability
 
 
@@ -63,6 +64,7 @@ class ConsentDecision(StrEnum):
 
 
 class PublishStatus(StrEnum):
+    READY = "ready"
     CONFIRMED = "confirmed"
     PROOF_READY = "proof-ready"
     UNKNOWN = "unknown"
@@ -86,7 +88,12 @@ class IdentityTransport(Protocol):
     atomically when ``expires_at`` has elapsed, before accepting the envelope.
     Every non-genesis version-1 state requires retained predecessor lookup by
     state hash back to its signed anchor; incomplete history is rejected.
+    ``supports_owner_key_rotation`` must be true only when this adapter targets
+    a Registry deployment that validates operation 5 and implements the fresh
+    remote read method below.
     """
+
+    supports_owner_key_rotation: bool
 
     def get_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
         ...
@@ -98,6 +105,14 @@ class IdentityTransport(Protocol):
         state_hash: bytes,
     ) -> bytes | None:
         """Return a retained public predecessor envelope for transition checks."""
+        ...
+
+    def get_remote_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
+        """Read from a fresh remote source, bypassing local and write-through caches.
+
+        The result is evidence from one remote DHT response, not proof of
+        network-wide replication. Owner-key promotion requires this read path.
+        """
         ...
 
     def put_identity_envelope(
@@ -440,6 +455,7 @@ class PublicationResult:
     envelope_bytes: bytes | None = None
     accepted_state: IdentityState | None = None
     reason: str | None = None
+    publication: RotationPublication | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,6 +631,369 @@ class IdentityBundle:
         except InvalidIdentityState:
             raise InvalidIdentityRequest() from None
         return envelope
+
+
+@dataclass(frozen=True, slots=True)
+class _RotationBinding:
+    owner_name: bytes
+    predecessor_owner_public_key: bytes
+    successor_owner_public_key: bytes
+    predecessor_state_hash: bytes
+    sequence: int
+    envelope_hash: bytes
+
+
+def _rotation_binding(value: Any) -> _RotationBinding | None:
+    owner_name = getattr(value, "owner_name", None)
+    predecessor_owner_public_key = getattr(
+        value, "predecessor_owner_public_key", None
+    )
+    successor_owner_public_key = getattr(value, "successor_owner_public_key", None)
+    predecessor_state_hash = getattr(value, "predecessor_state_hash", None)
+    sequence = getattr(value, "sequence", None)
+    envelope_hash = getattr(value, "envelope_hash", None)
+    if (
+        type(owner_name) is not bytes
+        or not owner_name
+        or type(predecessor_owner_public_key) is not bytes
+        or len(predecessor_owner_public_key) != _KEY_LENGTH
+        or type(successor_owner_public_key) is not bytes
+        or len(successor_owner_public_key) != _KEY_LENGTH
+        or type(predecessor_state_hash) is not bytes
+        or len(predecessor_state_hash) != _KEY_LENGTH
+        or type(sequence) is not int
+        or sequence <= 0
+        or type(envelope_hash) is not bytes
+        or len(envelope_hash) != _KEY_LENGTH
+    ):
+        return None
+    return _RotationBinding(
+        owner_name=owner_name,
+        predecessor_owner_public_key=predecessor_owner_public_key,
+        successor_owner_public_key=successor_owner_public_key,
+        predecessor_state_hash=predecessor_state_hash,
+        sequence=sequence,
+        envelope_hash=envelope_hash,
+    )
+
+
+class _RotationLatchRegistry:
+    """Serialize normal writes against locally persisted unresolved rotations."""
+
+    def __init__(self) -> None:
+        self._guard = Lock()
+        self._owner_locks: dict[bytes, RLock] = {}
+        self._bindings: dict[bytes, tuple[_RotationBinding, bool]] = {}
+
+    def owner_lock(self, owner_name: bytes) -> RLock:
+        with self._guard:
+            lock = self._owner_locks.get(owner_name)
+            if lock is None:
+                lock = RLock()
+                self._owner_locks[owner_name] = lock
+            return lock
+
+    def is_owner_latched(self, owner_name: bytes) -> bool:
+        with self._guard:
+            return owner_name in self._bindings
+
+    def is_latched(self, value: Any) -> bool:
+        binding = _rotation_binding(value)
+        if binding is None:
+            return False
+        with self._guard:
+            current = self._bindings.get(binding.owner_name)
+            return current is not None and current[0] == binding
+
+    def is_dispatch_ready(self, value: Any) -> bool:
+        binding = _rotation_binding(value)
+        if binding is None:
+            return False
+        with self._guard:
+            current = self._bindings.get(binding.owner_name)
+            return current is not None and current == (binding, True)
+
+    def register(self, value: Any, *, dispatch_ready: bool = False) -> bool:
+        binding = _rotation_binding(value)
+        if binding is None:
+            return False
+        with self.owner_lock(binding.owner_name):
+            with self._guard:
+                current = self._bindings.get(binding.owner_name)
+                if current is not None and current[0] != binding:
+                    return False
+                ready = dispatch_ready or (current is not None and current[1])
+                self._bindings[binding.owner_name] = (binding, ready)
+                return True
+
+    def clear(self, value: Any) -> bool:
+        binding = _rotation_binding(value)
+        if binding is None:
+            return False
+        with self.owner_lock(binding.owner_name):
+            with self._guard:
+                current = self._bindings.get(binding.owner_name)
+                if current is None or current[0] != binding:
+                    return False
+                del self._bindings[binding.owner_name]
+                return True
+
+
+_ROTATION_CAPABILITY_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RotationPublication:
+    """One-use public capability prepared after rotation consent and state checks."""
+
+    _bundle: IdentityBundle
+    _envelope_bytes: bytes
+    _previous_state: IdentityState
+    expires_at: int
+    _adapter_token: object
+    _latch_registry: _RotationLatchRegistry
+    _consumption: list[bool]
+    _lock: Lock
+
+    def __init__(
+        self,
+        *,
+        seal: object,
+        bundle: IdentityBundle,
+        envelope_bytes: bytes,
+        previous_state: IdentityState,
+        expires_at: int,
+        adapter_token: object,
+        latch_registry: _RotationLatchRegistry,
+    ) -> None:
+        if seal is not _ROTATION_CAPABILITY_SEAL:
+            raise InvalidIdentityRequest()
+        object.__setattr__(self, "_bundle", bundle)
+        object.__setattr__(self, "_envelope_bytes", envelope_bytes)
+        object.__setattr__(self, "_previous_state", previous_state)
+        object.__setattr__(self, "expires_at", expires_at)
+        object.__setattr__(self, "_adapter_token", adapter_token)
+        object.__setattr__(self, "_latch_registry", latch_registry)
+        object.__setattr__(self, "_consumption", [False])
+        object.__setattr__(self, "_lock", Lock())
+
+    @property
+    def envelope_bytes(self) -> bytes:
+        return self._envelope_bytes
+
+    @property
+    def owner_name(self) -> bytes:
+        return self._bundle.draft.owner_name
+
+    @property
+    def predecessor_owner_public_key(self) -> bytes:
+        return self._previous_state.owner_public_key
+
+    @property
+    def successor_owner_public_key(self) -> bytes:
+        return self._bundle.draft.owner_public_key
+
+    @property
+    def predecessor_state_hash(self) -> bytes:
+        return self._previous_state.state_hash
+
+    @property
+    def sequence(self) -> int:
+        return self._bundle.draft.sequence
+
+    @property
+    def envelope_hash(self) -> bytes:
+        return hashlib.sha256(self._envelope_bytes).digest()
+
+    def _matches_bundle(self, bundle: IdentityBundle) -> bool:
+        if not isinstance(bundle, IdentityBundle) or bundle != self._bundle:
+            return False
+        try:
+            if bundle.finalize() != self._envelope_bytes:
+                return False
+            previous = _draft_previous_state(bundle.draft)
+        except Exception:
+            return False
+        return (
+            previous == self._previous_state
+            and bundle.draft.owner_name == self.owner_name
+            and bundle.draft.owner_public_key == self.successor_owner_public_key
+            and bundle.draft.sequence == self.sequence
+            and bundle.draft.authorization is not None
+            and bundle.draft.authorization[3] == 5
+        )
+
+    def _matches_intent(self, intent: Any) -> bool:
+        return _rotation_binding(self) == _rotation_binding(intent)
+
+    def _owner_lock(self, intent: Any) -> RLock:
+        if not self._matches_intent(intent):
+            raise InvalidIdentityRequest()
+        return self._latch_registry.owner_lock(self.owner_name)
+
+    def _owner_is_latched(self) -> bool:
+        return self._latch_registry.is_owner_latched(self.owner_name)
+
+    def _mark_latched(self, intent: Any) -> bool:
+        return self._matches_intent(intent) and self._latch_registry.register(
+            intent, dispatch_ready=True
+        )
+
+    def _clear_latch(self, intent: Any) -> bool:
+        return self._matches_intent(intent) and self._latch_registry.clear(intent)
+
+    def _latch_registry_contains(self, intent: Any) -> bool:
+        return self._latch_registry.is_latched(intent)
+
+    def _consume_for(self, adapter_token: object) -> bool:
+        with self._lock:
+            if self._adapter_token is not adapter_token or self._consumption[0]:
+                return False
+            self._consumption[0] = True
+            return True
+
+    def __repr__(self) -> str:
+        return "RotationPublication(ready=True)"
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RotationConfirmation:
+    owner_name: bytes
+    predecessor_owner_public_key: bytes
+    successor_owner_public_key: bytes
+    predecessor_state_hash: bytes
+    sequence: int
+    envelope_hash: bytes
+    state_hash: bytes
+    _seal: object
+    _latch_registry: _RotationLatchRegistry
+
+    def __init__(
+        self,
+        *,
+        seal: object,
+        owner_name: bytes,
+        predecessor_owner_public_key: bytes,
+        successor_owner_public_key: bytes,
+        predecessor_state_hash: bytes,
+        sequence: int,
+        envelope_hash: bytes,
+        state_hash: bytes,
+        latch_registry: _RotationLatchRegistry,
+    ) -> None:
+        if seal is not _ROTATION_CAPABILITY_SEAL:
+            raise InvalidIdentityRequest()
+        for name, value in (
+            ("owner_name", owner_name),
+            ("predecessor_owner_public_key", predecessor_owner_public_key),
+            ("successor_owner_public_key", successor_owner_public_key),
+            ("predecessor_state_hash", predecessor_state_hash),
+            ("envelope_hash", envelope_hash),
+            ("state_hash", state_hash),
+        ):
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "sequence", sequence)
+        object.__setattr__(self, "_seal", seal)
+        object.__setattr__(self, "_latch_registry", latch_registry)
+
+    def _matches_intent(self, intent: Any) -> bool:
+        return (
+            self._seal is _ROTATION_CAPABILITY_SEAL
+            and _rotation_binding(self) == _rotation_binding(intent)
+        )
+
+    def _owner_lock(self, intent: Any) -> RLock:
+        if not self._matches_intent(intent):
+            raise InvalidIdentityRequest()
+        return self._latch_registry.owner_lock(self.owner_name)
+
+    def _is_latched(self, intent: Any) -> bool:
+        return self._matches_intent(intent) and self._latch_registry.is_latched(intent)
+
+    def _clear_latch(self, intent: Any) -> bool:
+        return self._matches_intent(intent) and self._latch_registry.clear(intent)
+
+    def __repr__(self) -> str:
+        return "RotationConfirmation(verified=True)"
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RotationDispatchRejection:
+    status: PublishStatus
+    owner_name: bytes
+    predecessor_owner_public_key: bytes
+    successor_owner_public_key: bytes
+    predecessor_state_hash: bytes
+    sequence: int
+    envelope_hash: bytes
+    _seal: object
+    _publication: RotationPublication
+    _consumption: list[bool]
+    _lock: Lock
+
+    def __init__(
+        self,
+        *,
+        seal: object,
+        status: PublishStatus,
+        publication: RotationPublication,
+    ) -> None:
+        if seal is not _ROTATION_CAPABILITY_SEAL or status not in {
+            PublishStatus.FAILED,
+            PublishStatus.STALE,
+            PublishStatus.EXPIRED,
+        }:
+            raise InvalidIdentityRequest()
+        object.__setattr__(self, "status", status)
+        for name in (
+            "owner_name",
+            "predecessor_owner_public_key",
+            "successor_owner_public_key",
+            "predecessor_state_hash",
+            "sequence",
+            "envelope_hash",
+        ):
+            object.__setattr__(self, name, getattr(publication, name))
+        object.__setattr__(self, "_seal", seal)
+        object.__setattr__(self, "_publication", publication)
+        object.__setattr__(self, "_consumption", [False])
+        object.__setattr__(self, "_lock", Lock())
+
+    def _matches_intent(self, intent: Any) -> bool:
+        return (
+            self._seal is _ROTATION_CAPABILITY_SEAL
+            and _rotation_binding(self) == _rotation_binding(intent)
+        )
+
+    def _owner_lock(self, intent: Any) -> RLock:
+        if not self._matches_intent(intent):
+            raise InvalidIdentityRequest()
+        return self._publication._owner_lock(intent)
+
+    def _is_latched(self, intent: Any) -> bool:
+        return self._matches_intent(intent) and self._publication._latch_registry_contains(intent)
+
+    def _clear_latch(self, intent: Any) -> bool:
+        return self._matches_intent(intent) and self._publication._clear_latch(intent)
+
+    def _claim(self) -> bool:
+        with self._lock:
+            if self._consumption[0]:
+                return False
+            self._consumption[0] = True
+            return True
+
+    def _release(self) -> None:
+        with self._lock:
+            self._consumption[0] = False
+
+
+@dataclass(frozen=True, slots=True)
+class RotationDispatchResult:
+    status: PublishStatus
+    confirmation: RotationConfirmation | None = None
+    rejection: RotationDispatchRejection | None = None
+    reason: str | None = None
 
 
 def _require_uint(value: Any) -> int:
@@ -1190,6 +1569,18 @@ class RegistryAdapter:
     ) -> None:
         self._transport = transport
         self._replay_store = replay_store or InMemoryReplayNonceStore()
+        self._rotation_token = object()
+        self._rotation_latches = _RotationLatchRegistry()
+
+    @staticmethod
+    def _rotation_transport_available(transport: IdentityTransport) -> bool:
+        try:
+            return (
+                getattr(transport, "supports_owner_key_rotation", False) is True
+                and callable(getattr(transport, "get_remote_identity_envelope", None))
+            )
+        except Exception:
+            return False
 
     def read_state(self, *, owner_name: bytes) -> IdentityState | None:
         owner_name = _validate_owner_name(owner_name)
@@ -1286,6 +1677,8 @@ class RegistryAdapter:
         not accept a caller-supplied replacement set.
         """
         owner_name = _validate_owner_name(owner_name)
+        if self._rotation_latches.is_owner_latched(owner_name):
+            raise InvalidIdentityRequest()
         successor_owner_public_key = _require_bytes(
             successor_owner_public_key, length=_KEY_LENGTH
         )
@@ -1350,6 +1743,8 @@ class RegistryAdapter:
     ) -> SubmissionResult:
         if not isinstance(draft, IdentityDraft):
             raise InvalidIdentityRequest()
+        if self._rotation_latches.is_owner_latched(draft.owner_name):
+            raise InvalidIdentityRequest()
         authorization = draft.authorization
         operation = (
             _OPERATION_NAMES[authorization[3]]
@@ -1392,6 +1787,12 @@ class RegistryAdapter:
             raise InvalidIdentityRequest()
         envelope = bundle.finalize()
         owner_name = bundle.draft.owner_name
+        if self._rotation_latches.is_owner_latched(owner_name):
+            return PublicationResult(
+                status=PublishStatus.FAILED,
+                envelope_bytes=envelope,
+                reason="owner-key rotation is unresolved",
+            )
         previous_state = _draft_previous_state(bundle.draft)
         current = self.read_state(owner_name=owner_name)
         if not _same_state(previous_state, current):
@@ -1452,12 +1853,19 @@ class RegistryAdapter:
                 reason="consent expired",
             )
         try:
-            self._transport.put_identity_envelope(
-                owner_name_hex=owner_name.hex(),
-                envelope_cbor=envelope,
-                expected_state_hash=(current.state_hash if current is not None else None),
-                expires_at=expires_at,
-            )
+            with self._rotation_latches.owner_lock(owner_name):
+                if self._rotation_latches.is_owner_latched(owner_name):
+                    return PublicationResult(
+                        status=PublishStatus.FAILED,
+                        envelope_bytes=envelope,
+                        reason="owner-key rotation is unresolved",
+                    )
+                self._transport.put_identity_envelope(
+                    owner_name_hex=owner_name.hex(),
+                    envelope_cbor=envelope,
+                    expected_state_hash=(current.state_hash if current is not None else None),
+                    expires_at=expires_at,
+                )
         except StalePublication:
             return PublicationResult(
                 status=PublishStatus.STALE,
@@ -1496,6 +1904,273 @@ class RegistryAdapter:
             envelope=envelope,
             previous_state=previous_state,
             failure_reason="readback did not confirm exact envelope",
+        )
+
+    def prepare_owner_key_rotation_publication(
+        self,
+        bundle: IdentityBundle,
+        *,
+        consent: ConsentHandler,
+        authenticated_origin: str,
+        environment: str,
+        purpose: str,
+        capability: str,
+        expires_at: int,
+        replay_nonce: bytes,
+    ) -> PublicationResult:
+        """Obtain fresh consent and prepare a one-use operation-5 dispatch."""
+        if not isinstance(bundle, IdentityBundle):
+            raise InvalidIdentityRequest()
+        if self._rotation_latches.is_owner_latched(bundle.draft.owner_name):
+            return PublicationResult(
+                status=PublishStatus.FAILED,
+                reason="owner-key rotation is unresolved",
+            )
+        authorization = bundle.draft.authorization
+        if authorization is None or authorization[3] != 5:
+            raise InvalidIdentityRequest()
+        if not self._rotation_transport_available(self._transport):
+            return PublicationResult(
+                status=PublishStatus.FAILED,
+                reason="rotation transport capability unavailable",
+            )
+        envelope = bundle.finalize()
+        previous_state = _draft_previous_state(bundle.draft)
+        if previous_state is None:
+            raise InvalidIdentityRequest()
+        current = self.read_state(owner_name=bundle.draft.owner_name)
+        if not _same_state(previous_state, current):
+            return PublicationResult(
+                status=PublishStatus.STALE,
+                envelope_bytes=envelope,
+                reason="accepted state changed before publication",
+            )
+
+        transcript = ConsentTranscript(
+            authenticated_origin=authenticated_origin,
+            environment=environment,
+            operation="owner-key-rotation",
+            payload_hash=hashlib.sha256(envelope).digest(),
+            purpose=purpose,
+            capability=capability,
+            expires_at=expires_at,
+            replay_nonce=replay_nonce,
+            sequence=bundle.draft.sequence,
+            generation=authorization[4],
+            review_payload=envelope,
+        )
+        consent_failure = self._consent_gate(
+            owner_name=bundle.draft.owner_name,
+            transcript=transcript,
+            consent=consent,
+        )
+        if consent_failure is not None:
+            status, reason = consent_failure
+            return PublicationResult(
+                status=status,
+                envelope_bytes=envelope,
+                reason=reason,
+            )
+
+        current = self.read_state(owner_name=bundle.draft.owner_name)
+        if not _same_state(previous_state, current):
+            return PublicationResult(
+                status=PublishStatus.STALE,
+                envelope_bytes=envelope,
+                reason="accepted state changed before publication",
+            )
+        if expires_at <= int(time.time()):
+            return PublicationResult(
+                status=PublishStatus.EXPIRED,
+                envelope_bytes=envelope,
+                reason="consent expired",
+            )
+        publication = RotationPublication(
+            seal=_ROTATION_CAPABILITY_SEAL,
+            bundle=bundle,
+            envelope_bytes=envelope,
+            previous_state=previous_state,
+            expires_at=expires_at,
+            adapter_token=self._rotation_token,
+            latch_registry=self._rotation_latches,
+        )
+        return PublicationResult(
+            status=PublishStatus.READY,
+            envelope_bytes=envelope,
+            publication=publication,
+        )
+
+    def dispatch_owner_key_rotation(
+        self,
+        publication: RotationPublication,
+        permit: RotationDispatchPermit,
+    ) -> RotationDispatchResult:
+        """Dispatch only with an ephemeral permit minted after durable wallet latching."""
+        from .container import RotationDispatchPermit
+
+        if (
+            not isinstance(publication, RotationPublication)
+            or not isinstance(permit, RotationDispatchPermit)
+            or not permit._authentic()
+            or not publication._matches_intent(permit.intent)
+            or not self._rotation_latches.is_dispatch_ready(permit.intent)
+            or not publication._consume_for(self._rotation_token)
+        ):
+            raise InvalidIdentityRequest()
+        intent = permit.intent
+
+        def make_rejection(status: PublishStatus) -> RotationDispatchRejection:
+            return RotationDispatchRejection(
+                seal=_ROTATION_CAPABILITY_SEAL,
+                status=status,
+                publication=publication,
+            )
+
+        with self._rotation_latches.owner_lock(publication.owner_name):
+            if not self._rotation_latches.is_latched(intent):
+                raise InvalidIdentityRequest()
+            if not self._rotation_transport_available(self._transport):
+                rejection = make_rejection(PublishStatus.FAILED)
+                return RotationDispatchResult(
+                    status=PublishStatus.FAILED,
+                    rejection=rejection,
+                    reason="rotation transport capability unavailable",
+                )
+            try:
+                current = self.read_state(owner_name=publication.owner_name)
+            except IdentityAdapterError:
+                rejection = make_rejection(PublishStatus.FAILED)
+                return RotationDispatchResult(
+                    status=PublishStatus.FAILED,
+                    rejection=rejection,
+                    reason="pre-write state validation failed",
+                )
+            if not _same_state(publication._previous_state, current):
+                rejection = make_rejection(PublishStatus.STALE)
+                return RotationDispatchResult(
+                    status=PublishStatus.STALE,
+                    rejection=rejection,
+                    reason="accepted state changed before publication",
+                )
+            if publication.expires_at <= int(time.time()):
+                rejection = make_rejection(PublishStatus.EXPIRED)
+                return RotationDispatchResult(
+                    status=PublishStatus.EXPIRED,
+                    rejection=rejection,
+                    reason="consent expired",
+                )
+
+            try:
+                self._transport.put_identity_envelope(
+                    owner_name_hex=publication.owner_name.hex(),
+                    envelope_cbor=publication.envelope_bytes,
+                    expected_state_hash=publication._previous_state.state_hash,
+                    expires_at=publication.expires_at,
+                )
+            except StalePublication:
+                rejection = make_rejection(PublishStatus.STALE)
+                return RotationDispatchResult(
+                    status=PublishStatus.STALE,
+                    rejection=rejection,
+                    reason="conditional publication rejected",
+                )
+            except ExpiredPublication:
+                rejection = make_rejection(PublishStatus.EXPIRED)
+                return RotationDispatchResult(
+                    status=PublishStatus.EXPIRED,
+                    rejection=rejection,
+                    reason="consent expired",
+                )
+            except Exception:
+                confirmation = self.confirm_owner_key_rotation(intent)
+                if confirmation is not None:
+                    return RotationDispatchResult(
+                        status=PublishStatus.CONFIRMED,
+                        confirmation=confirmation,
+                    )
+                return RotationDispatchResult(
+                    status=PublishStatus.UNKNOWN,
+                    reason="independent readback did not confirm dispatch",
+                )
+
+            confirmation = self.confirm_owner_key_rotation(intent)
+            if confirmation is not None:
+                return RotationDispatchResult(
+                    status=PublishStatus.CONFIRMED,
+                    confirmation=confirmation,
+                )
+            return RotationDispatchResult(
+                status=PublishStatus.UNKNOWN,
+                reason="readback did not confirm exact envelope",
+            )
+
+    def confirm_owner_key_rotation(
+        self, intent: RotationDispatchIntent
+    ) -> RotationConfirmation | None:
+        """Mint confirmation only from a fresh remote envelope and verified history."""
+        from .container import RotationDispatchIntent
+
+        if (
+            not isinstance(intent, RotationDispatchIntent)
+            or not self._rotation_latches.register(intent)
+        ):
+            raise InvalidIdentityRequest()
+        try:
+            remote_envelope = self._transport.get_remote_identity_envelope(
+                owner_name_hex=intent.owner_name.hex()
+            )
+        except Exception:
+            return None
+        if type(remote_envelope) is not bytes:
+            return None
+        if hashlib.sha256(remote_envelope).digest() != intent.envelope_hash:
+            return None
+
+        try:
+            state = self._parse_state_with_history(
+                owner_name=intent.owner_name,
+                envelope=remote_envelope,
+            )
+            _record, _payload, sequence, authorization = _decode_signed_update(
+                state.signed_update_bytes
+            )
+            if (
+                authorization is None
+                or authorization[3] != 5
+                or authorization[7] != intent.predecessor_state_hash
+                or state.owner_name != intent.owner_name
+                or state.owner_public_key != intent.successor_owner_public_key
+                or sequence != intent.sequence
+            ):
+                return None
+            predecessor_envelope = self._transport.get_identity_envelope_by_hash(
+                owner_name_hex=intent.owner_name.hex(),
+                state_hash=intent.predecessor_state_hash,
+            )
+            if type(predecessor_envelope) is not bytes:
+                return None
+            predecessor = self._parse_state_with_history(
+                owner_name=intent.owner_name,
+                envelope=predecessor_envelope,
+            )
+            if (
+                predecessor.owner_public_key != intent.predecessor_owner_public_key
+                or predecessor.state_hash != intent.predecessor_state_hash
+                or state.sequence != predecessor.sequence + 1
+            ):
+                return None
+        except Exception:
+            return None
+        return RotationConfirmation(
+            seal=_ROTATION_CAPABILITY_SEAL,
+            owner_name=intent.owner_name,
+            predecessor_owner_public_key=intent.predecessor_owner_public_key,
+            successor_owner_public_key=intent.successor_owner_public_key,
+            predecessor_state_hash=intent.predecessor_state_hash,
+            sequence=intent.sequence,
+            envelope_hash=intent.envelope_hash,
+            state_hash=state.state_hash,
+            latch_registry=self._rotation_latches,
         )
 
     def _confirm_publication(
@@ -1593,6 +2268,9 @@ class RegistryAdapter:
         draft: IdentityDraft | None = None,
     ) -> SubmissionResult:
         """Submit one explicitly consented Identity update without auto-retry."""
+        owner_name = _validate_owner_name(owner_name)
+        if self._rotation_latches.is_owner_latched(owner_name):
+            raise InvalidIdentityRequest()
         _require_bytes(owner_public_key, length=_KEY_LENGTH)
         _require_bytes(signer_public_key, length=_KEY_LENGTH)
         current = self.read_state(owner_name=owner_name)
@@ -1698,146 +2376,160 @@ class RegistryAdapter:
             status, reason = consent_failure
             return SubmissionResult(status=status, transcript=transcript, reason=reason)
 
-        latest = self.read_state(owner_name=owner_name)
-        if not _same_state(current, latest):
-            return SubmissionResult(
-                status=PublishStatus.STALE,
-                transcript=transcript,
-                reason="accepted state changed before signing",
-            )
-        if expires_at <= int(time.time()):
-            return SubmissionResult(
-                status=PublishStatus.EXPIRED,
-                transcript=transcript,
-                reason="consent expired",
-            )
-
-        signer = None
-        try:
-            signer = signer_factory()
-            if signer.public_key != signer_public_key:
-                raise InvalidIdentityRequest()
-            if expires_at <= int(time.time()) or not getattr(signer, "is_active", True):
-                signer.invalidate()
+        def complete_submission() -> SubmissionResult:
+            latest = self.read_state(owner_name=owner_name)
+            if not _same_state(current, latest):
+                return SubmissionResult(
+                    status=PublishStatus.STALE,
+                    transcript=transcript,
+                    reason="accepted state changed before signing",
+                )
+            if expires_at <= int(time.time()):
                 return SubmissionResult(
                     status=PublishStatus.EXPIRED,
                     transcript=transcript,
                     reason="consent expired",
                 )
-            signature = signer.sign_identity_update(update)
-            if type(signature) is not bytes or len(signature) != _SIGNATURE_LENGTH:
-                raise InvalidIdentityRequest()
-            _verify_signature(signer_public_key, update, signature)
-        except InvalidIdentityRequest:
-            if signer is not None:
-                signer.invalidate()
-            return SubmissionResult(
-                status=PublishStatus.FAILED,
-                transcript=transcript,
-                reason="signing failed",
-            )
-        except Exception:
-            if signer is not None:
-                signer.invalidate()
-            return SubmissionResult(
-                status=PublishStatus.FAILED,
-                transcript=transcript,
-                reason="signing failed",
-            )
 
-        latest = self.read_state(owner_name=owner_name)
-        if not _same_state(current, latest):
-            return SubmissionResult(
-                status=PublishStatus.STALE,
-                transcript=transcript,
-                signed_update_bytes=update,
-                reason="accepted state changed before publication",
-            )
-        if expires_at <= int(time.time()):
-            return SubmissionResult(
-                status=PublishStatus.EXPIRED,
-                transcript=transcript,
-                signed_update_bytes=update,
-                reason="consent expired",
-            )
+            signer = None
+            try:
+                signer = signer_factory()
+                if signer.public_key != signer_public_key:
+                    raise InvalidIdentityRequest()
+                if expires_at <= int(time.time()) or not getattr(signer, "is_active", True):
+                    signer.invalidate()
+                    return SubmissionResult(
+                        status=PublishStatus.EXPIRED,
+                        transcript=transcript,
+                        reason="consent expired",
+                    )
+                signature = signer.sign_identity_update(update)
+                if type(signature) is not bytes or len(signature) != _SIGNATURE_LENGTH:
+                    raise InvalidIdentityRequest()
+                _verify_signature(signer_public_key, update, signature)
+            except InvalidIdentityRequest:
+                if signer is not None:
+                    signer.invalidate()
+                return SubmissionResult(
+                    status=PublishStatus.FAILED,
+                    transcript=transcript,
+                    reason="signing failed",
+                )
+            except Exception:
+                if signer is not None:
+                    signer.invalidate()
+                return SubmissionResult(
+                    status=PublishStatus.FAILED,
+                    transcript=transcript,
+                    reason="signing failed",
+                )
 
-        if draft is not None:
-            identity_proof = IdentityProof(
-                signer_id=signer_id,
-                signer_public_key=signer_public_key,
-                signature=signature,
-            )
-            proof_bytes = (
-                signature
-                if signer_id is None
-                else _canonical({1: signer_id, 2: signature})
-            )
-            return SubmissionResult(
-                status=PublishStatus.PROOF_READY,
-                transcript=transcript,
-                signed_update_bytes=update,
-                proof_bytes=proof_bytes,
-                reason="draft proof ready",
-                draft=draft,
-                identity_proof=identity_proof,
-            )
+            latest = self.read_state(owner_name=owner_name)
+            if not _same_state(current, latest):
+                return SubmissionResult(
+                    status=PublishStatus.STALE,
+                    transcript=transcript,
+                    signed_update_bytes=update,
+                    reason="accepted state changed before publication",
+                )
+            if expires_at <= int(time.time()):
+                return SubmissionResult(
+                    status=PublishStatus.EXPIRED,
+                    transcript=transcript,
+                    signed_update_bytes=update,
+                    reason="consent expired",
+                )
 
-        if auth is not None and auth[5] > 1:
-            if signer_id is None:
-                raise InvalidIdentityRequest()
-            proof = _canonical({1: signer_id, 2: signature})
-            proof_draft = IdentityDraft(
-                signed_update_bytes=update,
-                previous_state_envelope=(current.envelope_bytes if current else None),
-                previous_state_history=(
-                    current.predecessor_envelopes if current else ()
-                ),
-            )
-            return SubmissionResult(
-                status=PublishStatus.PROOF_READY,
-                transcript=transcript,
-                signed_update_bytes=update,
-                proof_bytes=proof,
-                reason="threshold bundle required",
-                draft=proof_draft,
-                identity_proof=IdentityProof(
+            if draft is not None:
+                identity_proof = IdentityProof(
                     signer_id=signer_id,
                     signer_public_key=signer_public_key,
                     signature=signature,
-                ),
-            )
+                )
+                proof_bytes = (
+                    signature
+                    if signer_id is None
+                    else _canonical({1: signer_id, 2: signature})
+                )
+                return SubmissionResult(
+                    status=PublishStatus.PROOF_READY,
+                    transcript=transcript,
+                    signed_update_bytes=update,
+                    proof_bytes=proof_bytes,
+                    reason="draft proof ready",
+                    draft=draft,
+                    identity_proof=identity_proof,
+                )
 
-        if authorization is None:
-            envelope = _legacy_envelope(update, signature)
-        else:
-            if signer_id is None:
-                raise InvalidIdentityRequest()
-            envelope = _versioned_envelope(update, signer_id, signature)
+            if auth is not None and auth[5] > 1:
+                if signer_id is None:
+                    raise InvalidIdentityRequest()
+                proof = _canonical({1: signer_id, 2: signature})
+                proof_draft = IdentityDraft(
+                    signed_update_bytes=update,
+                    previous_state_envelope=(current.envelope_bytes if current else None),
+                    previous_state_history=(
+                        current.predecessor_envelopes if current else ()
+                    ),
+                )
+                return SubmissionResult(
+                    status=PublishStatus.PROOF_READY,
+                    transcript=transcript,
+                    signed_update_bytes=update,
+                    proof_bytes=proof,
+                    reason="threshold bundle required",
+                    draft=proof_draft,
+                    identity_proof=IdentityProof(
+                        signer_id=signer_id,
+                        signer_public_key=signer_public_key,
+                        signature=signature,
+                    ),
+                )
 
-        owner_name_hex = owner_name.hex()
-        expected_state_hash = current.state_hash if current is not None else None
-        try:
-            self._transport.put_identity_envelope(
-                owner_name_hex=owner_name_hex,
-                envelope_cbor=envelope,
-                expected_state_hash=expected_state_hash,
-                expires_at=expires_at,
-            )
-        except StalePublication:
-            return SubmissionResult(
-                status=PublishStatus.STALE,
-                transcript=transcript,
-                envelope_bytes=envelope,
-                reason="conditional publication rejected",
-            )
-        except ExpiredPublication:
-            return SubmissionResult(
-                status=PublishStatus.EXPIRED,
-                transcript=transcript,
-                envelope_bytes=envelope,
-                reason="consent expired",
-            )
-        except Exception:
+            if authorization is None:
+                envelope = _legacy_envelope(update, signature)
+            else:
+                if signer_id is None:
+                    raise InvalidIdentityRequest()
+                envelope = _versioned_envelope(update, signer_id, signature)
+
+            owner_name_hex = owner_name.hex()
+            expected_state_hash = current.state_hash if current is not None else None
+            try:
+                self._transport.put_identity_envelope(
+                    owner_name_hex=owner_name_hex,
+                    envelope_cbor=envelope,
+                    expected_state_hash=expected_state_hash,
+                    expires_at=expires_at,
+                )
+            except StalePublication:
+                return SubmissionResult(
+                    status=PublishStatus.STALE,
+                    transcript=transcript,
+                    envelope_bytes=envelope,
+                    reason="conditional publication rejected",
+                )
+            except ExpiredPublication:
+                return SubmissionResult(
+                    status=PublishStatus.EXPIRED,
+                    transcript=transcript,
+                    envelope_bytes=envelope,
+                    reason="consent expired",
+                )
+            except Exception:
+                accepted = self._confirm(
+                    owner_name=owner_name,
+                    envelope=envelope,
+                    previous_state=current,
+                )
+                return SubmissionResult(
+                    status=PublishStatus.CONFIRMED if accepted else PublishStatus.UNKNOWN,
+                    transcript=transcript,
+                    envelope_bytes=envelope,
+                    accepted_state=accepted,
+                    reason="independent readback required",
+                )
+
             accepted = self._confirm(
                 owner_name=owner_name,
                 envelope=envelope,
@@ -1848,21 +2540,17 @@ class RegistryAdapter:
                 transcript=transcript,
                 envelope_bytes=envelope,
                 accepted_state=accepted,
-                reason="independent readback required",
+                reason=None if accepted else "readback did not confirm exact envelope",
             )
 
-        accepted = self._confirm(
-            owner_name=owner_name,
-            envelope=envelope,
-            previous_state=current,
-        )
-        return SubmissionResult(
-            status=PublishStatus.CONFIRMED if accepted else PublishStatus.UNKNOWN,
-            transcript=transcript,
-            envelope_bytes=envelope,
-            accepted_state=accepted,
-            reason=None if accepted else "readback did not confirm exact envelope",
-        )
+        with self._rotation_latches.owner_lock(owner_name):
+            if self._rotation_latches.is_owner_latched(owner_name):
+                return SubmissionResult(
+                    status=PublishStatus.FAILED,
+                    transcript=transcript,
+                    reason="owner-key rotation is unresolved",
+                )
+            return complete_submission()
 
     def _confirm(
         self,

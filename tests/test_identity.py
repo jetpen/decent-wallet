@@ -25,8 +25,11 @@ OWNER_NAME = b"adapter-owner"
 
 
 class MemoryTransport:
+    supports_owner_key_rotation = True
+
     def __init__(self):
         self.envelope: bytes | None = None
+        self.remote_envelope: bytes | None = None
         self.history: dict[bytes, bytes] = {}
         self.writes: list[tuple[str, bytes]] = []
         self.drop_writes = False
@@ -34,6 +37,9 @@ class MemoryTransport:
 
     def get_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
         return self.envelope
+
+    def get_remote_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
+        return self.remote_envelope
 
     def get_identity_envelope_by_hash(
         self, *, owner_name_hex: str, state_hash: bytes
@@ -57,6 +63,7 @@ class MemoryTransport:
             if self.envelope is not None and expected_state_hash is not None:
                 self.history[expected_state_hash] = self.envelope
             self.envelope = envelope_cbor
+            self.remote_envelope = envelope_cbor
 
 
 def approved(_transcript: ConsentTranscript) -> ConsentDecision:
