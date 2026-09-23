@@ -824,3 +824,322 @@ def test_publication_after_state_change_is_stale_and_does_not_retry(tmp_path):
     assert len(transport.writes) == writes_before
     for wallet in wallets.values():
         wallet.lock()
+
+
+def test_owner_key_rotation_draft_from_legacy_predecessor_is_state_bound(tmp_path):
+    transport = MemoryTransport()
+    adapter = RegistryAdapter(transport)
+    wallets = make_wallets(tmp_path)
+    owner_wallet = wallets["alice"]
+    successor_public_key = owner_wallet.prepare_signing_key_rotation()
+
+    legacy_draft = adapter.create_draft(
+        owner_name=OWNER_NAME,
+        owner_public_key=owner_wallet.public_key,
+    )
+    legacy_result = adapter.sign_draft(
+        draft=legacy_draft,
+        signer_public_key=owner_wallet.public_key,
+        signer_factory=owner_wallet.create_signer,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="create Identity",
+        capability="identity.write",
+        expires_at=EXPIRY,
+        replay_nonce=b"legacy-rotation-seed",
+    )
+    assert publish_bundle(
+        adapter,
+        IdentityBundle.from_submission(legacy_result),
+        b"publish-legacy-before-rotation",
+    ).status is PublishStatus.CONFIRMED
+    predecessor = adapter.read_state(owner_name=OWNER_NAME)
+    assert predecessor is not None
+
+    with pytest.raises(InvalidIdentityRequest):
+        adapter.create_owner_key_rotation_draft(
+            owner_name=OWNER_NAME,
+            successor_owner_public_key=successor_public_key,
+            successor_signer_set=[
+                {1: "bob", 2: wallets["bob"].public_key},
+                {1: "carol", 2: wallets["carol"].public_key},
+                {1: "dave", 2: wallets["dave"].public_key},
+            ],
+        )
+
+    rotation_draft = adapter.create_owner_key_rotation_draft(
+        owner_name=OWNER_NAME,
+        successor_owner_public_key=successor_public_key,
+        successor_signer_set=[
+            {1: "alice", 2: successor_public_key},
+            {1: "bob", 2: wallets["bob"].public_key},
+            {1: "carol", 2: wallets["carol"].public_key},
+        ],
+    )
+
+    assert rotation_draft.owner_name == predecessor.owner_name == OWNER_NAME
+    assert rotation_draft.owner_public_key == successor_public_key
+    assert rotation_draft.sequence == predecessor.sequence + 1
+    assert rotation_draft.previous_state_envelope == predecessor.envelope_bytes
+    assert rotation_draft.authorization == {
+        1: 1,
+        2: 1,
+        3: 5,
+        4: 1,
+        5: 2,
+        6: [
+            {1: "alice", 2: successor_public_key},
+            {1: "bob", 2: wallets["bob"].public_key},
+            {1: "carol", 2: wallets["carol"].public_key},
+        ],
+        7: predecessor.state_hash,
+    }
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_legacy_owner_key_rotation_proof_is_local_and_envelope_is_not_publishable(
+    tmp_path,
+):
+    transport = MemoryTransport()
+    adapter = RegistryAdapter(transport)
+    wallets = make_wallets(tmp_path)
+    owner_wallet = wallets["alice"]
+    active_public_key = owner_wallet.public_key
+    successor_public_key = owner_wallet.prepare_signing_key_rotation()
+
+    legacy_draft = adapter.create_draft(
+        owner_name=OWNER_NAME,
+        owner_public_key=active_public_key,
+    )
+    legacy_result = adapter.sign_draft(
+        draft=legacy_draft,
+        signer_public_key=active_public_key,
+        signer_factory=owner_wallet.create_signer,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="create Identity",
+        capability="identity.write",
+        expires_at=EXPIRY,
+        replay_nonce=b"legacy-rotation-seed",
+    )
+    assert publish_bundle(
+        adapter,
+        IdentityBundle.from_submission(legacy_result),
+        b"publish-legacy-before-rotation",
+    ).status is PublishStatus.CONFIRMED
+    predecessor = adapter.read_state(owner_name=OWNER_NAME)
+    assert predecessor is not None
+    rotation_draft = adapter.create_owner_key_rotation_draft(
+        owner_name=OWNER_NAME,
+        successor_owner_public_key=successor_public_key,
+        successor_signer_set=[
+            {1: "alice", 2: successor_public_key},
+            {1: "bob", 2: wallets["bob"].public_key},
+            {1: "carol", 2: wallets["carol"].public_key},
+        ],
+    )
+
+    with pytest.raises(InvalidIdentityRequest):
+        adapter.submit_identity(
+            owner_name=OWNER_NAME,
+            owner_public_key=successor_public_key,
+            signer_public_key=owner_wallet.public_key,
+            signer_factory=owner_wallet.create_signer,
+            consent=approved,
+            authenticated_origin="https://wallet.example",
+            environment="testnet",
+            operation="owner-key-rotation",
+            purpose="unauthorized direct rotation",
+            capability="identity.rotate-owner-key",
+            expires_at=EXPIRY,
+            replay_nonce=b"direct-rotation-without-draft",
+            authorization=rotation_draft.authorization,
+            signer_id=None,
+        )
+
+    unrelated_draft = IdentityDraft.create(
+        owner_name=OWNER_NAME,
+        owner_public_key=wallets["bob"].public_key,
+        sequence=rotation_draft.sequence,
+        authorization=rotation_draft.authorization,
+        previous_state_envelope=rotation_draft.previous_state_envelope,
+        previous_state_history=rotation_draft.previous_state_history,
+    )
+    with pytest.raises(InvalidIdentityRequest):
+        owner_wallet.prove_pending_signing_key_rotation(unrelated_draft)
+
+    encrypted_before_pop = owner_wallet.export_container()
+    assert owner_wallet.prove_pending_signing_key_rotation(rotation_draft) is None
+    assert owner_wallet.export_container() == encrypted_before_pop
+    assert owner_wallet.public_key == active_public_key
+    assert owner_wallet.pending_signing_public_key == successor_public_key
+
+    result = adapter.sign_draft(
+        draft=rotation_draft,
+        signer_public_key=active_public_key,
+        signer_factory=owner_wallet.create_signer,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="authorize owner-key rotation",
+        capability="identity.rotate-owner-key",
+        expires_at=EXPIRY,
+        replay_nonce=b"legacy-owner-key-proof",
+    )
+    assert result.status is PublishStatus.PROOF_READY
+    assert result.identity_proof is not None
+    assert result.identity_proof.signer_id is None
+    assert result.identity_proof.signer_public_key == active_public_key
+    bundle = IdentityBundle.from_submission(result)
+    envelope = bundle.finalize()
+    decoded = cbor2.loads(envelope)
+    assert decoded[3] == [{1: None, 2: result.identity_proof.signature}]
+
+    local_readback_transport = MemoryTransport()
+    local_readback_transport.envelope = envelope
+    local_readback_transport.history[predecessor.state_hash] = predecessor.envelope_bytes
+    locally_parsed = RegistryAdapter(local_readback_transport).read_state(
+        owner_name=OWNER_NAME
+    )
+    assert locally_parsed is not None
+    assert locally_parsed.owner_public_key == successor_public_key
+    assert locally_parsed.sequence == predecessor.sequence + 1
+
+    consent_calls = []
+    writes_before = len(transport.writes)
+    with pytest.raises(InvalidIdentityRequest):
+        publish_bundle(
+            adapter,
+            bundle,
+            b"forbidden-rotation-publication",
+            consent=lambda transcript: consent_calls.append(transcript),
+        )
+    with pytest.raises(InvalidIdentityRequest):
+        adapter.confirm_bundle(bundle)
+    assert consent_calls == []
+    assert len(transport.writes) == writes_before
+    assert adapter.read_state(owner_name=OWNER_NAME) == predecessor
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_versioned_owner_key_rotation_preserves_signer_governance_and_stays_local(
+    tmp_path,
+):
+    transport = MemoryTransport()
+    adapter = RegistryAdapter(transport)
+    wallets = make_wallets(tmp_path)
+    alice = wallets["alice"]
+
+    genesis_draft = adapter.create_draft(
+        owner_name=OWNER_NAME,
+        owner_public_key=alice.public_key,
+        authorization=authorization(wallets),
+    )
+    genesis_bundle = IdentityBundle.from_submission(
+        sign_draft(adapter, genesis_draft, alice, "alice", b"genesis-alice")
+    ).merge(
+        IdentityBundle.from_submission(
+            sign_draft(adapter, genesis_draft, wallets["bob"], "bob", b"genesis-bob")
+        )
+    )
+    assert publish_bundle(adapter, genesis_bundle, b"publish-genesis").status is PublishStatus.CONFIRMED
+    predecessor = adapter.read_state(owner_name=OWNER_NAME)
+    assert predecessor is not None
+
+    successor_public_key = alice.prepare_signing_key_rotation()
+    rotation_draft = adapter.create_owner_key_rotation_draft(
+        owner_name=OWNER_NAME,
+        successor_owner_public_key=successor_public_key,
+    )
+    assert rotation_draft.authorization == {
+        1: 1,
+        2: 1,
+        3: 5,
+        4: predecessor.generation,
+        5: predecessor.threshold,
+        6: [{1: name, 2: key} for name, key in predecessor.signer_set],
+        7: predecessor.state_hash,
+    }
+    rotation_authorization = rotation_draft.authorization
+    assert rotation_authorization is not None
+    wrong_epoch = dict(rotation_authorization)
+    wrong_epoch[4] += 1
+    with pytest.raises(InvalidIdentityRequest):
+        IdentityDraft.create(
+            owner_name=OWNER_NAME,
+            owner_public_key=successor_public_key,
+            sequence=rotation_draft.sequence,
+            authorization=wrong_epoch,
+            previous_state_envelope=predecessor.envelope_bytes,
+            previous_state_history=predecessor.predecessor_envelopes,
+        )
+    with pytest.raises(InvalidIdentityRequest):
+        IdentityDraft.create(
+            owner_name=OWNER_NAME,
+            owner_public_key=successor_public_key,
+            sequence=predecessor.sequence + 2,
+            authorization=rotation_authorization,
+            previous_state_envelope=predecessor.envelope_bytes,
+            previous_state_history=predecessor.predecessor_envelopes,
+        )
+    alice.prove_pending_signing_key_rotation(rotation_draft)
+
+    bundle = IdentityBundle.from_submission(
+        sign_draft(adapter, rotation_draft, alice, "alice", b"rotation-alice")
+    ).merge(
+        IdentityBundle.from_submission(
+            sign_draft(adapter, rotation_draft, wallets["bob"], "bob", b"rotation-bob")
+        )
+    )
+    envelope = bundle.finalize()
+    wire = cbor2.loads(envelope)
+    assert len(wire[3]) == predecessor.threshold
+    assert {proof[1] for proof in wire[3]} == {"alice", "bob"}
+
+    outsider_signer = wallets["dave"].create_signer()
+    outsider_signature = outsider_signer.sign_identity_update(
+        rotation_draft.signed_update_bytes
+    )
+    unauthorized = bundle.merge(
+        IdentityBundle(
+            rotation_draft,
+            (
+                IdentityProof(
+                    signer_id="dave",
+                    signer_public_key=wallets["dave"].public_key,
+                    signature=outsider_signature,
+                ),
+            ),
+        )
+    )
+    with pytest.raises(InvalidIdentityRequest):
+        unauthorized.finalize()
+
+    writes_before = len(transport.writes)
+    with pytest.raises(InvalidIdentityRequest):
+        publish_bundle(adapter, bundle, b"forbidden-versioned-rotation")
+    with pytest.raises(InvalidIdentityRequest):
+        adapter.confirm_bundle(bundle)
+    with pytest.raises(InvalidIdentityRequest):
+        publish_bundle(adapter, unauthorized, b"forbidden-outsider-rotation-proof")
+    assert len(transport.writes) == writes_before
+    assert adapter.read_state(owner_name=OWNER_NAME) == predecessor
+
+    local_readback_transport = MemoryTransport()
+    local_readback_transport.envelope = envelope
+    local_readback_transport.history[predecessor.state_hash] = predecessor.envelope_bytes
+    local_state = RegistryAdapter(local_readback_transport).read_state(
+        owner_name=OWNER_NAME
+    )
+    assert local_state is not None
+    assert local_state.owner_public_key == successor_public_key
+    assert local_state.sequence == predecessor.sequence + 1
+    assert local_state.generation == predecessor.generation
+    assert local_state.threshold == predecessor.threshold
+    assert local_state.signer_set == predecessor.signer_set
+    for wallet in wallets.values():
+        wallet.lock()
