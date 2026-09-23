@@ -4,8 +4,8 @@ import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from threading import Barrier
-from typing import Any
+from threading import Barrier, Event
+from typing import Any, cast
 
 import cbor2
 import pytest
@@ -16,12 +16,17 @@ from decent_wallet import (
     IdentityBundle,
     IdentityDraft,
     IdentityProof,
+    InvalidContainer,
     InvalidIdentityRequest,
     InvalidIdentityState,
     PublishStatus,
     RegistryAdapter,
+    RotationConfirmation,
     RotationDispatchIntent,
+    RotationDispatchPermit,
+    RotationDispatchRejection,
     RotationInProgress,
+    RotationPublication,
     StalePublication,
     ExpiredPublication,
     SignerUnavailable,
@@ -36,8 +41,11 @@ EXPIRY = 2_000_000_000
 
 
 class MemoryTransport:
+    supports_owner_key_rotation = True
+
     def __init__(self) -> None:
         self.envelope: bytes | None = None
+        self.remote_envelope: bytes | None = None
         self.writes: list[dict[str, Any]] = []
         self.history: dict[bytes, bytes] = {}
         self.drop_writes = False
@@ -46,6 +54,9 @@ class MemoryTransport:
 
     def get_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
         return self.envelope
+
+    def get_remote_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
+        return self.remote_envelope
 
     def get_identity_envelope_by_hash(
         self, *, owner_name_hex: str, state_hash: bytes
@@ -76,6 +87,7 @@ class MemoryTransport:
             if self.envelope is not None and expected_state_hash is not None:
                 self.history[expected_state_hash] = self.envelope
             self.envelope = envelope_cbor
+            self.remote_envelope = envelope_cbor
         if self.raise_after_write:
             raise TimeoutError("transport detail")
 
@@ -138,6 +150,22 @@ def publish_bundle(adapter, bundle, nonce, *, consent=approved, expiry=EXPIRY):
         expires_at=expiry,
         replay_nonce=nonce,
     )
+
+
+def prepare_rotation_publication(adapter, bundle, nonce):
+    result = adapter.prepare_owner_key_rotation_publication(
+        bundle,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="publish owner-key rotation",
+        capability="identity.rotate-owner-key",
+        expires_at=EXPIRY,
+        replay_nonce=nonce,
+    )
+    assert result.status is PublishStatus.READY
+    assert result.publication is not None
+    return result.publication
 
 
 def test_independent_signers_exchange_public_bundle_and_publish_threshold_envelope(tmp_path):
@@ -1150,20 +1178,34 @@ def test_versioned_owner_key_rotation_preserves_signer_governance_and_stays_loca
     assert local_state.threshold == predecessor.threshold
     assert local_state.signer_set == predecessor.signer_set
 
-    intent = alice.latch_signing_key_rotation_dispatch_intent(bundle)
+    publication = prepare_rotation_publication(adapter, bundle, b"latch-v1-rotation")
+    permit = alice.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    intent = permit.intent
     assert intent.owner_name == OWNER_NAME
     assert intent.predecessor_state_hash == predecessor.state_hash
     assert intent.sequence == predecessor.sequence + 1
     assert intent.envelope_hash == hashlib.sha256(envelope).digest()
     with pytest.raises(RotationInProgress):
         alice.create_signer()
+
+    dispatched = adapter.dispatch_owner_key_rotation(publication, permit)
+    assert dispatched.status is PublishStatus.CONFIRMED
+    assert dispatched.confirmation is not None
+    alice.finalize_signing_key_rotation(dispatched.confirmation)
+    accepted = adapter.read_state(owner_name=OWNER_NAME)
+    assert accepted is not None
+    assert accepted.owner_public_key == successor_public_key
+    assert accepted.signer_set == predecessor.signer_set
+    assert accepted.generation == predecessor.generation
+    assert accepted.threshold == predecessor.threshold
     for wallet in wallets.values():
         wallet.lock()
 
 
 def make_legacy_rotation_bundle(tmp_path):
     wallets = make_wallets(tmp_path, names=("alice", "bob", "carol"))
-    adapter = RegistryAdapter(MemoryTransport())
+    transport = MemoryTransport()
+    adapter = RegistryAdapter(transport)
     owner = wallets["alice"]
     active_public_key = owner.public_key
     successor_public_key = owner.prepare_signing_key_rotation()
@@ -1191,6 +1233,7 @@ def make_legacy_rotation_bundle(tmp_path):
     ).status is PublishStatus.CONFIRMED
     predecessor = adapter.read_state(owner_name=OWNER_NAME)
     assert predecessor is not None
+    transport.history[predecessor.state_hash] = predecessor.envelope_bytes
 
     rotation_draft = adapter.create_owner_key_rotation_draft(
         owner_name=OWNER_NAME,
@@ -1221,6 +1264,8 @@ def make_legacy_rotation_bundle(tmp_path):
         IdentityBundle.from_submission(rotation_result),
         active_public_key,
         successor_public_key,
+        adapter,
+        transport,
     )
 
 
@@ -1235,11 +1280,16 @@ def test_rotation_dispatch_intent_is_bound_to_finalized_envelope_and_survives_tr
         bundle,
         active_public_key,
         successor_public_key,
+        adapter,
+        transport,
     ) = make_legacy_rotation_bundle(tmp_path)
     envelope = bundle.finalize()
+    publication = prepare_rotation_publication(adapter, bundle, b"latch-transfer")
 
-    intent = owner.latch_signing_key_rotation_dispatch_intent(bundle)
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    intent = permit.intent
 
+    assert isinstance(permit, RotationDispatchPermit)
     assert isinstance(intent, RotationDispatchIntent)
     assert intent.owner_name == OWNER_NAME
     assert intent.predecessor_owner_public_key == active_public_key
@@ -1272,9 +1322,11 @@ def test_rotation_dispatch_intent_is_bound_to_finalized_envelope_and_survives_tr
 def test_latched_rotation_invalidates_and_blocks_signing_cancellation_and_replacement(
     tmp_path,
 ):
-    wallets, owner, _, draft, bundle, _, _ = make_legacy_rotation_bundle(tmp_path)
+    wallets, owner, _, draft, bundle, _, _, adapter, _ = make_legacy_rotation_bundle(tmp_path)
     outstanding_signer = owner.create_signer()
-    intent = owner.latch_signing_key_rotation_dispatch_intent(bundle)
+    publication = prepare_rotation_publication(adapter, bundle, b"latch-blocking")
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    intent = permit.intent
 
     assert owner.signing_key_rotation_dispatch_intent == intent
     with pytest.raises(SignerUnavailable):
@@ -1288,7 +1340,7 @@ def test_latched_rotation_invalidates_and_blocks_signing_cancellation_and_replac
     with pytest.raises(RotationInProgress):
         owner.cancel_signing_key_rotation()
     with pytest.raises(RotationInProgress):
-        owner.latch_signing_key_rotation_dispatch_intent(bundle)
+        owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
 
     owner.update_payload({"local_note": "retained with unresolved intent"})
     assert owner.signing_key_rotation_dispatch_intent == intent
@@ -1297,14 +1349,28 @@ def test_latched_rotation_invalidates_and_blocks_signing_cancellation_and_replac
 
 
 def test_invalid_or_incomplete_rotation_bundle_does_not_latch(tmp_path):
-    wallets, owner, _, _, bundle, _, _ = make_legacy_rotation_bundle(tmp_path)
+    wallets, owner, _, _, bundle, _, _, adapter, _ = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(adapter, bundle, b"latch-invalid")
     invalid_bundle = replace(
         bundle,
         proofs=(replace(bundle.proofs[0], signature=bytes(64)),),
     )
+    consent_calls = []
+    with pytest.raises(InvalidIdentityRequest):
+        adapter.prepare_owner_key_rotation_publication(
+            invalid_bundle,
+            consent=lambda transcript: consent_calls.append(transcript) or approved(transcript),
+            authenticated_origin="https://wallet.example",
+            environment="testnet",
+            purpose="publish owner-key rotation",
+            capability="identity.rotate-owner-key",
+            expires_at=EXPIRY,
+            replay_nonce=b"invalid-rotation-prepare",
+        )
+    assert consent_calls == []
 
     with pytest.raises(InvalidIdentityRequest):
-        owner.latch_signing_key_rotation_dispatch_intent(invalid_bundle)
+        owner.latch_signing_key_rotation_dispatch_intent(invalid_bundle, publication)
 
     assert owner.signing_key_rotation_dispatch_intent is None
     assert owner.create_signer().is_active
@@ -1317,7 +1383,8 @@ def test_failed_dispatch_intent_persistence_leaves_wallet_unlatched(
 ):
     import decent_wallet.container as container_module
 
-    wallets, owner, _, _, bundle, _, _ = make_legacy_rotation_bundle(tmp_path)
+    wallets, owner, _, _, bundle, _, _, adapter, _ = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(adapter, bundle, b"latch-storage-failure")
     before = owner.export_container()
     outstanding_signer = owner.create_signer()
 
@@ -1326,7 +1393,7 @@ def test_failed_dispatch_intent_persistence_leaves_wallet_unlatched(
 
     monkeypatch.setattr(container_module, "_atomic_write", fail_write)
     with pytest.raises(StorageFailure):
-        owner.latch_signing_key_rotation_dispatch_intent(bundle)
+        owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
 
     assert owner.export_container() == before
     assert owner.signing_key_rotation_dispatch_intent is None
@@ -1336,14 +1403,172 @@ def test_failed_dispatch_intent_persistence_leaves_wallet_unlatched(
         wallet.lock()
 
 
+def test_rotation_dispatch_requires_wallet_minted_permit_after_durable_latch(tmp_path):
+    (
+        wallets,
+        owner,
+        predecessor,
+        draft,
+        bundle,
+        active_public_key,
+        successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(adapter, bundle, b"dispatch-requires-latch")
+    ordinary_draft = adapter.create_draft(
+        owner_name=OWNER_NAME,
+        owner_public_key=active_public_key,
+    )
+    ordinary_submission = adapter.sign_draft(
+        draft=ordinary_draft,
+        signer_public_key=active_public_key,
+        signer_factory=owner.create_signer,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="prepare competing ordinary update",
+        capability="identity.write",
+        expires_at=EXPIRY,
+        replay_nonce=b"ordinary-pre-latch-proof",
+    )
+    assert ordinary_submission.status is PublishStatus.PROOF_READY
+    ordinary_bundle = IdentityBundle.from_submission(ordinary_submission)
+    forged_intent = RotationDispatchIntent(
+        owner_name=OWNER_NAME,
+        predecessor_owner_public_key=active_public_key,
+        successor_owner_public_key=successor_public_key,
+        predecessor_state_hash=predecessor.state_hash,
+        sequence=draft.sequence,
+        envelope_hash=hashlib.sha256(bundle.finalize()).digest(),
+    )
+    writes_before = len(transport.writes)
+    for capability_type in (
+        RotationDispatchPermit,
+        RotationPublication,
+        RotationConfirmation,
+        RotationDispatchRejection,
+    ):
+        assert not hasattr(capability_type, "_issue")
+    with pytest.raises(InvalidContainer):
+        RotationDispatchPermit(intent=forged_intent, seal=object())
+    forged_permit = object.__new__(RotationDispatchPermit)
+    object.__setattr__(forged_permit, "intent", forged_intent)
+    object.__setattr__(forged_permit, "_seal", object())
+
+    with pytest.raises(InvalidIdentityRequest):
+        adapter.dispatch_owner_key_rotation(publication, forged_permit)
+    with pytest.raises(InvalidIdentityRequest):
+        adapter.dispatch_owner_key_rotation(
+            publication, cast(RotationDispatchPermit, forged_intent)
+        )
+
+    assert len(transport.writes) == writes_before
+    assert owner.signing_key_rotation_dispatch_intent is None
+
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    blocked_signing_consent = []
+    with pytest.raises(InvalidIdentityRequest):
+        adapter.sign_draft(
+            draft=ordinary_draft,
+            signer_public_key=active_public_key,
+            signer_factory=owner.create_signer,
+            consent=lambda transcript: blocked_signing_consent.append(transcript) or approved(transcript),
+            authenticated_origin="https://wallet.example",
+            environment="testnet",
+            purpose="sign while rotation unresolved",
+            capability="identity.write",
+            expires_at=EXPIRY,
+            replay_nonce=b"ordinary-after-latch-sign",
+        )
+    assert blocked_signing_consent == []
+    blocked_consent = []
+    blocked_update = adapter.publish_bundle(
+        ordinary_bundle,
+        consent=lambda transcript: blocked_consent.append(transcript) or approved(transcript),
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="publish update",
+        capability="identity.write",
+        expires_at=EXPIRY,
+        replay_nonce=b"ordinary-after-latch-publish",
+    )
+    assert blocked_update.status is PublishStatus.FAILED
+    assert blocked_consent == []
+    assert len(transport.writes) == writes_before
+
+    dispatched = adapter.dispatch_owner_key_rotation(publication, permit)
+    assert dispatched.status is PublishStatus.CONFIRMED
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_inflight_submit_identity_is_stopped_by_rotation_latch(tmp_path):
+    (
+        wallets,
+        owner,
+        _predecessor,
+        _draft,
+        bundle,
+        active_public_key,
+        _successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(adapter, bundle, b"submit-latch-race")
+    consent_started = Event()
+    release_consent = Event()
+    signer_calls = []
+    writes_before = len(transport.writes)
+
+    def blocking_consent(_transcript: ConsentTranscript) -> ConsentDecision:
+        consent_started.set()
+        if not release_consent.wait(timeout=5):
+            return ConsentDecision.CANCELLED
+        return ConsentDecision.APPROVED
+
+    def tracked_signer_factory():
+        signer_calls.append(True)
+        return owner.create_signer()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            adapter.submit_identity,
+            owner_name=OWNER_NAME,
+            owner_public_key=active_public_key,
+            signer_public_key=active_public_key,
+            signer_factory=tracked_signer_factory,
+            consent=blocking_consent,
+            authenticated_origin="https://wallet.example",
+            environment="testnet",
+            operation="identity.update",
+            purpose="submit concurrent ordinary update",
+            capability="identity.write",
+            expires_at=EXPIRY,
+            replay_nonce=b"submit-before-latch-race",
+        )
+        assert consent_started.wait(timeout=5)
+        owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+        release_consent.set()
+        result = future.result(timeout=5)
+
+    assert result.status is PublishStatus.FAILED
+    assert signer_calls == []
+    assert len(transport.writes) == writes_before
+    assert result.reason == "owner-key rotation is unresolved"
+    for wallet in wallets.values():
+        wallet.lock()
+
+
 def test_concurrent_dispatch_latch_attempts_have_one_durable_winner(tmp_path):
-    wallets, owner, _, _, bundle, _, _ = make_legacy_rotation_bundle(tmp_path)
+    wallets, owner, _, _, bundle, _, _, adapter, _ = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(adapter, bundle, b"latch-concurrent")
     barrier = Barrier(2)
 
     def latch_after_barrier():
         barrier.wait(timeout=5)
         try:
-            return owner.latch_signing_key_rotation_dispatch_intent(bundle)
+            return owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
         except RotationInProgress:
             return None
 
@@ -1352,7 +1577,427 @@ def test_concurrent_dispatch_latch_attempts_have_one_durable_winner(tmp_path):
 
     successful = [result for result in results if result is not None]
     assert len(successful) == 1
-    assert owner.signing_key_rotation_dispatch_intent == successful[0]
-    assert owner.pending_signing_public_key == successful[0].successor_owner_public_key
+    assert owner.signing_key_rotation_dispatch_intent == successful[0].intent
+    assert owner.pending_signing_public_key == successful[0].intent.successor_owner_public_key
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_owner_rotation_requires_prepared_consent_before_dispatch_and_finalizes(
+    tmp_path,
+):
+    (
+        wallets,
+        owner,
+        predecessor,
+        _draft,
+        bundle,
+        active_public_key,
+        successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    consented = []
+    writes_before_prepare = len(transport.writes)
+
+    prepared = adapter.prepare_owner_key_rotation_publication(
+        bundle,
+        consent=lambda transcript: consented.append(transcript) or approved(transcript),
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="publish owner-key rotation",
+        capability="identity.rotate-owner-key",
+        expires_at=EXPIRY,
+        replay_nonce=b"rotation-publication",
+    )
+
+    assert prepared.status is PublishStatus.READY
+    assert prepared.publication is not None
+    assert len(consented) == 1
+    assert consented[0].review_payload == bundle.finalize()
+    assert len(transport.writes) == writes_before_prepare
+    assert owner.signing_key_rotation_dispatch_intent is None
+
+    permit = owner.latch_signing_key_rotation_dispatch_intent(
+        bundle, prepared.publication
+    )
+    intent = permit.intent
+    result = adapter.dispatch_owner_key_rotation(prepared.publication, permit)
+
+    assert result.status is PublishStatus.CONFIRMED
+    assert result.confirmation is not None
+    assert owner.public_key == active_public_key
+    assert owner.pending_signing_public_key == successor_public_key
+    assert owner.signing_key_rotation_dispatch_intent == intent
+    assert intent.predecessor_state_hash == predecessor.state_hash
+
+    owner.finalize_signing_key_rotation(result.confirmation)
+
+    assert owner.public_key == successor_public_key
+    assert owner.pending_signing_public_key is None
+    assert owner.signing_key_rotation_dispatch_intent is None
+    assert owner.create_signer().public_key == successor_public_key
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_ambiguous_rotation_stays_latched_until_fresh_remote_confirmation_after_reopen(
+    tmp_path,
+):
+    (
+        wallets,
+        owner,
+        predecessor,
+        _draft,
+        bundle,
+        active_public_key,
+        successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    ordinary_draft = adapter.create_draft(
+        owner_name=OWNER_NAME,
+        owner_public_key=active_public_key,
+    )
+    ordinary_submission = adapter.sign_draft(
+        draft=ordinary_draft,
+        signer_public_key=active_public_key,
+        signer_factory=owner.create_signer,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="prepare update before ambiguous rotation",
+        capability="identity.write",
+        expires_at=EXPIRY,
+        replay_nonce=b"ordinary-before-unknown",
+    )
+    assert ordinary_submission.status is PublishStatus.PROOF_READY
+    ordinary_bundle = IdentityBundle.from_submission(ordinary_submission)
+    transport.drop_writes = True
+    publication = prepare_rotation_publication(adapter, bundle, b"rotation-ambiguous")
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    intent = permit.intent
+
+    result = adapter.dispatch_owner_key_rotation(publication, permit)
+
+    assert result.status is PublishStatus.UNKNOWN
+    assert result.confirmation is None
+    assert result.rejection is None
+    assert owner.public_key == active_public_key
+    assert owner.pending_signing_public_key == successor_public_key
+    assert owner.signing_key_rotation_dispatch_intent == intent
+
+    # A write-through/local candidate is not independent remote evidence.
+    transport.envelope = bundle.finalize()
+    assert adapter.confirm_owner_key_rotation(intent) is None
+    assert owner.signing_key_rotation_dispatch_intent == intent
+
+    owner.lock()
+    reopened = Wallet.open(tmp_path / "alice.dw", PASSWORD)
+    reopened_adapter = RegistryAdapter(transport)
+    recovered_intent = reopened.signing_key_rotation_dispatch_intent
+    assert recovered_intent is not None
+    assert recovered_intent == intent
+    assert reopened_adapter.confirm_owner_key_rotation(recovered_intent) is None
+    assert reopened_adapter._rotation_latches.is_latched(recovered_intent)
+    assert not reopened_adapter._rotation_latches.is_dispatch_ready(recovered_intent)
+    blocked_consent = []
+    writes_before_blocked_publish = len(transport.writes)
+    blocked_update = reopened_adapter.publish_bundle(
+        ordinary_bundle,
+        consent=lambda transcript: blocked_consent.append(transcript) or approved(transcript),
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="publish update after reopen",
+        capability="identity.write",
+        expires_at=EXPIRY,
+        replay_nonce=b"ordinary-after-reopen-latched",
+    )
+    assert blocked_update.status is PublishStatus.FAILED
+    assert blocked_consent == []
+    assert len(transport.writes) == writes_before_blocked_publish
+
+    transport.remote_envelope = bundle.finalize()
+    confirmation = reopened_adapter.confirm_owner_key_rotation(recovered_intent)
+    assert confirmation is not None
+    reopened.finalize_signing_key_rotation(confirmation)
+
+    next_successor_public_key = reopened.prepare_signing_key_rotation()
+    next_rotation_draft = reopened_adapter.create_owner_key_rotation_draft(
+        owner_name=OWNER_NAME,
+        successor_owner_public_key=next_successor_public_key,
+    )
+    assert next_rotation_draft.owner_public_key == next_successor_public_key
+    reopened.cancel_signing_key_rotation()
+
+    assert reopened.public_key == successor_public_key
+    assert reopened.pending_signing_public_key is None
+    assert reopened.signing_key_rotation_dispatch_intent is None
+    for wallet in wallets.values():
+        wallet.lock()
+    reopened.lock()
+
+
+def test_prewrite_rotation_rejection_clears_only_matching_latch_once(tmp_path):
+    (
+        wallets,
+        owner,
+        _predecessor,
+        _draft,
+        bundle,
+        active_public_key,
+        successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    ordinary_draft = adapter.create_draft(
+        owner_name=OWNER_NAME,
+        owner_public_key=active_public_key,
+    )
+    ordinary_submission = adapter.sign_draft(
+        draft=ordinary_draft,
+        signer_public_key=active_public_key,
+        signer_factory=owner.create_signer,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="prepare update before pre-write rejection",
+        capability="identity.write",
+        expires_at=EXPIRY,
+        replay_nonce=b"ordinary-before-safe-rejection",
+    )
+    assert ordinary_submission.status is PublishStatus.PROOF_READY
+    ordinary_bundle = IdentityBundle.from_submission(ordinary_submission)
+    publication = prepare_rotation_publication(adapter, bundle, b"rotation-stale")
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    intent = permit.intent
+    transport.reject_conditional = True
+
+    rejected = adapter.dispatch_owner_key_rotation(publication, permit)
+
+    assert rejected.status is PublishStatus.STALE
+    assert rejected.confirmation is None
+    assert rejected.rejection is not None
+    assert owner.signing_key_rotation_dispatch_intent == intent
+    owner.resolve_signing_key_rotation_rejection(rejected.rejection)
+
+    assert owner.public_key == active_public_key
+    assert owner.pending_signing_public_key == successor_public_key
+    assert owner.signing_key_rotation_dispatch_intent is None
+    assert owner.create_signer().public_key == active_public_key
+
+    next_publication = prepare_rotation_publication(
+        adapter, bundle, b"rotation-stale-retry-consent"
+    )
+    next_permit = owner.latch_signing_key_rotation_dispatch_intent(
+        bundle, next_publication
+    )
+    next_intent = next_permit.intent
+    with pytest.raises(InvalidIdentityRequest):
+        owner.resolve_signing_key_rotation_rejection(rejected.rejection)
+    assert owner.signing_key_rotation_dispatch_intent == next_intent
+
+    repeated_rejection = adapter.dispatch_owner_key_rotation(
+        next_publication, next_permit
+    )
+    assert repeated_rejection.status is PublishStatus.STALE
+    assert repeated_rejection.rejection is not None
+    owner.resolve_signing_key_rotation_rejection(repeated_rejection.rejection)
+    transport.reject_conditional = False
+    republished = adapter.publish_bundle(
+        ordinary_bundle,
+        consent=approved,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="publish after safe rejection",
+        capability="identity.write",
+        expires_at=EXPIRY,
+        replay_nonce=b"ordinary-after-safe-rejection",
+    )
+    assert republished.status is PublishStatus.CONFIRMED
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_rotation_finalization_failure_preserves_both_keys_and_intent(
+    tmp_path, monkeypatch
+):
+    import decent_wallet.container as container_module
+
+    (
+        wallets,
+        owner,
+        _predecessor,
+        _draft,
+        bundle,
+        active_public_key,
+        successor_public_key,
+        adapter,
+        _transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(adapter, bundle, b"rotation-finalize")
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    intent = permit.intent
+    dispatched = adapter.dispatch_owner_key_rotation(publication, permit)
+    assert dispatched.status is PublishStatus.CONFIRMED
+    assert dispatched.confirmation is not None
+    before = owner.export_container()
+
+    def fail_write(_path, _data):
+        raise StorageFailure()
+
+    monkeypatch.setattr(container_module, "_atomic_write", fail_write)
+    with pytest.raises(StorageFailure):
+        owner.finalize_signing_key_rotation(dispatched.confirmation)
+
+    assert owner.export_container() == before
+    assert owner.public_key == active_public_key
+    assert owner.pending_signing_public_key == successor_public_key
+    assert owner.signing_key_rotation_dispatch_intent == intent
+    with pytest.raises(RotationInProgress):
+        owner.create_signer()
+
+    monkeypatch.undo()
+    owner.finalize_signing_key_rotation(dispatched.confirmation)
+    assert owner.public_key == successor_public_key
+    assert owner.pending_signing_public_key is None
+    assert owner.signing_key_rotation_dispatch_intent is None
+
+    owner.lock()
+    reopened = Wallet.open(tmp_path / "alice.dw", PASSWORD)
+    assert reopened.public_key == successor_public_key
+    assert reopened.pending_signing_public_key is None
+    assert reopened.signing_key_rotation_dispatch_intent is None
+    for wallet in wallets.values():
+        wallet.lock()
+    reopened.lock()
+
+
+def test_rotation_refuses_unsupported_registry_before_consent_or_latch(tmp_path):
+    (
+        wallets,
+        owner,
+        _predecessor,
+        _draft,
+        bundle,
+        _active_public_key,
+        _successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    transport.supports_owner_key_rotation = False
+    writes_before = len(transport.writes)
+    consent_calls = []
+
+    result = adapter.prepare_owner_key_rotation_publication(
+        bundle,
+        consent=lambda transcript: consent_calls.append(transcript) or approved(transcript),
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="publish owner-key rotation",
+        capability="identity.rotate-owner-key",
+        expires_at=EXPIRY,
+        replay_nonce=b"unsupported-rotation",
+    )
+
+    assert result.status is PublishStatus.FAILED
+    assert result.publication is None
+    assert consent_calls == []
+    assert len(transport.writes) == writes_before
+    assert owner.signing_key_rotation_dispatch_intent is None
+
+    transport.supports_owner_key_rotation = True
+    setattr(transport, "get_remote_identity_envelope", None)
+    no_remote_reader = adapter.prepare_owner_key_rotation_publication(
+        bundle,
+        consent=lambda transcript: consent_calls.append(transcript) or approved(transcript),
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="publish owner-key rotation",
+        capability="identity.rotate-owner-key",
+        expires_at=EXPIRY,
+        replay_nonce=b"rotation-no-remote-reader",
+    )
+    assert no_remote_reader.status is PublishStatus.FAILED
+    assert no_remote_reader.publication is None
+    assert consent_calls == []
+    assert len(transport.writes) == writes_before
+    delattr(transport, "get_remote_identity_envelope")
+
+    ready = prepare_rotation_publication(adapter, bundle, b"rotation-capability-change")
+
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, ready)
+    transport.supports_owner_key_rotation = False
+    blocked = adapter.dispatch_owner_key_rotation(ready, permit)
+    assert blocked.status is PublishStatus.FAILED
+    assert blocked.rejection is not None
+    assert len(transport.writes) == writes_before
+    owner.resolve_signing_key_rotation_rejection(blocked.rejection)
+    assert owner.signing_key_rotation_dispatch_intent is None
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_state_change_during_rotation_consent_prevents_prepared_dispatch(tmp_path):
+    (
+        wallets,
+        owner,
+        predecessor,
+        _rotation_draft,
+        rotation_bundle,
+        active_public_key,
+        successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    writes_before = len(transport.writes)
+    consent_calls = []
+
+    def consent_after_competing_update(transcript):
+        consent_calls.append(transcript)
+        competing_draft = adapter.create_draft(
+            owner_name=OWNER_NAME,
+            owner_public_key=active_public_key,
+        )
+        competing_result = adapter.sign_draft(
+            draft=competing_draft,
+            signer_public_key=active_public_key,
+            signer_factory=owner.create_signer,
+            consent=approved,
+            authenticated_origin="https://wallet.example",
+            environment="testnet",
+            purpose="authorize concurrent update",
+            capability="identity.write",
+            expires_at=EXPIRY,
+            replay_nonce=b"concurrent-update-proof",
+        )
+        assert competing_result.status is PublishStatus.PROOF_READY
+        competing_bundle = IdentityBundle.from_submission(competing_result)
+        published = publish_bundle(adapter, competing_bundle, b"concurrent-update-publish")
+        assert published.status is PublishStatus.CONFIRMED
+        return ConsentDecision.APPROVED
+
+    prepared = adapter.prepare_owner_key_rotation_publication(
+        rotation_bundle,
+        consent=consent_after_competing_update,
+        authenticated_origin="https://wallet.example",
+        environment="testnet",
+        purpose="publish owner-key rotation",
+        capability="identity.rotate-owner-key",
+        expires_at=EXPIRY,
+        replay_nonce=b"rotation-after-race",
+    )
+
+    assert prepared.status is PublishStatus.STALE
+    assert prepared.publication is None
+    assert len(consent_calls) == 1
+    assert len(transport.writes) == writes_before + 1
+    assert owner.signing_key_rotation_dispatch_intent is None
+    assert owner.public_key == active_public_key
+    assert owner.pending_signing_public_key == successor_public_key
+    current = adapter.read_state(owner_name=OWNER_NAME)
+    assert current is not None
+    assert current.sequence == predecessor.sequence + 1
+    assert current.owner_public_key == active_public_key
     for wallet in wallets.values():
         wallet.lock()
