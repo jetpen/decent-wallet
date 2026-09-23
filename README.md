@@ -10,8 +10,9 @@ Current implementation includes:
 - Canonical Identity SignedUpdate validation and protocol-specific signing.
 - One-operation, timeout-invalidated signer capabilities with concurrent-use protection.
 - Public-only Identity/Registry adapter with canonical consent transcripts, replay/expiry handling, stale-state conditional writes, detached threshold proofs, and exact read-back confirmation.
+- Immutable public Identity drafts and portable proof bundles with independent signing, canonical exchange, merge, threshold validation, finalization, conditional publication, and exact read-back confirmation.
 
-The implementation-ready specification is [docs/specs/wallet-implementation.md](docs/specs/wallet-implementation.md). Interactive consent UI, multisignature orchestration, platform adapters, Registry/DHT transport implementations, and command-line or graphical interfaces remain outside the current library implementation.
+The implementation-ready specification is [docs/specs/wallet-implementation.md](docs/specs/wallet-implementation.md). Interactive consent UI, platform adapters, Registry/DHT transport implementations, and command-line or graphical interfaces remain outside the current library implementation.
 
 ## Deployment
 
@@ -83,8 +84,12 @@ finally:
 - `wallet.change_password(password, confirmation)` atomically rewraps the existing wallet DEK.
 - `wallet.background()` and `wallet.lock()` invalidate capabilities and clear active wallet secrets.
 - `wallet.check_inactivity()` enforces the configured inactivity timeout.
-- `RegistryAdapter(transport, replay_store=None)` accepts only public owner/signer keys and a signer factory; the transport receives canonical public envelopes, an expected-state precondition, and an atomic expiry deadline, never a wallet or private key.
-- `adapter.submit_identity(...)` returns confirmed, unknown, stale, consent, failure, or proof-ready outcomes. Thresholds greater than one return a detached public proof for the local multisignature workflow instead of publishing an incomplete envelope.
+- `RegistryAdapter(transport, replay_store=None)` accepts only public owner/signer keys and a signer factory; the transport receives canonical public envelopes, an expected-state precondition, and an atomic expiry deadline, never a wallet or private key. Every non-genesis version-1 state requires the transport to retrieve its exact public predecessor history by state hash back to the signed anchor; incomplete history or chains exceeding 1,024 transitions fail closed.
+- `adapter.submit_identity(...)` returns confirmed, unknown, stale, consent, failure, or proof-ready outcomes. Thresholds greater than one return a detached public proof instead of publishing an incomplete envelope.
+- `adapter.create_draft(...)` derives the next sequence and binds the canonical update to the current public state. `adapter.sign_draft(...)` obtains consent and returns one local `IdentityProof` without publishing. Consent callbacks receive the exact non-secret `review_payload` bytes and matching payload hash for application rendering.
+- `IdentityBundle.from_submission(...)`, `bundle.merge(...)`, `bundle.to_cbor()` / `IdentityBundle.from_cbor(...)`, and `bundle.finalize()` support public bundle exchange and threshold validation. Drafts and partial bundles are local artifacts; only complete envelopes can reach `adapter.publish_bundle(...)`.
+- `adapter.publish_bundle(...)` requires a fresh purpose-bound publication consent, replay nonce, and expiry; the expiry is not trusted from exchanged bundle metadata. It uses the expected-state hash and independently confirms the exact envelope. Ambiguous writes return `unknown`; `adapter.confirm_bundle(...)` performs read-back only and never retries publication.
+- Legacy drafts finalize to the existing two-field envelope. Version-1 drafts finalize to the existing explicit-signer envelope; local draft/bundle CBOR v2 carries predecessor history and remains separate from both Registry envelopes. V1 local bundles are accepted only when their included history is sufficient to verify the transition.
 - `InMemoryReplayNonceStore` is suitable for isolated processes; applications spanning restarts must inject a durable atomic `ReplayNonceStore` implementation.
 
 `Wallet.create()` is available for encrypted wallet-local metadata that does not contain signing material. Its public payload API rejects `private_seed` and `public_key`; generated signing wallets must use `create_with_generated_key()`.

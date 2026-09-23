@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 _KEY_LENGTH = 32
 _SIGNATURE_LENGTH = 64
+_MAX_PREDECESSOR_DEPTH = 1024
 _AUTHORIZATION_KEYS = set(range(1, 8))
 _SIGNER_ENTRY_KEYS = {1, 2}
 _OPERATION_VALUES = {1, 2, 3, 4}
@@ -82,9 +83,20 @@ class IdentityTransport(Protocol):
     lookup key must still be absent. The transport must enforce this
     precondition atomically with publication. It must also reject the write
     atomically when ``expires_at`` has elapsed, before accepting the envelope.
+    Every non-genesis version-1 state requires retained predecessor lookup by
+    state hash back to its signed anchor; incomplete history is rejected.
     """
 
     def get_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
+        ...
+
+    def get_identity_envelope_by_hash(
+        self,
+        *,
+        owner_name_hex: str,
+        state_hash: bytes,
+    ) -> bytes | None:
+        """Return a retained public predecessor envelope for transition checks."""
         ...
 
     def put_identity_envelope(
@@ -142,6 +154,7 @@ class ConsentTranscript:
     replay_nonce: bytes
     sequence: int
     generation: int | None
+    review_payload: bytes
     signer_id: str | None = None
     signer_public_key: bytes | None = None
 
@@ -169,6 +182,9 @@ class ConsentTranscript:
             _require_bytes(self.signer_public_key, length=_KEY_LENGTH)
         elif self.signer_id is not None:
             raise InvalidIdentityRequest()
+        _require_bytes(self.review_payload, nonempty=True)
+        if hashlib.sha256(self.review_payload).digest() != self.payload_hash:
+            raise InvalidIdentityRequest()
 
     def canonical_bytes(self) -> bytes:
         value: dict[int, Any] = {
@@ -188,6 +204,7 @@ class ConsentTranscript:
             value[11] = self.signer_id
         if self.signer_public_key is not None:
             value[12] = self.signer_public_key
+        value[13] = self.review_payload
         return cbor2.dumps(value, canonical=True)
 
     @property
@@ -208,6 +225,174 @@ class IdentityState:
     generation: int | None
     threshold: int | None
     signer_set: tuple[tuple[str, bytes], ...]
+    predecessor_envelopes: tuple[bytes, ...] = ()
+
+
+def _parse_previous_state_chain(
+    *,
+    owner_name: bytes,
+    envelope: bytes | None,
+    history: tuple[bytes, ...],
+) -> IdentityState | None:
+    if envelope is None:
+        if history:
+            raise InvalidIdentityRequest()
+        return None
+    previous = None
+    for predecessor_envelope in reversed(history):
+        previous = _parse_identity_envelope(
+            owner_name=owner_name,
+            envelope_bytes=predecessor_envelope,
+            previous_state=previous,
+        )
+    return _parse_identity_envelope(
+        owner_name=owner_name,
+        envelope_bytes=envelope,
+        previous_state=previous,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityDraft:
+    """Immutable public Identity update draft, optionally bound to prior state."""
+
+    signed_update_bytes: bytes
+    previous_state_envelope: bytes | None = None
+    previous_state_history: tuple[bytes, ...] = ()
+
+    def __post_init__(self) -> None:
+        record, payload, sequence, authorization = _decode_signed_update(
+            self.signed_update_bytes
+        )
+        if (
+            payload
+            or not isinstance(self.previous_state_history, tuple)
+            or len(self.previous_state_history) > _MAX_PREDECESSOR_DEPTH
+        ):
+            raise InvalidIdentityRequest()
+        if any(type(envelope) is not bytes for envelope in self.previous_state_history):
+            raise InvalidIdentityRequest()
+        owner_name = _validate_owner_name(record[1])
+        owner_public_key = _require_bytes(record[2], length=_KEY_LENGTH)
+        previous = _parse_previous_state_chain(
+            owner_name=owner_name,
+            envelope=self.previous_state_envelope,
+            history=self.previous_state_history,
+        )
+        _validate_draft_transition(
+            owner_name=owner_name,
+            owner_public_key=owner_public_key,
+            sequence=sequence,
+            authorization=authorization,
+            previous_state=previous,
+        )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        owner_name: bytes,
+        owner_public_key: bytes,
+        sequence: int,
+        authorization: Mapping[int, Any] | None = None,
+        previous_state_envelope: bytes | None = None,
+        previous_state_history: tuple[bytes, ...] = (),
+    ) -> "IdentityDraft":
+        return cls(
+            signed_update_bytes=build_identity_update(
+                owner_name=owner_name,
+                owner_public_key=owner_public_key,
+                sequence=sequence,
+                authorization=authorization,
+            ),
+            previous_state_envelope=previous_state_envelope,
+            previous_state_history=previous_state_history,
+        )
+
+    @property
+    def owner_name(self) -> bytes:
+        return _decode_signed_update(self.signed_update_bytes)[0][1]
+
+    @property
+    def owner_public_key(self) -> bytes:
+        return _decode_signed_update(self.signed_update_bytes)[0][2]
+
+    @property
+    def sequence(self) -> int:
+        return _decode_signed_update(self.signed_update_bytes)[2]
+
+    @property
+    def authorization(self) -> dict[int, Any] | None:
+        authorization = _decode_signed_update(self.signed_update_bytes)[3]
+        return authorization
+
+    def to_cbor(self) -> bytes:
+        return _canonical(
+            {
+                1: 2,
+                2: self.signed_update_bytes,
+                3: self.previous_state_envelope,
+                4: list(self.previous_state_history),
+            }
+        )
+
+    @classmethod
+    def from_cbor(cls, data: bytes) -> "IdentityDraft":
+        try:
+            value = _require_canonical(data)
+            value = _require_exact_keys(value, {1, 2, 3, 4})
+            if type(value[1]) is not int or value[1] not in (1, 2):
+                raise InvalidIdentityRequest()
+            if value[3] is not None and type(value[3]) is not bytes:
+                raise InvalidIdentityRequest()
+            if value[1] == 1:
+                if value[4] is None:
+                    history = ()
+                elif type(value[4]) is bytes:
+                    history = (value[4],)
+                else:
+                    raise InvalidIdentityRequest()
+            else:
+                if not isinstance(value[4], list) or any(
+                    type(item) is not bytes for item in value[4]
+                ):
+                    raise InvalidIdentityRequest()
+                history = tuple(value[4])
+            return cls(value[2], value[3], history)
+        except InvalidIdentityRequest:
+            raise
+        except Exception:
+            raise InvalidIdentityRequest() from None
+
+
+def _draft_previous_state(draft: IdentityDraft) -> IdentityState | None:
+    return _parse_previous_state_chain(
+        owner_name=draft.owner_name,
+        envelope=draft.previous_state_envelope,
+        history=draft.previous_state_history,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityProof:
+    """Detached public proof bound to its declared signer identity."""
+
+    signer_id: str | None
+    signer_public_key: bytes
+    signature: bytes
+
+    def __post_init__(self) -> None:
+        if self.signer_id is not None:
+            if not isinstance(self.signer_id, str) or not self.signer_id:
+                raise InvalidIdentityRequest()
+            try:
+                signer_id_bytes = self.signer_id.encode("utf-8")
+            except UnicodeEncodeError:
+                raise InvalidIdentityRequest() from None
+            if len(signer_id_bytes) > 256:
+                raise InvalidIdentityRequest()
+        _require_bytes(self.signer_public_key, length=_KEY_LENGTH)
+        _require_bytes(self.signature, length=_SIGNATURE_LENGTH)
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +404,161 @@ class SubmissionResult:
     proof_bytes: bytes | None = None
     accepted_state: IdentityState | None = None
     reason: str | None = None
+    draft: IdentityDraft | None = None
+    identity_proof: IdentityProof | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationResult:
+    status: PublishStatus
+    envelope_bytes: bytes | None = None
+    accepted_state: IdentityState | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityBundle:
+    """Public draft and detached proofs exchanged outside Registry state."""
+
+    draft: IdentityDraft
+    proofs: tuple[IdentityProof, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.draft, IdentityDraft)
+            or not isinstance(self.proofs, tuple)
+            or any(not isinstance(proof, IdentityProof) for proof in self.proofs)
+        ):
+            raise InvalidIdentityRequest()
+        if self.proofs != tuple(sorted(self.proofs, key=_proof_order)):
+            raise InvalidIdentityRequest()
+        signer_ids = [proof.signer_id for proof in self.proofs]
+        if len(signer_ids) != len(set(signer_ids)):
+            raise InvalidIdentityRequest()
+
+    @classmethod
+    def from_submission(cls, result: SubmissionResult) -> "IdentityBundle":
+        if (
+            result.status is not PublishStatus.PROOF_READY
+            or result.draft is None
+            or result.identity_proof is None
+        ):
+            raise InvalidIdentityRequest()
+        return cls(result.draft, (result.identity_proof,))
+
+    def merge(self, other: "IdentityBundle") -> "IdentityBundle":
+        if not isinstance(other, IdentityBundle) or self.draft != other.draft:
+            raise InvalidIdentityRequest()
+        combined = self.proofs + other.proofs
+        signer_ids = [proof.signer_id for proof in combined]
+        if len(signer_ids) != len(set(signer_ids)):
+            raise InvalidIdentityRequest()
+        return IdentityBundle(self.draft, tuple(sorted(combined, key=_proof_order)))
+
+    def to_cbor(self) -> bytes:
+        return _canonical(
+            {
+                1: 2,
+                2: self.draft.to_cbor(),
+                3: [
+                    {
+                        1: proof.signer_id,
+                        2: proof.signer_public_key,
+                        3: proof.signature,
+                    }
+                    for proof in self.proofs
+                ],
+            }
+        )
+
+    @classmethod
+    def from_cbor(cls, data: bytes) -> "IdentityBundle":
+        try:
+            value = _require_canonical(data)
+            value = _require_exact_keys(value, {1, 2, 3})
+            if type(value[1]) is not int or value[1] not in (1, 2) or type(value[2]) is not bytes:
+                raise InvalidIdentityRequest()
+            if not isinstance(value[3], list):
+                raise InvalidIdentityRequest()
+            proofs = tuple(
+                IdentityProof(
+                    signer_id=_require_exact_keys(item, {1, 2, 3})[1],
+                    signer_public_key=item[2],
+                    signature=item[3],
+                )
+                for item in value[3]
+            )
+            if proofs != tuple(sorted(proofs, key=_proof_order)):
+                raise InvalidIdentityRequest()
+            return cls(IdentityDraft.from_cbor(value[2]), proofs)
+        except InvalidIdentityRequest:
+            raise
+        except Exception:
+            raise InvalidIdentityRequest() from None
+
+    def finalize(self) -> bytes:
+        previous_state = _draft_previous_state(self.draft)
+        if not self.proofs:
+            raise InvalidIdentityRequest()
+        record, payload, _sequence, authorization = _decode_signed_update(
+            self.draft.signed_update_bytes
+        )
+        if payload:
+            raise InvalidIdentityRequest()
+        if authorization is None:
+            if len(self.proofs) != 1:
+                raise InvalidIdentityRequest()
+            proof = self.proofs[0]
+            if proof.signer_id is not None or proof.signer_public_key != record[2]:
+                raise InvalidIdentityRequest()
+            _verify_bundle_signature(
+                proof.signer_public_key,
+                self.draft.signed_update_bytes,
+                proof.signature,
+            )
+            envelope = _legacy_envelope(self.draft.signed_update_bytes, proof.signature)
+        else:
+            operation = authorization[3]
+            if operation == 3:
+                if previous_state is None or not previous_state.signer_set:
+                    raise InvalidIdentityRequest()
+                authorized_keys = dict(previous_state.signer_set)
+            else:
+                authorized_keys = _signer_map(authorization[6])
+            valid_signers: set[str] = set()
+            proof_values: list[dict[int, Any]] = []
+            for proof in self.proofs:
+                if proof.signer_id is None:
+                    raise InvalidIdentityRequest()
+                expected_key = authorized_keys.get(proof.signer_id)
+                if expected_key is None or expected_key != proof.signer_public_key:
+                    raise InvalidIdentityRequest()
+                _verify_bundle_signature(
+                    expected_key,
+                    self.draft.signed_update_bytes,
+                    proof.signature,
+                )
+                valid_signers.add(proof.signer_id)
+                proof_values.append({1: proof.signer_id, 2: proof.signature})
+            if operation == 4:
+                if (
+                    len(self.proofs) != 1
+                    or len(valid_signers) != 1
+                    or self.proofs[0].signer_public_key != record[2]
+                ):
+                    raise InvalidIdentityRequest()
+            elif len(valid_signers) < authorization[5]:
+                raise InvalidIdentityRequest()
+            envelope = _canonical({1: 1, 2: self.draft.signed_update_bytes, 3: proof_values})
+        try:
+            _parse_identity_envelope(
+                owner_name=self.draft.owner_name,
+                envelope_bytes=envelope,
+                previous_state=previous_state,
+            )
+        except InvalidIdentityState:
+            raise InvalidIdentityRequest() from None
+        return envelope
 
 
 def _require_uint(value: Any) -> int:
@@ -371,6 +711,13 @@ def _verify_signature(public_key: bytes, update: bytes, signature: bytes) -> Non
         raise InvalidIdentityState() from None
 
 
+def _verify_bundle_signature(public_key: bytes, update: bytes, signature: bytes) -> None:
+    try:
+        _verify_signature(public_key, update, signature)
+    except InvalidIdentityState:
+        raise InvalidIdentityRequest() from None
+
+
 def _parse_identity_envelope(
     *,
     owner_name: bytes,
@@ -413,37 +760,79 @@ def _parse_identity_envelope(
     signer_entries = authorization[6]
     operation = authorization[3]
     if operation == 1:
-        if authorization[4] != 1 or authorization[7] != bytes(_KEY_LENGTH):
+        if (
+            previous_state is not None
+            or sequence != 1
+            or authorization[4] != 1
+            or authorization[7] != bytes(_KEY_LENGTH)
+        ):
             raise InvalidIdentityState()
         if authorization[5] != 2 or len(signer_entries) != 3:
             raise InvalidIdentityState()
     elif operation == 4:
         if authorization[4] != 1 or authorization[5] != 2 or len(signer_entries) != 3:
             raise InvalidIdentityState()
+    elif operation == 2:
+        if (
+            previous_state is None
+            or not previous_state.signer_set
+            or previous_state.owner_name != owner_name
+            or previous_state.owner_public_key != record[2]
+            or previous_state.state_hash != authorization[7]
+            or sequence != previous_state.sequence + 1
+            or authorization[4] != previous_state.generation
+            or authorization[5] != previous_state.threshold
+            or tuple((entry[1], entry[2]) for entry in signer_entries)
+            != previous_state.signer_set
+        ):
+            raise InvalidIdentityState()
     elif operation == 3:
         if authorization[5] != 2 or len(signer_entries) != 3:
+            raise InvalidIdentityState()
+        if (
+            previous_state is None
+            or not previous_state.signer_set
+            or previous_state.owner_name != owner_name
+            or previous_state.owner_public_key != record[2]
+            or previous_state.state_hash != authorization[7]
+            or sequence != previous_state.sequence + 1
+            or authorization[4] <= (previous_state.generation or 0)
+            or tuple((entry[1], entry[2]) for entry in signer_entries)
+            == previous_state.signer_set
+        ):
             raise InvalidIdentityState()
     elif operation != 2:
         raise InvalidIdentityState()
     proof_list = _validate_proof_list(proofs)
-    if operation == 4 and len(proof_list) != 1:
-        raise InvalidIdentityState()
     candidate_keys = {entry[1]: entry[2] for entry in signer_entries}
+    if operation == 4:
+        if (
+            len(proof_list) != 1
+            or candidate_keys.get(proof_list[0][1]) != record[2]
+            or previous_state is None
+            or previous_state.signer_set
+            or previous_state.owner_public_key != record[2]
+            or previous_state.state_hash != authorization[7]
+            or sequence != previous_state.sequence + 1
+        ):
+            raise InvalidIdentityState()
     previous_keys = dict(previous_state.signer_set) if previous_state is not None else {}
-    verification_keys = previous_keys if operation == 3 and previous_keys else candidate_keys
+    verification_keys = previous_keys if operation in (2, 3) else candidate_keys
     valid_signers: set[str] = set()
     for proof in proof_list:
         signer_id = proof[1]
         public_key = verification_keys.get(signer_id)
         if public_key is None:
-            if operation != 3 or previous_state is not None:
-                raise InvalidIdentityState()
-            continue
+            raise InvalidIdentityState()
         _verify_signature(public_key, update_bytes, proof[2])
         valid_signers.add(signer_id)
-    if operation != 3 and len(valid_signers) < authorization[5]:
-        raise InvalidIdentityState()
-    if operation == 3 and len(proof_list) < authorization[5]:
+    if operation == 3:
+        if len(valid_signers) < authorization[5]:
+            raise InvalidIdentityState()
+    elif operation == 4:
+        if len(valid_signers) != 1:
+            raise InvalidIdentityState()
+    elif len(valid_signers) < authorization[5]:
         raise InvalidIdentityState()
     public_key = _require_bytes(record[2], length=_KEY_LENGTH)
     return IdentityState(
@@ -456,6 +845,11 @@ def _parse_identity_envelope(
         generation=authorization[4],
         threshold=authorization[5],
         signer_set=tuple((entry[1], entry[2]) for entry in signer_entries),
+        predecessor_envelopes=(
+            (previous_state.envelope_bytes, *previous_state.predecessor_envelopes)
+            if operation in (2, 3, 4) and previous_state is not None
+            else ()
+        ),
     )
 
 
@@ -505,6 +899,77 @@ def _require_complete_2_of_3(auth: dict[int, Any]) -> None:
 
 def _signer_map(entries: list[dict[int, Any]]) -> dict[str, bytes]:
     return {entry[1]: entry[2] for entry in entries}
+
+
+def _proof_order(proof: IdentityProof) -> bytes:
+    if proof.signer_id is None:
+        return b""
+    try:
+        return proof.signer_id.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidIdentityRequest() from None
+
+
+def _validate_draft_transition(
+    *,
+    owner_name: bytes,
+    owner_public_key: bytes,
+    sequence: int,
+    authorization: dict[int, Any] | None,
+    previous_state: IdentityState | None,
+) -> None:
+    if previous_state is None:
+        if sequence != 1:
+            raise InvalidIdentityRequest()
+        if authorization is None:
+            return
+        if (
+            authorization[3] != 1
+            or authorization[4] != 1
+            or authorization[7] != bytes(_KEY_LENGTH)
+        ):
+            raise InvalidIdentityRequest()
+        _require_complete_2_of_3(authorization)
+        return
+
+    if (
+        owner_name != previous_state.owner_name
+        or owner_public_key != previous_state.owner_public_key
+        or sequence != previous_state.sequence + 1
+    ):
+        raise InvalidIdentityRequest()
+    if authorization is None:
+        if previous_state.signer_set:
+            raise InvalidIdentityRequest()
+        return
+    if authorization[7] != previous_state.state_hash:
+        raise InvalidIdentityRequest()
+
+    candidate = tuple((entry[1], entry[2]) for entry in authorization[6])
+    if not previous_state.signer_set:
+        if authorization[3] != 4 or authorization[4] != 1:
+            raise InvalidIdentityRequest()
+        _require_complete_2_of_3(authorization)
+        if previous_state.owner_public_key not in _signer_map(authorization[6]).values():
+            raise InvalidIdentityRequest()
+        return
+
+    if authorization[3] == 2:
+        if (
+            authorization[4] != previous_state.generation
+            or authorization[5] != previous_state.threshold
+            or candidate != previous_state.signer_set
+        ):
+            raise InvalidIdentityRequest()
+        return
+    if authorization[3] == 3:
+        if authorization[4] <= (previous_state.generation or 0):
+            raise InvalidIdentityRequest()
+        _require_complete_2_of_3(authorization)
+        if candidate == previous_state.signer_set:
+            raise InvalidIdentityRequest()
+        return
+    raise InvalidIdentityRequest()
 
 
 def _validate_transition(
@@ -581,7 +1046,292 @@ class RegistryAdapter:
             raise TransportFailure() from None
         if envelope is None:
             return None
-        return _parse_identity_envelope(owner_name=owner_name, envelope_bytes=envelope)
+        return self._parse_state_with_history(owner_name=owner_name, envelope=envelope)
+
+    def _parse_state_with_history(
+        self,
+        *,
+        owner_name: bytes,
+        envelope: bytes,
+    ) -> IdentityState:
+        chain: list[bytes] = []
+        current_envelope = envelope
+        while True:
+            value = _require_canonical(current_envelope)
+            authorization = None
+            if (
+                isinstance(value, dict)
+                and type(value.get(1)) is int
+                and value[1] == 1
+                and type(value.get(2)) is bytes
+            ):
+                _, _, _, authorization = _decode_signed_update(value[2])
+            if authorization is None or authorization[3] not in (2, 3, 4):
+                state = _parse_identity_envelope(
+                    owner_name=owner_name,
+                    envelope_bytes=current_envelope,
+                )
+                break
+            if len(chain) >= _MAX_PREDECESSOR_DEPTH:
+                raise InvalidIdentityState()
+            try:
+                predecessor_envelope = self._transport.get_identity_envelope_by_hash(
+                    owner_name_hex=owner_name.hex(),
+                    state_hash=authorization[7],
+                )
+            except Exception:
+                raise TransportFailure() from None
+            if predecessor_envelope is None:
+                raise InvalidIdentityState()
+            chain.append(current_envelope)
+            current_envelope = predecessor_envelope
+        for current_envelope in reversed(chain):
+            state = _parse_identity_envelope(
+                owner_name=owner_name,
+                envelope_bytes=current_envelope,
+                previous_state=state,
+            )
+        return state
+
+    def create_draft(
+        self,
+        *,
+        owner_name: bytes,
+        owner_public_key: bytes,
+        authorization: Mapping[int, Any] | None = None,
+    ) -> IdentityDraft:
+        owner_name = _validate_owner_name(owner_name)
+        _require_bytes(owner_public_key, length=_KEY_LENGTH)
+        current = self.read_state(owner_name=owner_name)
+        if current is not None and current.owner_public_key != owner_public_key:
+            raise InvalidIdentityRequest()
+        sequence = 1 if current is None else current.sequence + 1
+        return IdentityDraft.create(
+            owner_name=owner_name,
+            owner_public_key=owner_public_key,
+            sequence=sequence,
+            authorization=authorization,
+            previous_state_envelope=(current.envelope_bytes if current is not None else None),
+            previous_state_history=(
+                current.predecessor_envelopes if current is not None else ()
+            ),
+        )
+
+    def sign_draft(
+        self,
+        *,
+        draft: IdentityDraft,
+        signer_public_key: bytes,
+        signer_factory: SignerFactory,
+        consent: ConsentHandler,
+        authenticated_origin: str,
+        environment: str,
+        purpose: str,
+        capability: str,
+        expires_at: int,
+        replay_nonce: bytes,
+        signer_id: str | None = None,
+    ) -> SubmissionResult:
+        if not isinstance(draft, IdentityDraft):
+            raise InvalidIdentityRequest()
+        authorization = draft.authorization
+        operation = (
+            _OPERATION_NAMES[authorization[3]]
+            if authorization is not None
+            else "identity.update"
+        )
+        return self.submit_identity(
+            owner_name=draft.owner_name,
+            owner_public_key=draft.owner_public_key,
+            signer_public_key=signer_public_key,
+            signer_factory=signer_factory,
+            consent=consent,
+            authenticated_origin=authenticated_origin,
+            environment=environment,
+            operation=operation,
+            purpose=purpose,
+            capability=capability,
+            expires_at=expires_at,
+            replay_nonce=replay_nonce,
+            authorization=authorization,
+            signer_id=signer_id,
+            draft=draft,
+        )
+
+    def publish_bundle(
+        self,
+        bundle: IdentityBundle,
+        *,
+        consent: ConsentHandler,
+        authenticated_origin: str,
+        environment: str,
+        purpose: str,
+        capability: str,
+        expires_at: int,
+        replay_nonce: bytes,
+    ) -> PublicationResult:
+        if not isinstance(bundle, IdentityBundle) or not bundle.proofs:
+            raise InvalidIdentityRequest()
+        envelope = bundle.finalize()
+        owner_name = bundle.draft.owner_name
+        previous_state = _draft_previous_state(bundle.draft)
+        current = self.read_state(owner_name=owner_name)
+        if not _same_state(previous_state, current):
+            return PublicationResult(
+                status=PublishStatus.STALE,
+                envelope_bytes=envelope,
+                reason="accepted state changed before publication",
+            )
+
+        authorization = bundle.draft.authorization
+        operation = (
+            _OPERATION_NAMES[authorization[3]]
+            if authorization is not None
+            else "identity.update"
+        )
+        transcript = ConsentTranscript(
+            authenticated_origin=authenticated_origin,
+            environment=environment,
+            operation=operation,
+            payload_hash=hashlib.sha256(envelope).digest(),
+            purpose=purpose,
+            capability=capability,
+            expires_at=expires_at,
+            replay_nonce=replay_nonce,
+            sequence=bundle.draft.sequence,
+            generation=(
+                authorization[4]
+                if authorization is not None
+                else (previous_state.generation if previous_state is not None else None)
+            ),
+            review_payload=envelope,
+        )
+        consent_failure = self._consent_gate(
+            owner_name=owner_name,
+            transcript=transcript,
+            consent=consent,
+        )
+        if consent_failure is not None:
+            status, reason = consent_failure
+            return PublicationResult(
+                status=status,
+                envelope_bytes=envelope,
+                reason=reason,
+            )
+
+        # Re-read after consent so a state change during the approval step is stale.
+        current = self.read_state(owner_name=owner_name)
+        if not _same_state(previous_state, current):
+            return PublicationResult(
+                status=PublishStatus.STALE,
+                envelope_bytes=envelope,
+                reason="accepted state changed before publication",
+            )
+        if expires_at <= int(time.time()):
+            return PublicationResult(
+                status=PublishStatus.EXPIRED,
+                envelope_bytes=envelope,
+                reason="consent expired",
+            )
+        try:
+            self._transport.put_identity_envelope(
+                owner_name_hex=owner_name.hex(),
+                envelope_cbor=envelope,
+                expected_state_hash=(current.state_hash if current is not None else None),
+                expires_at=expires_at,
+            )
+        except StalePublication:
+            return PublicationResult(
+                status=PublishStatus.STALE,
+                envelope_bytes=envelope,
+                reason="conditional publication rejected",
+            )
+        except ExpiredPublication:
+            return PublicationResult(
+                status=PublishStatus.EXPIRED,
+                envelope_bytes=envelope,
+                reason="consent expired",
+            )
+        except Exception:
+            return self._confirm_publication(
+                owner_name=owner_name,
+                envelope=envelope,
+                previous_state=previous_state,
+                failure_reason="independent readback did not confirm dispatch",
+            )
+        return self._confirm_publication(
+            owner_name=owner_name,
+            envelope=envelope,
+            previous_state=previous_state,
+            failure_reason="readback did not confirm exact envelope",
+        )
+
+    def confirm_bundle(self, bundle: IdentityBundle) -> PublicationResult:
+        if not isinstance(bundle, IdentityBundle):
+            raise InvalidIdentityRequest()
+        envelope = bundle.finalize()
+        previous_state = _draft_previous_state(bundle.draft)
+        return self._confirm_publication(
+            owner_name=bundle.draft.owner_name,
+            envelope=envelope,
+            previous_state=previous_state,
+            failure_reason="readback did not confirm exact envelope",
+        )
+
+    def _confirm_publication(
+        self,
+        *,
+        owner_name: bytes,
+        envelope: bytes,
+        previous_state: IdentityState | None,
+        failure_reason: str,
+    ) -> PublicationResult:
+        accepted = self._confirm(
+            owner_name=owner_name,
+            envelope=envelope,
+            previous_state=previous_state,
+        )
+        return PublicationResult(
+            status=PublishStatus.CONFIRMED if accepted else PublishStatus.UNKNOWN,
+            envelope_bytes=envelope,
+            accepted_state=accepted,
+            reason=None if accepted else failure_reason,
+        )
+
+    def _consent_gate(
+        self,
+        *,
+        owner_name: bytes,
+        transcript: ConsentTranscript,
+        consent: ConsentHandler,
+    ) -> tuple[PublishStatus, str] | None:
+        try:
+            replay_available = self._reserve_replay_nonce(
+                owner_name=owner_name,
+                authenticated_origin=transcript.authenticated_origin,
+                environment=transcript.environment,
+                replay_nonce=transcript.replay_nonce,
+            )
+        except Exception:
+            return PublishStatus.FAILED, "replay protection unavailable"
+        if not replay_available:
+            return PublishStatus.FAILED, "replay rejected"
+        if transcript.expires_at <= int(time.time()):
+            return PublishStatus.EXPIRED, "consent expired"
+        try:
+            decision = _normalize_consent(consent(transcript))
+        except Exception:
+            decision = ConsentDecision.FAILED
+        if decision is not ConsentDecision.APPROVED:
+            status = {
+                ConsentDecision.DENIED: PublishStatus.DENIED,
+                ConsentDecision.CANCELLED: PublishStatus.CANCELLED,
+                ConsentDecision.EXPIRED: PublishStatus.EXPIRED,
+            }.get(decision, PublishStatus.FAILED)
+            return status, decision.value
+        if transcript.expires_at <= int(time.time()):
+            return PublishStatus.EXPIRED, "consent expired"
+        return None
 
     def _reserve_replay_nonce(
         self,
@@ -620,11 +1370,27 @@ class RegistryAdapter:
         replay_nonce: bytes,
         authorization: Mapping[int, Any] | None = None,
         signer_id: str | None = None,
+        draft: IdentityDraft | None = None,
     ) -> SubmissionResult:
         """Submit one explicitly consented Identity update without auto-retry."""
         _require_bytes(owner_public_key, length=_KEY_LENGTH)
         _require_bytes(signer_public_key, length=_KEY_LENGTH)
         current = self.read_state(owner_name=owner_name)
+        if draft is not None:
+            if not isinstance(draft, IdentityDraft):
+                raise InvalidIdentityRequest()
+            if draft.previous_state_envelope != (current.envelope_bytes if current else None):
+                raise InvalidIdentityRequest()
+            if draft.previous_state_history != (
+                current.predecessor_envelopes if current else ()
+            ):
+                raise InvalidIdentityRequest()
+            if draft.owner_name != owner_name or draft.owner_public_key != owner_public_key:
+                raise InvalidIdentityRequest()
+            if draft.authorization != (dict(authorization) if authorization is not None else None):
+                raise InvalidIdentityRequest()
+            if draft.sequence != (1 if current is None else current.sequence + 1):
+                raise InvalidIdentityRequest()
         sequence = 1 if current is None else current.sequence + 1
         authorization_epoch: int | None = None
         auth: dict[int, Any] | None = None
@@ -668,6 +1434,9 @@ class RegistryAdapter:
                 sequence=sequence,
             )
 
+        if draft is not None and update != draft.signed_update_bytes:
+            raise InvalidIdentityRequest()
+
         transcript = ConsentTranscript(
             authenticated_origin=authenticated_origin,
             environment=environment,
@@ -681,49 +1450,16 @@ class RegistryAdapter:
             generation=(authorization_epoch if authorization is not None else (current.generation if current else None)),
             signer_id=signer_id,
             signer_public_key=signer_public_key,
+            review_payload=update,
         )
-        try:
-            replay_available = self._reserve_replay_nonce(
-                owner_name=owner_name,
-                authenticated_origin=authenticated_origin,
-                environment=environment,
-                replay_nonce=replay_nonce,
-            )
-        except Exception:
-            return SubmissionResult(
-                status=PublishStatus.FAILED,
-                transcript=transcript,
-                reason="replay protection unavailable",
-            )
-        if not replay_available:
-            return SubmissionResult(
-                status=PublishStatus.FAILED,
-                transcript=transcript,
-                reason="replay rejected",
-            )
-        if expires_at <= int(time.time()):
-            return SubmissionResult(
-                status=PublishStatus.EXPIRED,
-                transcript=transcript,
-                reason="consent expired",
-            )
-        try:
-            decision = _normalize_consent(consent(transcript))
-        except Exception:
-            decision = ConsentDecision.FAILED
-        if decision is not ConsentDecision.APPROVED:
-            status = {
-                ConsentDecision.DENIED: PublishStatus.DENIED,
-                ConsentDecision.CANCELLED: PublishStatus.CANCELLED,
-                ConsentDecision.EXPIRED: PublishStatus.EXPIRED,
-            }.get(decision, PublishStatus.FAILED)
-            return SubmissionResult(status=status, transcript=transcript, reason=decision.value)
-        if expires_at <= int(time.time()):
-            return SubmissionResult(
-                status=PublishStatus.EXPIRED,
-                transcript=transcript,
-                reason="consent expired",
-            )
+        consent_failure = self._consent_gate(
+            owner_name=owner_name,
+            transcript=transcript,
+            consent=consent,
+        )
+        if consent_failure is not None:
+            status, reason = consent_failure
+            return SubmissionResult(status=status, transcript=transcript, reason=reason)
 
         latest = self.read_state(owner_name=owner_name)
         if not _same_state(current, latest):
@@ -788,16 +1524,50 @@ class RegistryAdapter:
                 reason="consent expired",
             )
 
+        if draft is not None:
+            identity_proof = IdentityProof(
+                signer_id=signer_id,
+                signer_public_key=signer_public_key,
+                signature=signature,
+            )
+            proof_bytes = (
+                signature
+                if signer_id is None
+                else _canonical({1: signer_id, 2: signature})
+            )
+            return SubmissionResult(
+                status=PublishStatus.PROOF_READY,
+                transcript=transcript,
+                signed_update_bytes=update,
+                proof_bytes=proof_bytes,
+                reason="draft proof ready",
+                draft=draft,
+                identity_proof=identity_proof,
+            )
+
         if auth is not None and auth[5] > 1:
             if signer_id is None:
                 raise InvalidIdentityRequest()
             proof = _canonical({1: signer_id, 2: signature})
+            proof_draft = IdentityDraft(
+                signed_update_bytes=update,
+                previous_state_envelope=(current.envelope_bytes if current else None),
+                previous_state_history=(
+                    current.predecessor_envelopes if current else ()
+                ),
+            )
             return SubmissionResult(
                 status=PublishStatus.PROOF_READY,
                 transcript=transcript,
                 signed_update_bytes=update,
                 proof_bytes=proof,
                 reason="threshold bundle required",
+                draft=proof_draft,
+                identity_proof=IdentityProof(
+                    signer_id=signer_id,
+                    signer_public_key=signer_public_key,
+                    signature=signature,
+                ),
             )
 
         if authorization is None:

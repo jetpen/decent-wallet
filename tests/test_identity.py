@@ -1,7 +1,9 @@
-import cbor2
-import pytest
+import hashlib
 import time
 from typing import Any, cast
+
+import cbor2
+import pytest
 
 from decent_wallet import (
     ConsentDecision,
@@ -25,12 +27,18 @@ OWNER_NAME = b"adapter-owner"
 class MemoryTransport:
     def __init__(self):
         self.envelope: bytes | None = None
+        self.history: dict[bytes, bytes] = {}
         self.writes: list[tuple[str, bytes]] = []
         self.drop_writes = False
         self.reject_conditional = False
 
     def get_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
         return self.envelope
+
+    def get_identity_envelope_by_hash(
+        self, *, owner_name_hex: str, state_hash: bytes
+    ) -> bytes | None:
+        return self.history.get(state_hash)
 
     def put_identity_envelope(
         self,
@@ -46,6 +54,8 @@ class MemoryTransport:
             raise StalePublication()
         self.writes.append((owner_name_hex, envelope_cbor))
         if not self.drop_writes:
+            if self.envelope is not None and expected_state_hash is not None:
+                self.history[expected_state_hash] = self.envelope
             self.envelope = envelope_cbor
 
 
@@ -81,20 +91,22 @@ def test_consent_transcript_is_canonical_and_binds_required_fields():
         authenticated_origin="https://wallet.example",
         environment="testnet",
         operation="identity.update",
-        payload_hash=bytes(range(32)),
+        payload_hash=hashlib.sha256(b"canonical public update").digest(),
         purpose="update identity record",
         capability="identity.write",
         expires_at=2_000_000_000,
         replay_nonce=b"unique-request",
         sequence=4,
         generation=2,
+        review_payload=b"canonical public update",
     )
     decoded = cbor2.loads(transcript.canonical_bytes())
-    assert set(decoded) == set(range(1, 11))
+    assert set(decoded) == set(range(1, 11)) | {13}
     assert decoded[1] == "https://wallet.example"
-    assert decoded[4] == bytes(range(32))
+    assert decoded[4] == hashlib.sha256(b"canonical public update").digest()
     assert decoded[9] == 4
     assert decoded[10] == 2
+    assert decoded[13] == b"canonical public update"
     assert transcript.digest != bytes(32)
 
 
