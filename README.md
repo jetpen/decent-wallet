@@ -6,6 +6,7 @@ Current implementation includes:
 
 - Argon2id-protected, XChaCha20-Poly1305 encrypted wallet containers.
 - Version-2 authenticated container format. Version 1 is accepted only through explicit one-way migration; `Wallet.open()` and `Wallet.import_container()` remain v2-only. Other unsupported versions fail closed. See [ADR-0002](docs/adr/0002-wallet-container-v2-dispatch-intent.md) and [ADR-0003](docs/adr/0003-wallet-container-v1-to-v2-migration.md).
+- Normative [v2 container wire-format specification](docs/specs/wallet-container-v2-wire-format.md) and a public synthetic known-answer vector verified by Python tests. Native platform conformance remains unimplemented.
 - Atomic container writes, explicit authenticated v1-to-v2 migration, exact encrypted-container export/import, password rewrapping, bounded authentication delay, and lock/inactivity handling.
 - Local owner-key rotation: persist one encrypted pending successor; build and validate operation-5 drafts; locally prove possession without returning the proof signature; prepare publication consent, latch the exact envelope hash, conditionally dispatch, independently confirm via a fresh remote read, and promote the successor only from adapter-issued confirmation. Ambiguous outcomes retain both keys and the encrypted intent. This is a Python-core API over an injected transport; no production Registry transport is included, and Registry deployment compatibility is not verified.
 - CSRNG-only Ed25519 key generation and public-key derivation.
