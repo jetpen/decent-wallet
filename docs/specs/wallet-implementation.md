@@ -24,6 +24,18 @@ This specification covers the wallet MVP across Android, iPhone, and an optional
 
 The explicit v1-to-v2 migration contract, platform-adapter/conformance, and security-acceptance requirements derive from the accepted map decisions. The owner-key rotation contract in §10.2 is accepted. Exact encrypted-container export/import, v1-to-v2 migration, pending-key preparation, wallet-local operation-5 draft/proof/envelope construction, and the wallet-core prepare/dispatch/confirm/promote flow are implemented as Python-core slices of Issue #18. Native platform support and cross-platform conformance remain incomplete.
 
+### Kotlin/JVM v2 vector consumer (Issue #33; accepted, not implemented)
+
+The first non-Python conformance slice is a standalone, test-only Kotlin/JVM Maven module under `interop/kotlin/`. It reads `tests/vectors/wallet-container-v2.json` directly. It does not change the Python package, add a production API or CLI, add CI, or constitute an Android application or production adapter. It does not complete Issues #18 or #19.
+
+The locked build uses Maven Wrapper 3.9.16 with pinned wrapper/distribution checksums, Kotlin Maven Plugin 2.4.20, JDK 17 or newer to run the build, and Java 8 bytecode/API release (`jdkRelease=8`). `io.github.chains-project:maven-lockfile:5.18.3` generates and validates a checked-in lockfile containing SHA-256 checksums for resolved dependencies and Maven plugins. Document one locked command that runs the module's tests and lock validation.
+
+The approved crypto dependency is `org.bouncycastle:bcprov-jdk18on:1.86` under the Bouncy Castle License. Use its lightweight APIs directly without registering a global JCA provider. The accepted Android API 26 evidence is Bouncy Castle's build-time compatibility check only; it is not an Android runtime result and does not establish runtime compatibility for this module. Parse JSON with `com.fasterxml.jackson.core:jackson-core:2.22.2` and strict duplicate-name detection, while implementing the wallet-specific canonical JSON/AAD writer and typed-payload decoder in the module.
+
+The positive vector test derives the KEK from the public fixture password, checks expected KDF/AAD intermediates, unwraps the DEK with the derived KEK, decrypts the payload with that recovered DEK, and verifies decoded semantics and the expected public key. It must not bypass the wrap path by using the fixture DEK directly for payload decryption. Accept legal outer-envelope whitespace and member-order variations while reconstructing canonical AAD. Test Unicode code-point key ordering with a supplementary-plane key and a BMP key; do not normalize strings.
+
+Negative tests separately exercise the wrap and payload AEAD boundaries, including malformed authenticated typed-payload bytes, v2-to-v1 relabeling, and unsupported versions. Diagnostics remain values-free and never print the fixture password, seed, DEK, or derived key. This slice does not add deterministic randomness to production code.
+
 ### Researched but unimplemented
 
 The established Identity/Registry toolchain provides the Ed25519, canonical-CBOR, signed-envelope, sequence, and finalized-publication contracts described in `docs/research/issue-3-csrng-signing-boundary.md`. Interactive consent UI, native platform adapters, and a concrete production Registry/DHT transport for this wallet remain unimplemented. The `decent-registry` main branch includes operation-5 validation and independent remote read-back at commit [`dde0730482076cd00e6f115bdd25f4534ae5e927`](https://github.com/jetpen/decent-registry/commit/dde0730482076cd00e6f115bdd25f4534ae5e927); this repository does not establish that support is deployed in any target environment.
