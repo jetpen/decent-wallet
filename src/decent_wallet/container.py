@@ -42,6 +42,7 @@ _FORMAT = "decent-wallet"
 _KDF_MEMORY_KIB = 64 * 1024
 _KDF_TIME_COST = 3
 _KDF_PARALLELISM = 4
+_ARGON2_VERSION = 19
 _KEY_LENGTH = 32
 _SALT_LENGTH = 16
 _NONCE_LENGTH = 24
@@ -371,6 +372,7 @@ def _derive_kek(password: str, salt: bytes) -> bytearray:
                 parallelism=_KDF_PARALLELISM,
                 hash_len=_KEY_LENGTH,
                 type=Type.ID,
+                version=_ARGON2_VERSION,
             )
         finally:
             _wipe(password_bytes)
