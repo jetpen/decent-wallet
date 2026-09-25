@@ -2,9 +2,11 @@
 
 ## Scope and Android status
 
-The current product is a Python wallet library. This repository does not yet contain a native Android application, APK target, Android SDK configuration, or Android runtime test suite. The accepted Android-related slice is a standalone, test-only Kotlin/JVM consumer of the wallet-container v2 vector; it is not an Android app or production adapter. See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented).
+The current product is a Python wallet library. The repository has no production Android application or adapter. The accepted Android-related implementation is a standalone, test-only Kotlin/JVM consumer of the wallet-container v2 vector; it uses Maven and is not an Android app. See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented).
 
-Consequently, Android Studio, the Android SDK, an emulator, and Gradle are not prerequisites for building or testing the code currently in this repository. The Kotlin/JVM consumer uses Maven, not Gradle. Bouncy Castle's build-time Android API 26 compatibility check is the only API-26 evidence; it is not an Android runtime test and does not establish runtime support for this module.
+Issue [#36](https://github.com/jetpen/decent-wallet/issues/36) tracks a separate test-only Android runtime-conformance harness for that verifier. The Maven-only APK packaging and instrumentation path is still under feasibility review; no Android test APK or runtime suite exists yet. Bouncy Castle's build-time Android API 26 compatibility check is static evidence only, not an Android runtime test.
+
+For the currently implemented Python and Kotlin/JVM checks, Android Studio, the Android SDK, and an emulator are not needed. Install Android prerequisites below only to prepare for Issue #36's planned API 26/API 37 runtime tests. The project uses Maven; do not install or invoke Gradle for this work.
 
 ## Prerequisite tools
 
@@ -70,6 +72,74 @@ py -3.12 -m venv .venv
 
 The test dependencies are declared by `pyproject.toml`. Do not put passwords, seeds, private keys, or production wallet data in test commands, environment variables, logs, or temporary files. The checked-in interoperability vector is public synthetic test data; it must never be used to create a real wallet.
 
-## Future native Android development
+## Android runtime-test prerequisites (Issue #36; planned)
 
-When a native Android application module is added, its maintainers must document the required Android Studio/Android Gradle Plugin, Gradle wrapper, SDK platform and Build Tools versions, minimum and target API levels, and emulator/device test setup. Those versions are not defined by the current Kotlin/JVM vector-consumer specification, so contributors should not install or assume an arbitrary Android SDK target.
+Issue #36 proposes running the existing verifier on real Android runtimes at API 26 and API 37. This setup installs the devices and SDK tools needed for that work; it does **not** mean the Maven-only APK packaging or instrumentation runner has passed its feasibility check. No Android APK or runtime-test command exists yet. Do not use Gradle for this project. The Maven implementation and exact Android SDK package pins must be validated and recorded in Issue #36 before runtime tests are considered reproducible.
+
+### Required tools
+
+- **JDK 17 or newer.** Install as described above. A JRE alone is insufficient. The existing Kotlin/JVM module provides Maven Wrapper, so a separate system-wide Maven installation is not required.
+- **Android Studio and Android SDK tools.** Install the current stable [Android Studio](https://developer.android.com/studio). Android Studio is used here only to install/manage SDK packages and virtual devices; do not create a Gradle project or invoke Gradle. Google's [Android 17 SDK setup guide](https://developer.android.com/about/versions/17/setup-sdk) recommends Android Studio Meerkat 2024.3.1 or newer for that preview SDK.
+- **SDK packages** in Android Studio's **Tools > SDK Manager**:
+  - In **SDK Platforms**, install **Android 8.0 (Oreo), API 26** and **Android 17 (Cinnamon Bun Preview), API 37**. API 37 is a preview target and may change before release.
+  - In **SDK Tools**, install **Android SDK Command-line Tools (latest)**, **Android SDK Platform-Tools** (`adb`), **Android Emulator**, and **Android SDK Build-Tools 37.x**. Google's [Android 17 SDK setup guide](https://developer.android.com/about/versions/17/setup-sdk) instructs selecting the latest 37.x Build-Tools. Issue #36's Maven proof of concept must pin the exact package revisions before the setup can be called reproducible.
+  - Accept the Android SDK license agreements presented by the SDK Manager before downloading packages.
+- **System images and virtual devices.** In **Tools > Device Manager**, create an API 26 AVD and an API 37 AVD with system images matching the host CPU architecture (x86_64 on x86_64 hosts; arm64-v8a on Apple silicon). The issue-approved fallback is a physical API 26 device only if a suitable API 26 emulator image is unavailable; API 37 remains part of the emulator matrix. Follow Google's [AVD guide](https://developer.android.com/studio/run/managing-avds) to download images and create devices.
+- **Hardware virtualization for accelerated emulation.** Linux uses KVM, Windows can use Windows Hypervisor Platform, and macOS uses Hypervisor.Framework. Acceleration requires processor virtualization support; without it, emulator performance may be poor. Check Google's [emulator acceleration requirements](https://developer.android.com/studio/run/emulator-acceleration). If using a physical API 26 fallback, enable Developer options and USB debugging on that device and authorize the host when prompted.
+
+### SDK location and environment
+
+Use the SDK location shown in **Tools > SDK Manager**. Set `ANDROID_HOME` to that directory and add its `platform-tools` and `emulator` subdirectories to `PATH`. Android's [environment-variable guide](https://developer.android.com/tools/variables) documents `ANDROID_HOME` as the SDK path variable and marks `ANDROID_SDK_ROOT` as deprecated. Common defaults are `$HOME/Android/Sdk` on Linux, `$HOME/Library/Android/sdk` on macOS, and `%LOCALAPPDATA%\Android\Sdk` on Windows; use the actual location shown by the SDK Manager.
+
+On Linux, for the common SDK location (adjust it for your installation):
+
+```bash
+export ANDROID_HOME="$HOME/Android/Sdk"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+```
+
+On macOS, for the common SDK location (adjust it for your installation):
+
+```bash
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+```
+
+On Windows PowerShell, for the common SDK location:
+
+```powershell
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$env:Path = "$env:ANDROID_HOME\platform-tools;$env:ANDROID_HOME\emulator;$env:Path"
+```
+
+Persist these variables through the shell profile or operating-system environment settings if needed. Keep `JAVA_HOME` and `PATH` pointed at the JDK 17+ installation used for Maven.
+
+### Verify installation
+
+From the repository root on Linux or macOS, run:
+
+```bash
+java -version
+javac -version
+./interop/kotlin/mvnw -v
+adb version
+emulator -version
+emulator -accel-check
+emulator -list-avds
+adb devices -l
+```
+
+On Windows PowerShell, use the wrapper batch file:
+
+```powershell
+java -version
+javac -version
+.\interop\kotlin\mvnw.cmd -v
+adb version
+emulator -version
+emulator -accel-check
+emulator -list-avds
+adb devices -l
+```
+
+The Maven wrapper command confirms the existing Maven/JDK setup. If using emulators for both targets, `emulator -list-avds` should show API 26 and API 37 AVDs; if using the approved physical API 26 fallback, it should show the API 37 AVD. `adb devices -l` should show running emulators or the authorized API 26 device. These checks verify installation only. Issue #36 must still establish and document a Maven-only way to package and run the instrumented tests before an Android runtime test can be run.
