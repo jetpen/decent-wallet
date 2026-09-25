@@ -2,6 +2,8 @@
 
 A Python wallet library for a decentralized ecosystem. It keeps private keys within the wallet boundary and mediates user-authorized cryptographic operations without disclosing wallet secrets.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and the current Android/Kotlin scope.
+
 Current implementation includes:
 
 - Argon2id-protected, XChaCha20-Poly1305 encrypted wallet containers.
