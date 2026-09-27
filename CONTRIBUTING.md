@@ -22,16 +22,20 @@ Install these tools:
 - **macOS:** install Git with `xcode-select --install`, then install Python 3.12+ from [python.org](https://www.python.org/downloads/) and a JDK 17+ `.pkg` installer from [Temurin](https://adoptium.net/temurin/releases/?version=17).
 - **Windows:** install [Git for Windows](https://git-scm.com/download/win), Python 3.12+ from [python.org](https://www.python.org/downloads/) (enable the Python launcher), and the Temurin JDK 17+ `.msi` installer. Ensure the JDK `bin` directory is on `PATH`; set `JAVA_HOME` if more than one JDK is installed.
 
-Verify the tools (use the Python 3.12 interpreter you installed):
+Verify the tools with an installed Python 3.12+ interpreter. On Linux or macOS, use `python3`
+when it meets the minimum; otherwise use a versioned 3.12+ executable. On Windows, use `py -3.12`
+or substitute another installed 3.12+ minor version.
 
 ```bash
 git --version
-python3.12 --version
+python3 --version
 java -version
 javac -version
 ```
 
-On Windows, `py -3.12 --version` can select Python 3.12, and the `java` and `javac` commands should report JDK 17 or newer. If multiple JDKs are installed, set `JAVA_HOME` and `PATH` so the intended JDK is used.
+On Windows, use `py -3.12 --version` or substitute another installed Python 3.12+ minor version
+(for example, `py -3.14 --version`). The `java` and `javac` commands should report JDK 17 or newer.
+If multiple JDKs are installed, set `JAVA_HOME` and `PATH` so the intended JDK is used.
 
 A system-wide Maven installation is not required. The existing Kotlin/JVM module includes Maven Wrapper configured for Apache Maven 3.9.16; the wrapper JAR and Maven distribution each have a pinned SHA-256 checksum. Its lockfile applies only to that JVM module. The independent Issue #36 Android workflow uses Gradle Wrapper and does not invoke Maven or rely on Maven-produced artifacts.
 
@@ -43,14 +47,20 @@ From `interop/kotlin/`, run the single locked build-and-test command:
 ./mvnw -B -ntp verify
 ```
 
+If Java reports an unrecognized VM option, check for obsolete flags in `MAVEN_OPTS` (for example,
+`-XX:MaxPermSize`, which modern JDKs do not support). On Linux or macOS, temporarily bypass that
+variable with `env -u MAVEN_OPTS ./mvnw -B -ntp verify` from `interop/kotlin/`.
+
 It runs Maven Lockfile validation in the `validate` phase before compilation and tests. The checked-in `lockfile.json` records SHA-256 checksums for the module's resolved dependencies and Maven plugins. The module reads the canonical shared vector at `tests/vectors/wallet-container-v2.json`; do not copy the fixture into a separate Kotlin tree. All Kotlin dependencies are test-scoped, and the module has no production Kotlin API, Android application, or APK target. Android Studio, the Android SDK, and an emulator are not needed.
 
 ## Set up and test the current Python library
 
-Run these commands from the repository root. On Linux or macOS (use the versioned command to avoid an older system Python):
+Run these commands from the repository root using Python 3.12 or newer. On Linux or macOS, use
+`python3` when its version meets the minimum; otherwise substitute the versioned command for an
+installed Python 3.12+ interpreter.
 
 ```bash
-python3.12 -m venv .venv
+python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[test]'
@@ -59,7 +69,8 @@ python -m compileall -q src tests
 python -m pip check
 ```
 
-On Windows PowerShell, create the environment and invoke its Python directly:
+On Windows PowerShell, use `py -3.12` or substitute another installed Python 3.12+ minor version,
+then invoke the environment's Python directly:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -116,20 +127,26 @@ The latest passing evidence is `docs/reports/issue-36/20260927T025037Z/results.j
 
 ### SDK location and environment
 
-Use the SDK location shown in **Tools > SDK Manager**. Set `ANDROID_HOME` to that directory and add its `platform-tools` and `emulator` subdirectories to `PATH`. Android's [environment-variable guide](https://developer.android.com/tools/variables) documents `ANDROID_HOME` as the SDK path variable and marks `ANDROID_SDK_ROOT` as deprecated. Common defaults are `$HOME/Android/Sdk` on Linux, `$HOME/Library/Android/sdk` on macOS, and `%LOCALAPPDATA%\Android\Sdk` on Windows; use the actual location shown by the SDK Manager.
+Use the SDK location shown in **Tools > SDK Manager**. Set `ANDROID_HOME` to that directory and add
+its `platform-tools`, `emulator`, and `cmdline-tools/latest/bin` subdirectories to `PATH`. Android's
+[environment-variable guide](https://developer.android.com/tools/variables) documents `ANDROID_HOME`
+as the SDK path variable and marks `ANDROID_SDK_ROOT` as deprecated.
+Common defaults are `$HOME/Android/Sdk` on Linux,
+`$HOME/Library/Android/sdk` on macOS, and
+`%LOCALAPPDATA%\Android\Sdk` on Windows; use the actual location shown by the SDK Manager.
 
 On Linux, for the common SDK location (adjust it for your installation):
 
 ```bash
 export ANDROID_HOME="$HOME/Android/Sdk"
-export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
 ```
 
 On macOS, for the common SDK location (adjust it for your installation):
 
 ```bash
 export ANDROID_HOME="$HOME/Library/Android/sdk"
-export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
 ```
 
 On Windows PowerShell, for the common SDK location:
@@ -137,6 +154,7 @@ On Windows PowerShell, for the common SDK location:
 ```powershell
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 $env:Path = "$env:ANDROID_HOME\platform-tools;$env:ANDROID_HOME\emulator;$env:Path"
+$env:Path = "$env:ANDROID_HOME\cmdline-tools\latest\bin;$env:Path"
 ```
 
 Persist these variables through the shell profile or operating-system environment settings if needed. Keep `JAVA_HOME` and `PATH` pointed at the JDK 17+ installation used for the Android Gradle Plugin build.
