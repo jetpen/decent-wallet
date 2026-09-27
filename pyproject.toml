@@ -18,11 +18,14 @@ dependencies = [
 decent-wallet = "decent_wallet.desktop_cli:main"
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "pytest-trio>=0.8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m 'not registry_integration'"
+markers = [
+    "registry_integration: exercises the optional direct-DHT Registry integration",
+]

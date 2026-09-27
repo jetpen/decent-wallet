@@ -2,7 +2,7 @@
 
 ## Scope and platform status
 
-The Python wallet library is the shared core. The repository also includes a production Android wallet-container library, a test-only Kotlin/JVM vector consumer, and a partial Linux desktop/Podman CLI target. Native iOS is excluded from the current MVP by [ADR-0004](docs/adr/0004-current-mvp-platform-scope.md). There is no complete Android or desktop application, GUI, or production Registry/DHT transport. See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented) and [desktop CLI guide](platforms/desktop-wallet/README.md).
+The Python wallet library is the shared core. The repository also includes a production Android wallet-container library, a test-only Kotlin/JVM vector consumer, and a partial Linux desktop/Podman CLI target. The Python core has an optional direct-DHT `RegistryTransport` with local Registry integration coverage; no production Registry deployment has been verified. There is no complete Android or desktop application or GUI, and Android owner-key rotation remains unimplemented. Native iOS is excluded from the current MVP by [ADR-0004](docs/adr/0004-current-mvp-platform-scope.md). See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented) and [desktop CLI guide](platforms/desktop-wallet/README.md).
 
 Issue [#36](https://github.com/jetpen/decent-wallet/issues/36) tracks a separate test-only Android runtime-conformance harness for that verifier. The Gradle-only test harness and instrumentation suite are implemented; the production Android container library is a separate target. The latest #36 locked run passed all nine cases on both approved AVDs; see the evidence manifest and XML reports under `docs/reports/issue-36/20260927T025037Z/`. Bouncy Castle's build-time Android API 26 compatibility check remains static evidence only; runtime compatibility claims are limited to the named tested images and cases.
 
@@ -82,6 +82,18 @@ py -3.12 -m venv .venv
 ```
 
 The test dependencies are declared by `pyproject.toml`. Do not put passwords, seeds, private keys, or production wallet data in test commands, environment variables, logs, or temporary files. The checked-in interoperability vector is public synthetic test data; it must never be used to create a real wallet.
+
+## Test the direct-DHT Registry transport
+
+The Registry integration tests use the real `decent-registry` implementation and local DHT peers. They verify conditional pre-write rejection, exact independent remote read-back, operation-5 predecessor-history validation, and an ambiguous write acknowledgement without relying on a production deployment. The ordinary Python test command excludes this cross-repository marker; the explicit runner fails if the provider checkout is missing rather than silently skipping the tests.
+
+Check out `jetpen/decent-registry` at the supported provider revision `3e561bbdaf7c6da85528a717dd555445d5e7dff7` in a separate directory, then run from this repository root:
+
+```bash
+DECENT_REGISTRY_PATH=../decent-registry scripts/test-registry-integration.sh
+```
+
+The runner resolves the wallet test extra from `uv.lock` and installs the provider checkout as an editable test dependency. The matching GitHub Actions workflow checks out that exact provider commit and runs both the ordinary locked suite and this integration target. These local-peer tests do not establish that any production Registry network is deployed or compatible.
 
 ## Desktop/Podman wallet-container target (Issue #42)
 

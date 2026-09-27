@@ -64,6 +64,8 @@ class ConsentDecision(StrEnum):
 
 
 class PublishStatus(StrEnum):
+    """Stable result labels for Identity signing and publication operations."""
+
     READY = "ready"
     CONFIRMED = "confirmed"
     PROOF_READY = "proof-ready"
@@ -82,15 +84,24 @@ class DispatchUnknown(Exception):
 class IdentityTransport(Protocol):
     """Public-only transport boundary for Identity envelopes.
 
-    A conditional write with ``expected_state_hash=None`` means that the
-    lookup key must still be absent. The transport must enforce this
-    precondition atomically with publication. It must also reject the write
-    atomically when ``expires_at`` has elapsed, before accepting the envelope.
-    Every non-genesis version-1 state requires retained predecessor lookup by
-    state hash back to its signed anchor; incomplete history is rejected.
-    ``supports_owner_key_rotation`` must be true only when this adapter targets
-    a Registry deployment that validates operation 5 and implements the fresh
-    remote read method below.
+    A conditional write compares ``expected_state_hash`` against the current
+    value selected by this Registry instance from its DHT read and local durable
+    accepted state. This is an instance-local precondition, not a network-wide
+    compare-and-swap. The direct-DHT transport rejects ``None`` because
+    ``KadDHT.get_value()`` cannot prove that a key is absent rather than
+    unreachable; owner-key rotation always names its predecessor hash. Initial
+    record creation uses a separate Registry API. ``expires_at`` is checked
+    immediately before beginning the DHT write; remote peers do not enforce it,
+    and an in-flight write may arrive after the deadline. See ADR-0006.
+
+    ``get_identity_envelope_by_hash`` searches only locally retained accepted
+    history; it is not a DHT-wide hash lookup. Every non-genesis version-1
+    state requires a complete predecessor chain to its signed anchor, and
+    missing history is rejected. ``supports_owner_key_rotation`` must be true
+    only when the target Registry validates operation 5, exposes these
+    conditional/history methods, and implements the fresh remote read below.
+    A ``CONFIRMED`` result means that one fresh remote DHT response contained
+    the exact validated envelope; it is not a global commit or convergence proof.
     """
 
     supports_owner_key_rotation: bool
