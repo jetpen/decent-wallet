@@ -85,7 +85,7 @@ The test dependencies are declared by `pyproject.toml`. Do not put passwords, se
 
 ## Desktop/Podman wallet-container target (Issue #42)
 
-The desktop target reuses the Python core and exposes only create, exact encrypted export/import, and explicit v1-to-v2 migration. Passwords require hidden interactive terminal input; never add password command-line options, environment variables, or stdin fallback. See `platforms/desktop-wallet/README.md` for rootless Podman invocation and mount requirements.
+The desktop CLI reuses the Python core and exposes only create, exact encrypted export/import, and explicit v1-to-v2 migration. Issue #18 desktop rotation parity is programmatic through the public `decent_wallet` API, not a CLI command or GUI, as proposed in [ADR-0005](docs/adr/0005-desktop-rotation-api-boundary.md). Passwords for CLI container operations require hidden interactive terminal input; never add password command-line options, environment variables, or stdin fallback. See `platforms/desktop-wallet/README.md` for rootless Podman invocation and mount requirements.
 
 Build the runtime image and run the locked shared-vector/CLI conformance target from the repository root:
 
