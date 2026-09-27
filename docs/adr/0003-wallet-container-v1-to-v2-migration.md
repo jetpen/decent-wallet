@@ -22,4 +22,4 @@ The v1 input format is the wallet-container implementation immediately preceding
 
 - The no-migration decision in ADR-0002 is superseded only for the explicit v1-to-v2 method above. The v2 dispatch-intent, authenticated-version, and fail-closed direct-open/import requirements remain.
 - An application that receives a v1 export as bytes must first place it at the chosen wallet path and call the explicit migration operation; direct v1 import continues to fail closed.
-- The migration criterion is implemented in the Python core only. Native platform adapters, cross-platform conformance, and production Registry transport/deployment verification remain separate Issue #18 acceptance work.
+- The migration contract is implemented in the Python core and partial Android and Linux desktop/Podman container-lifecycle targets. iPhone migration support, full cross-platform conformance, and production Registry transport/deployment verification remain separate Issue #18 acceptance work.

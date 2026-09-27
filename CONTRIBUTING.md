@@ -1,10 +1,10 @@
 # Contributing
 
-## Scope and Android status
+## Scope and platform status
 
-The current product is a Python wallet library. The repository has no production Android application or adapter. The accepted Android-related implementation is a standalone, test-only Kotlin/JVM consumer of the wallet-container v2 vector; it uses Maven and is not an Android app. See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented).
+The Python wallet library is the shared core. The repository also includes a production Android wallet-container library, a test-only Kotlin/JVM vector consumer, and a partial Linux desktop/Podman CLI target. There is no complete Android or desktop application, iPhone adapter, GUI, or production Registry/DHT transport. See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented) and [desktop CLI guide](platforms/desktop-wallet/README.md).
 
-Issue [#36](https://github.com/jetpen/decent-wallet/issues/36) tracks a separate test-only Android runtime-conformance harness for that verifier. The Gradle-only Android library and instrumentation harness is implemented. Its latest locked run passed all nine cases on both approved AVDs; see the evidence manifest and XML reports under `docs/reports/issue-36/20260927T025037Z/`. Bouncy Castle's build-time Android API 26 compatibility check remains static evidence only; runtime compatibility claims are limited to the named tested images and cases.
+Issue [#36](https://github.com/jetpen/decent-wallet/issues/36) tracks a separate test-only Android runtime-conformance harness for that verifier. The Gradle-only test harness and instrumentation suite are implemented; the production Android container library is a separate target. The latest #36 locked run passed all nine cases on both approved AVDs; see the evidence manifest and XML reports under `docs/reports/issue-36/20260927T025037Z/`. Bouncy Castle's build-time Android API 26 compatibility check remains static evidence only; runtime compatibility claims are limited to the named tested images and cases.
 
 For the Python and Kotlin/JVM checks, Android Studio, the Android SDK, and an emulator are not needed. The existing Kotlin/JVM verifier remains a separate Maven-based module. Issue #36's test-only Android harness uses the Gradle Wrapper exclusively; do not invoke Maven for its build/test workflow or use Maven-produced artifacts.
 
@@ -71,6 +71,19 @@ py -3.12 -m venv .venv
 ```
 
 The test dependencies are declared by `pyproject.toml`. Do not put passwords, seeds, private keys, or production wallet data in test commands, environment variables, logs, or temporary files. The checked-in interoperability vector is public synthetic test data; it must never be used to create a real wallet.
+
+## Desktop/Podman wallet-container target (Issue #42)
+
+The desktop target reuses the Python core and exposes only create, exact encrypted export/import, and explicit v1-to-v2 migration. Passwords require hidden interactive terminal input; never add password command-line options, environment variables, or stdin fallback. See `platforms/desktop-wallet/README.md` for rootless Podman invocation and mount requirements.
+
+Build the runtime image and run the locked shared-vector/CLI conformance target from the repository root:
+
+```bash
+podman build -f platforms/desktop-wallet/Containerfile -t decent-wallet-desktop:local .
+platforms/desktop-wallet/verify-container.sh
+```
+
+The verification script expects Podman by default. It runs the complete locked Python suite in a restricted conformance image, then builds the runtime image and smoke-tests its CLI entry point. If a Docker-compatible daemon is available, set `CONTAINER_RUNTIME=docker`; both runs disable networking, use read-only root filesystems, and drop Linux capabilities.
 
 ## Android runtime-conformance harness (Issue #36)
 
