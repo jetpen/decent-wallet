@@ -1,0 +1,112 @@
+INFO         | Android emulator version 37.1.11.0 (build_id 15917651) (CL:N/A)
+INFO         | Graphics backend: gfxstream
+INFO         | Found systemPath /home/ben/Android/Sdk/system-images/android-37.2/google_apis_playstore_ps16k/x86_64/
+INFO         | Guest usage of host flag 'VulkanVirtualQueue' will be ignored.
+INFO         | Increasing RAM size to 4096MB
+INFO         | Guest GLES Driver: Auto (ext controls)
+WARNING      | Your GPU drivers may have a bug. Switching to software rendering.
+INFO         | emuglConfig_init: vulkan_mode_selected:lavapipe gles_mode_selected:swangle
+INFO         | Checking system compatibility:
+INFO         |   Checking: hasSufficientDiskSpace
+INFO         |      Ok: Disk space requirements to run avd: `Pixel_9` are met
+INFO         |   Checking: hasSufficientHwGpu
+INFO         |      Ok: Hardware GPU compatibility checks are not required
+INFO         |   Checking: hasSufficientSystem
+INFO         |      Warning: Suggested minimum system RAM to run avd 'Pixel_9' is 16384 MiB (available: 15735 MiB)
+USER_WARNING | Suggested minimum system RAM to run avd 'Pixel_9' is 16384 MiB (available: 15735 MiB).
+WARNING      | File System is not ext4, disable QuickbootFileBacked feature
+INFO         | Storing crashdata in: /tmp/android-ben/emu-crash-37.1.11.db, detection is enabled for process: 332513
+INFO         | Initializing gfxstream backend
+INFO         | startOpenglesRendererImpl: gpu info
+INFO         |
+INFO         | Vulkan 1.4 is not supported for the guest and won't be enabled
+INFO         | initIcdPaths: ICD set to 'lavapipe', using Lavapipe ICD
+INFO         | Setting ICD filenames for the loader = /home/ben/Android/Sdk/emulator/lib64/vulkan/lvp_icd.json
+INFO         | SharedLibrary::open for [/home/ben/Android/Sdk/emulator/qemu/linux-x86_64/lib64/vulkan/libvulkan.so]
+INFO         | SharedLibrary::open for [/home/ben/Android/Sdk/emulator/qemu/linux-x86_64/lib64/vulkan/libvulkan.so.1]
+INFO         | SharedLibrary::open for [/home/ben/Android/Sdk/emulator/lib64/vulkan/libvulkan.so]
+INFO         | Added library: /home/ben/Android/Sdk/emulator/lib64/vulkan/libvulkan.so
+INFO         | Selecting Vulkan device: llvmpipe (LLVM 21.0.0, 256 bits), Version: 1.4.318
+INFO         | Using Vulkan externalMemoryMode: OpaqueFd for VkEmulation
+INFO         | SharedLibrary::open for [libX11]
+INFO         | SharedLibrary::open for [libX11-xcb]
+INFO         | Initializing VkEmulation features:
+INFO         |     glInteropSupported: false
+INFO         |     useDeferredCommands: true
+INFO         |     createResourceWithRequirements: true
+INFO         |     useVulkanComposition: false
+INFO         |     useVulkanNativeSwapchain: false
+INFO         |     enable guestRenderDoc: false
+INFO         |     ASTC LDR emulation mode: Gpu
+INFO         |     enable ETC2 emulation: true
+INFO         |     enable Ycbcr emulation: false
+INFO         |     guestVulkanOnly: false
+INFO         |     useDedicatedAllocations: false
+INFO         |     guestVulkanMaxApiVersion: 1.3.0
+INFO         |     enableProtectedMemoryEmulation: false
+INFO         | Graphics Adapter Vendor Google (Google Inc.)
+INFO         | Graphics Adapter Android Emulator OpenGL ES Translator (Google SwiftShader)
+INFO         | Graphics API Version OpenGL ES 3.0 (OpenGL ES 3.0 SwiftShader 4.0.0.1)
+INFO         | Graphics API Extensions GL_OES_EGL_sync GL_OES_EGL_image GL_OES_EGL_image_external GL_OES_depth24 GL_OES_depth32 GL_OES_element_index_uint GL_OES_texture_float GL_OES_texture_float_linear GL_OES_compressed_paletted_texture GL_OES_compressed_ETC1_RGB8_texture GL_OES_depth_texture GL_OES_texture_half_float GL_OES_texture_half_float_linear GL_OES_packed_depth_stencil GL_OES_vertex_half_float GL_OES_standard_derivatives GL_OES_texture_npot GL_OES_rgb8_rgba8 GL_EXT_color_buffer_float GL_EXT_color_buffer_half_float GL_EXT_texture_format_BGRA8888 GL_APPLE_texture_format_BGRA8888
+INFO         | Graphics Device Extensions N/A
+INFO         | Disabling sparse binding feature support
+ERROR        | Setting read-only feature 'GLAsyncSwap' to '0'
+INFO         | Feature 'GLAsyncSwap' (50) is overridden to 'disabled'
+INFO         | Sending adb public key [QAAAALFqNvKvYWCMBqPMKJHx9cTSCKYouMLzsmaH8rcylYFyhzRVFq5cpk+wKwfEt0hPQRFUc55pnuTDlqJdljow2y0g3bdkWFki2kizIYNw3yi8ioehiRhuoun1cXoH4XxDNTSJk2nm2f1nwD+ga6KiqUvemjUNyO/u6ZLcb3lJGEHBt4Dye43AybptM70C1thkUdej0kJq5vUmkBqMfGepU59HsxuJaRipHU5GOu8tzMYhHlPfn4V1TmppSnpsdC/XE4/20d8l1iYIQDgbkqhrTALVuvzd9ieI2Q7TEJ1ytIrdPPTmHmB1bK7mD+woxI+ZybesjV5Uk6ia67Eukwoz30jiUMKt4sZiXTlxXFwzQgETkej8U7Mb16qg8TxpICJ6ZnOQ/008HdiPlBpWc/zM5L7J+CpfP+1Pht3keDmmiPSevs0qO76r8GU0dZUo3oBhIbLGxH9EtP97C1+KMzqYGxSaidXFQyOlFjTKkpZ2XLBvieJ+FQdKFr1edzNcbSTCAMy0Nljs5p/Sg0WcBtqHGtkFxdNvDL4TinohovD8pJcb5zDIgR0H9qUSp6RkafMfZicitDj1N3skyFXQgSvayI7YgU2MNRb6bKcMX5Vgoy373pAweu22U7MaT/RCtVKYr8UNAcTBQT9VYgSMgqrDErSEdTiNRF9bmZHOSjvDPLslWyrncQEAAQA= ben@unknown]
+INFO         | Userspace boot properties:
+INFO         |   androidboot.boot_devices=pci0000:00/0000:00:03.0 pci0000:00/0000:00:06.0
+INFO         |   androidboot.dalvik.vm.heapsize=576m
+INFO         |   androidboot.debug.hwui.renderer=skiagl
+INFO         |   androidboot.debug.sf.nobootanimation=1
+INFO         |   androidboot.hardware=ranchu
+INFO         |   androidboot.hardware.gltransport=pipe
+INFO         |   androidboot.hardware.vulkan=ranchu
+INFO         |   androidboot.logcat=*:V
+INFO         |   androidboot.opengles.version=196608
+INFO         |   androidboot.qemu=1
+INFO         |   androidboot.qemu.adb.pubkey=QAAAALFqNvKvYWCMBqPMKJHx9cTSCKYouMLzsmaH8rcylYFyhzRVFq5cpk+wKwfEt0hPQRFUc55pnuTDlqJdljow2y0g3bdkWFki2kizIYNw3yi8ioehiRhuoun1cXoH4XxDNTSJk2nm2f1nwD+ga6KiqUvemjUNyO/u6ZLcb3lJGEHBt4Dye43AybptM70C1thkUdej0kJq5vUmkBqMfGepU59HsxuJaRipHU5GOu8tzMYhHlPfn4V1TmppSnpsdC/XE4/20d8l1iYIQDgbkqhrTALVuvzd9ieI2Q7TEJ1ytIrdPPTmHmB1bK7mD+woxI+ZybesjV5Uk6ia67Eukwoz30jiUMKt4sZiXTlxXFwzQgETkej8U7Mb16qg8TxpICJ6ZnOQ/008HdiPlBpWc/zM5L7J+CpfP+1Pht3keDmmiPSevs0qO76r8GU0dZUo3oBhIbLGxH9EtP97C1+KMzqYGxSaidXFQyOlFjTKkpZ2XLBvieJ+FQdKFr1edzNcbSTCAMy0Nljs5p/Sg0WcBtqHGtkFxdNvDL4TinohovD8pJcb5zDIgR0H9qUSp6RkafMfZicitDj1N3skyFXQgSvayI7YgU2MNRb6bKcMX5Vgoy373pAweu22U7MaT/RCtVKYr8UNAcTBQT9VYgSMgqrDErSEdTiNRF9bmZHOSjvDPLslWyrncQEAAQA= ben@unknown
+INFO         |   androidboot.qemu.avd_name=Pixel_9
+INFO         |   androidboot.qemu.camera_hq_edge_processing=0
+INFO         |   androidboot.qemu.camera_protocol_ver=1
+INFO         |   androidboot.qemu.cpuvulkan.version=4210688
+INFO         |   androidboot.qemu.gltransport.drawFlushInterval=800
+INFO         |   androidboot.qemu.gltransport.name=pipe
+INFO         |   androidboot.qemu.hwcodec.avcdec=2
+INFO         |   androidboot.qemu.hwcodec.hevcdec=2
+INFO         |   androidboot.qemu.hwcodec.vpxdec=2
+INFO         |   androidboot.qemu.settings.system.screen_off_timeout=2147483647
+INFO         |   androidboot.qemu.skin=pixel_9
+INFO         |   androidboot.qemu.virtiowifi=1
+INFO         |   androidboot.qemu.vsync=60
+INFO         |   androidboot.serialno=EMULATOR37X1X11X0
+INFO         |   androidboot.vbmeta.digest=2772b6de0284316122ffa1743bfa7958e65a191b2b8e1c89e4acd58c3de80a27
+INFO         |   androidboot.vbmeta.hash_alg=sha256
+INFO         |   androidboot.vbmeta.size=6784
+INFO         |   androidboot.veritymode=enforcing
+WARNING: cannnot unmap ptr 0x77e5cdc01000 as it is in the protected range from 0x77e4cdc00000 to 0x77e5cde00000
+pc_memory_init: above 4g size: 40000000
+INFO         | Monitoring duration of emulator setup.
+INFO         | Activated packet streamer for bluetooth emulation
+INFO         | Successfully initialized netsim WiFi
+INFO         | Activated packet streamer for uwb emulation
+INFO         | Setting display: 0 configuration to: 1080x2424, dpi: 420x420
+INFO         | setDisplayActiveConfig: id:0, 1080x2424
+WARNING      | getEnvironmentConfig: No environment config is provided
+INFO         | getEnvironmentConfig: Using default virtual scene mode for the environment.
+INFO         | getEnvironmentConfig: Using default configuration for mode mesh3d for the environment.
+INFO         | Initializing a scene with mode: mesh3d, argument: Toren1BD.obj
+INFO         | GPU Vendor=[Google (Google Inc.)]
+INFO         | GPU Renderer=[Android Emulator OpenGL ES Translator (Google SwiftShader)]
+INFO         | GPU Version=[OpenGL ES 3.0 (OpenGL ES 3.0 SwiftShader 4.0.0.1)]
+USER_INFO    | Emulator is performing a full startup. This may take upto two minutes, or more.
+INFO         | Boot completed in 35549 ms
+INFO         | Increasing screen off timeout, logcat buffer size to 2M.
+INFO         | Wait for emulator (pid 332513) 20 seconds to shutdown gracefully before kill;you can set environment variable ANDROID_EMULATOR_WAIT_TIME_BEFORE_KILL(in seconds) to change the default value (20 seconds)
+
+USER_INFO    | Snapshots have been disabled by the user, save request is ignored.
+INFO         | Saving snapshot 'default_boot' using 0 ms
+ERROR        | stop: Not implemented
+WARNING      | Emulator client has not yet been configured.. Call configure me first!
+INFO         | removeScene: scene=0x5d409fa49680
+INFO         | removeAll
+WARNING      | Netsim Wifi dns:///localhost:40597 is gone due to Stream removed (CANCELLED)

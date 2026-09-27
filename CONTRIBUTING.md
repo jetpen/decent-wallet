@@ -2,9 +2,11 @@
 
 ## Scope and Android status
 
-The current product is a Python wallet library. This repository does not yet contain a native Android application, APK target, Android SDK configuration, or Android runtime test suite. The accepted Android-related slice is a standalone, test-only Kotlin/JVM consumer of the wallet-container v2 vector; it is not an Android app or production adapter. See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented).
+The current product is a Python wallet library. The repository has no production Android application or adapter. The accepted Android-related implementation is a standalone, test-only Kotlin/JVM consumer of the wallet-container v2 vector; it uses Maven and is not an Android app. See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented).
 
-Consequently, Android Studio, the Android SDK, an emulator, and Gradle are not prerequisites for building or testing the code currently in this repository. The Kotlin/JVM consumer uses Maven, not Gradle. Bouncy Castle's build-time Android API 26 compatibility check is the only API-26 evidence; it is not an Android runtime test and does not establish runtime support for this module.
+Issue [#36](https://github.com/jetpen/decent-wallet/issues/36) tracks a separate test-only Android runtime-conformance harness for that verifier. The Gradle-only Android library and instrumentation harness is implemented. Its latest locked run passed all nine cases on both approved AVDs; see the evidence manifest and XML reports under `docs/reports/issue-36/20260927T025037Z/`. Bouncy Castle's build-time Android API 26 compatibility check remains static evidence only; runtime compatibility claims are limited to the named tested images and cases.
+
+For the Python and Kotlin/JVM checks, Android Studio, the Android SDK, and an emulator are not needed. The existing Kotlin/JVM verifier remains a separate Maven-based module. Issue #36's test-only Android harness uses the Gradle Wrapper exclusively; do not invoke Maven for its build/test workflow or use Maven-produced artifacts.
 
 ## Prerequisite tools
 
@@ -31,7 +33,7 @@ javac -version
 
 On Windows, `py -3.12 --version` can select Python 3.12, and the `java` and `javac` commands should report JDK 17 or newer. If multiple JDKs are installed, set `JAVA_HOME` and `PATH` so the intended JDK is used.
 
-A system-wide Maven installation is not required. The Kotlin/JVM module includes Maven Wrapper configured for Apache Maven 3.9.16; the wrapper JAR and Maven distribution each have a pinned SHA-256 checksum. The module's lockfile pins resolved dependency and Maven-plugin checksums, and the build validates it during Maven's `validate` phase before running tests.
+A system-wide Maven installation is not required. The existing Kotlin/JVM module includes Maven Wrapper configured for Apache Maven 3.9.16; the wrapper JAR and Maven distribution each have a pinned SHA-256 checksum. Its lockfile applies only to that JVM module. The independent Issue #36 Android workflow uses Gradle Wrapper and does not invoke Maven or rely on Maven-produced artifacts.
 
 ## Test the Kotlin/JVM v2 vector verifier
 
@@ -70,6 +72,88 @@ py -3.12 -m venv .venv
 
 The test dependencies are declared by `pyproject.toml`. Do not put passwords, seeds, private keys, or production wallet data in test commands, environment variables, logs, or temporary files. The checked-in interoperability vector is public synthetic test data; it must never be used to create a real wallet.
 
-## Future native Android development
+## Android runtime-conformance harness (Issue #36)
 
-When a native Android application module is added, its maintainers must document the required Android Studio/Android Gradle Plugin, Gradle wrapper, SDK platform and Build Tools versions, minimum and target API levels, and emulator/device test setup. Those versions are not defined by the current Kotlin/JVM vector-consumer specification, so contributors should not install or assume an arbitrary Android SDK target.
+Issue #36's runtime matrix is limited to the two approved emulator configurations: API 26 `Medium_Phone` using the Google Play x86 system image, and API 37 `Pixel_9` using the Android 37.2 Google APIs Play Store x86_64 image with 16 KB pages. Both are required; physical devices and alternate images do not substitute. The API 26 result covers the selected 32-bit x86 guest only and does not establish API 26 x86_64 native-ABI compatibility. The harness is test-only: it adds no Android wallet app, UI, keystore integration, production adapter, or Registry transport.
+
+Run the complete matrix from the repository root with the single Gradle Wrapper command below. It uses Gradle 9.5.0, AGP 9.3.1, KGP 2.4.20, JDK 17, compileSdk 37, minSdk 26, Java/Kotlin bytecode target 8, AndroidX Test Runner 1.7.0/JUnit 4, Bouncy Castle 1.86, and Jackson Core 2.22.2. Dependency locking and strict SHA-256 verification are enabled; the wrapper distribution checksum is pinned. Maven is not part of this Android workflow.
+
+```bash
+./gradlew --no-daemon --dependency-verification=strict :interop:android-runtime:connectedDebugAndroidTest
+```
+
+For the reproducible acceptance run, use the repository runner, which validates exact AVD configuration/image revisions, boots both approved AVDs, invokes that Gradle task once, and writes machine-readable JSON/XML results plus logs under `docs/reports/issue-36/<UTC timestamp>/`:
+
+```bash
+python3 scripts/run-android-runtime-conformance.py
+```
+
+The latest passing evidence is `docs/reports/issue-36/20260927T025037Z/results.json`. It records both AVDs, image/package revisions, API, ABI, build fingerprints, SDK/build-tools/emulator revisions, locked command, and each test report. Each target passed 9 tests with zero failures, errors, or skips. Runtime claims remain bounded to those exact images and cases; no universal Android compatibility or full Issue #18 completion is claimed.
+
+### Required tools
+
+- **JDK 17 or newer.** Install as described above. A JRE alone is insufficient. JDK 17 is also the selected baseline for the Android Gradle Plugin toolchain.
+- **Android Studio and Android SDK tools.** Install the current stable [Android Studio](https://developer.android.com/studio). Android Studio is used here to install/manage SDK packages and virtual devices; the Android test harness itself is built only with Gradle Wrapper, not Maven. Google's [Android 17 SDK setup guide](https://developer.android.com/about/versions/17/setup-sdk) recommends Android Studio Meerkat 2024.3.1 or newer for that preview SDK.
+- **SDK packages** in Android Studio's **Tools > SDK Manager**:
+  - In **SDK Platforms**, install **Android 8.0 (Oreo), API 26** and **Android 17 (Cinnamon Bun Preview), API 37**. API 37 is a preview target and may change before release.
+  - In **SDK Tools**, install **Android SDK Command-line Tools (latest)**, **Android SDK Platform-Tools** (`adb`), **Android Emulator**, and **Android SDK Build-Tools 37.x**. Google's [Android 17 SDK setup guide](https://developer.android.com/about/versions/17/setup-sdk) instructs selecting the latest 37.x Build-Tools. The Gradle build must pin and verify the exact SDK package revisions before the setup can be called reproducible.
+  - Accept the Android SDK license agreements presented by the SDK Manager before downloading packages.
+- **System images and virtual devices.** Issue #36 accepts only these two emulator images: `Medium_Phone`, API 26, Google Play x86; and `Pixel_9`, Android 37.2/API 37, Google APIs Play Store x86_64 with 16 KB page size. The x86 API 26 image is supported for accelerated emulation on an x86_64 host; see Google's [emulator acceleration requirements](https://developer.android.com/studio/run/emulator-acceleration). Record the actual image revision and ABI. No physical-device fallback or alternate emulator image is in the acceptance matrix; if either target cannot be run, stop and request approval to change the matrix. Follow Google's [AVD guide](https://developer.android.com/studio/run/managing-avds) to manage the devices.
+- **Hardware virtualization for accelerated emulation.** Linux uses KVM, Windows can use Windows Hypervisor Platform, and macOS uses Hypervisor.Framework. Acceleration requires processor virtualization support; without it, emulator performance may be poor. Check Google's [emulator acceleration requirements](https://developer.android.com/studio/run/emulator-acceleration). If an accepted AVD cannot use the host hypervisor or boot, the matrix is blocked; do not substitute a physical device or a different image without approval.
+
+### SDK location and environment
+
+Use the SDK location shown in **Tools > SDK Manager**. Set `ANDROID_HOME` to that directory and add its `platform-tools` and `emulator` subdirectories to `PATH`. Android's [environment-variable guide](https://developer.android.com/tools/variables) documents `ANDROID_HOME` as the SDK path variable and marks `ANDROID_SDK_ROOT` as deprecated. Common defaults are `$HOME/Android/Sdk` on Linux, `$HOME/Library/Android/sdk` on macOS, and `%LOCALAPPDATA%\Android\Sdk` on Windows; use the actual location shown by the SDK Manager.
+
+On Linux, for the common SDK location (adjust it for your installation):
+
+```bash
+export ANDROID_HOME="$HOME/Android/Sdk"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+```
+
+On macOS, for the common SDK location (adjust it for your installation):
+
+```bash
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+```
+
+On Windows PowerShell, for the common SDK location:
+
+```powershell
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$env:Path = "$env:ANDROID_HOME\platform-tools;$env:ANDROID_HOME\emulator;$env:Path"
+```
+
+Persist these variables through the shell profile or operating-system environment settings if needed. Keep `JAVA_HOME` and `PATH` pointed at the JDK 17+ installation used for the Android Gradle Plugin build.
+
+### Verify installation
+
+From the repository root on Linux or macOS, run:
+
+```bash
+java -version
+javac -version
+./interop/kotlin/mvnw -v
+adb version
+emulator -version
+emulator -accel-check
+emulator -list-avds
+adb devices -l
+```
+
+On Windows PowerShell, use the wrapper batch file:
+
+```powershell
+java -version
+javac -version
+.\interop\kotlin\mvnw.cmd -v
+adb version
+emulator -version
+emulator -accel-check
+emulator -list-avds
+adb devices -l
+```
+
+The Maven wrapper command above verifies only the separate Kotlin/JVM module; it is not part of the Android workflow. `emulator -list-avds` should show the approved `Medium_Phone` and `Pixel_9` AVDs. For Android conformance, use the single Gradle command above or the runner that supplies the same command and captures evidence. Do not use Maven, a physical device, or another emulator image as a substitute. API 26 evidence is limited to the selected x86 guest.

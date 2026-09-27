@@ -3,3 +3,16 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .venv/
+
+# Gradle
+.gradle/
+**/build/
+
+# Android local SDK configuration
+local.properties
+
+# IDE files
+.idea/
+*.iml
+
+# Issue #36 runtime evidence is intentionally kept in Git
