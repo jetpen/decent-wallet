@@ -283,7 +283,7 @@ def main() -> int:
             "command": command_text,
             "locked_build": True,
             "targets": target_results,
-            "coverage_limit": "API 26 x86 evidence does not establish x86_64 native ABI coverage.",
+            "api26_matrix_scope": "Medium_Phone Google Play x86 is the sole API 26 target in this acceptance matrix.",
         }
         result_path = report_dir / "results.json"
         result_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

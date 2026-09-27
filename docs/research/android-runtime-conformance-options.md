@@ -1,6 +1,6 @@
 # Android runtime conformance proposal for the Kotlin v2 verifier
 
-**Status:** Implemented and runtime-verified on the approved two-AVD matrix. `Medium_Phone` (API 26 Google Play x86) and `Pixel_9` (Android 37.2/API 37 Google APIs Play Store x86_64, 16 KB page size) each pass all nine instrumented cases. The latest evidence is [`docs/reports/issue-36/20260927T025037Z/results.json`](../reports/issue-36/20260927T025037Z/results.json), with per-device XML reports and logs in the same directory. No physical-device or alternate-image fallback is accepted. The Android workflow is Gradle Wrapper-only and uses no Maven command or Maven-produced artifact. Runtime claims are limited to the tested images and cases; API 26 x86 does not establish x86_64 native-ABI compatibility or universal Android support ([issue #36](https://github.com/jetpen/decent-wallet/issues/36)).
+**Status:** Implemented and runtime-verified on the approved two-AVD matrix. `Medium_Phone` (API 26 Google Play x86) and `Pixel_9` (Android 37.2/API 37 Google APIs Play Store x86_64, 16 KB page size) each pass all nine instrumented cases. The latest evidence is [`docs/reports/issue-36/20260927T025037Z/results.json`](../reports/issue-36/20260927T025037Z/results.json), with per-device XML reports and logs in the same directory. No physical-device or alternate-image fallback is accepted. The Android workflow is Gradle Wrapper-only and uses no Maven command or Maven-produced artifact. Runtime claims are limited to the tested images and cases; no universal Android support is claimed ([issue #36](https://github.com/jetpen/decent-wallet/issues/36)).
 
 ## Selected implementation topology
 
@@ -12,7 +12,7 @@ Use AndroidX `AndroidJUnitRunner` with JUnit 4 instrumentation tests: Android's 
 
 ## Bounded device matrix and execution
 
-- **API 26 target:** `Medium_Phone`, Google Play x86 system image (32-bit guest). Android's [emulator acceleration requirements](https://developer.android.com/studio/run/emulator-acceleration) explicitly permit x86 system images on x86_64 hosts for API 10 and later. This supplies API/ART and x86 guest evidence, not x86_64 native-ABI coverage.
+- **API 26 target:** `Medium_Phone`, Google Play x86 system image (32-bit guest). This is the sole API 26 target in the approved matrix. Android's [emulator acceleration requirements](https://developer.android.com/studio/run/emulator-acceleration) permit this selected x86 image on an x86_64 host.
 - **API 37 target:** `Pixel_9`, Android 37.2/API 37 Google APIs Play Store x86_64 image with 16 KB page size. This is the exact available current-runtime image; capture its revision and build fingerprint.
 - **Coverage boundary:** both named AVDs are required, and the same positive and negative conformance cases run on each. Physical devices and other emulator images do not count. If either selected AVD is unavailable or cannot run, block and seek approval to revise the matrix. The single Gradle instrumentation task is `./gradlew --no-daemon --dependency-verification=strict :interop:android-runtime:connectedDebugAndroidTest`; the repository runner validates and boots both exact AVDs, invokes this task once, and saves device reports. Desktop JVM/Robolectric results are supplemental only.
 
@@ -45,4 +45,4 @@ Gradle dependency locks and verification metadata do not pin Android SDK/emulato
 
 ## Approval gate
 
-The approved Android library/APK, pinned Gradle toolchain, dependency locking, SHA-256 verification, and two-AVD execution path are implemented. The latest locked run completed successfully on both named AVDs with nine tests each and zero failures/errors/skips. Preserve the evidence manifest and reports with changes. Do not make universal Android compatibility, API 26 x86_64 ABI, production Android wallet, or full Issue #18 claims. Maven must not be invoked for this workflow.
+The approved Android library/APK, pinned Gradle toolchain, dependency locking, SHA-256 verification, and two-AVD execution path are implemented. The latest locked run completed successfully on both named AVDs with nine tests each and zero failures/errors/skips. Preserve the evidence manifest and reports with changes. Do not make universal Android compatibility, production Android wallet, or full Issue #18 claims. `Medium_Phone` Google Play x86 is the sole API 26 target in this issue's matrix. Maven must not be invoked for this workflow.
