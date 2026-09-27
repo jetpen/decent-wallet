@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<testsuites tests="9" failures="0" errors="0" skipped="0" time="10.293" timestamp="2026-09-27T02:52:01" hostname="localhost">
+  <testsuite name="org.decentwallet.interop.WalletContainerV2InstrumentationTest" tests="9" failures="0" errors="0" skipped="0" time="9.433" timestamp="2026-09-27T02:52:01" hostname="localhost">
+    <properties>
+      <property name="device" value="Medium_Phone(AVD) - 8.0.0" />
+      <property name="flavor" value="" />
+      <property name="project" value=":interop:android-runtime" />
+    </properties>
+    <testcase name="rejectsKdfSaltTamperingBeforeAeadAuthentication" classname="org.decentwallet.interop.WalletContainerV2InstrumentationTest" time="1.692" />
+    <testcase name="rejectsPayloadNonceTamperingAtPayloadAuthentication" classname="org.decentwallet.interop.WalletContainerV2InstrumentationTest" time="1.334" />
+    <testcase name="verifiesCanonicalVectorAndReturnsItsExpectedPublicKey" classname="org.decentwallet.interop.WalletContainerV2InstrumentationTest" time="1.282" />
+    <testcase name="rejectsPayloadTagTamperingAtPayloadAuthentication" classname="org.decentwallet.interop.WalletContainerV2InstrumentationTest" time="1.256" />
+    <testcase name="rejectsWrapTagTamperingWithValueFreeDiagnostics" classname="org.decentwallet.interop.WalletContainerV2InstrumentationTest" time="1.255" />
+    <testcase name="runtimeMatchesExactIssue36TargetAndLogsFingerprint" classname="org.decentwallet.interop.WalletContainerV2InstrumentationTest" time="0.026" />
+    <testcase name="rejectsAuthenticatedMalformedTypedPayloadAfterPayloadAuthentication" classname="org.decentwallet.interop.WalletContainerV2InstrumentationTest" time="1.256" />
+    <testcase name="acceptsOuterWhitespaceAndMemberOrderVariations" classname="org.decentwallet.interop.WalletContainerV2InstrumentationTest" time="1.306" />
+    <testcase name="rejectsDuplicateNamesAndUnsupportedContainerVersions" classname="org.decentwallet.interop.WalletContainerV2InstrumentationTest" time="0.026" />
+  </testsuite>
+</testsuites>

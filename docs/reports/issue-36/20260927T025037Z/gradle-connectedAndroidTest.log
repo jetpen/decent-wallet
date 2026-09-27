@@ -1,0 +1,118 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.5.0/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build
+
+> Configure project :interop:android-runtime
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+Add android.sync.suppressAgpWarnings=UNSUPPORTED_PROJECT_OPTION_USE to the gradle.properties file to suppress this warning.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+Add android.sync.suppressAgpWarnings=UNSUPPORTED_PROJECT_OPTION_USE to the gradle.properties file to suppress this warning.
+WARNING: API 'libraryVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling libraryVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+Add android.sync.suppressAgpWarnings=DEPRECATED_DSL to the gradle.properties file to suppress this warning.
+WARNING: API 'testVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling testVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+Add android.sync.suppressAgpWarnings=DEPRECATED_DSL to the gradle.properties file to suppress this warning.
+WARNING: API 'unitTestVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling unitTestVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+Add android.sync.suppressAgpWarnings=DEPRECATED_DSL to the gradle.properties file to suppress this warning.
+w: [33m[1m⚠️ Deprecated 'org.jetbrains.kotlin.android' plugin usage[0m[0m
+The 'org.jetbrains.kotlin.android' plugin in project ':interop:android-runtime' is no longer required for Kotlin support since AGP 9.0.
+[32m[1mSolution:[0m[0m
+[32m[3mRemove both `android.builtInKotlin=true` and `android.newDsl=false` from `gradle.properties`, then migrate to built-in Kotlin.[0m[0m
+[36mSee [0m[34mhttps://kotl.in/gradle/agp-built-in-kotlin[0m[36m for more details.[0m
+
+
+> Task :interop:android-runtime:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :interop:android-runtime:preBuild UP-TO-DATE
+> Task :interop:android-runtime:preDebugBuild UP-TO-DATE
+> Task :interop:android-runtime:generateDebugResources UP-TO-DATE
+> Task :interop:android-runtime:packageDebugResources UP-TO-DATE
+> Task :interop:android-runtime:processDebugNavigationResources UP-TO-DATE
+> Task :interop:android-runtime:parseDebugLocalResources UP-TO-DATE
+> Task :interop:android-runtime:generateDebugRFile UP-TO-DATE
+> Task :interop:android-runtime:compileDebugKotlin UP-TO-DATE
+> Task :interop:android-runtime:javaPreCompileDebug UP-TO-DATE
+> Task :interop:android-runtime:compileDebugJavaWithJavac NO-SOURCE
+> Task :interop:android-runtime:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :interop:android-runtime:preDebugAndroidTestBuild UP-TO-DATE
+> Task :interop:android-runtime:generateDebugAndroidTestResources UP-TO-DATE
+> Task :interop:android-runtime:packageDebugAndroidTestResources UP-TO-DATE
+> Task :interop:android-runtime:processDebugAndroidTestNavigationResources UP-TO-DATE
+> Task :interop:android-runtime:parseDebugAndroidTestLocalResources UP-TO-DATE
+> Task :interop:android-runtime:generateDebugAndroidTestRFile UP-TO-DATE
+> Task :interop:android-runtime:compileDebugAndroidTestKotlin UP-TO-DATE
+> Task :interop:android-runtime:javaPreCompileDebugAndroidTest UP-TO-DATE
+> Task :interop:android-runtime:compileDebugAndroidTestJavaWithJavac NO-SOURCE
+> Task :interop:android-runtime:generateDebugAndroidTestAssets UP-TO-DATE
+> Task :interop:android-runtime:generateDebugAssets UP-TO-DATE
+> Task :interop:android-runtime:mergeDebugAssets UP-TO-DATE
+> Task :interop:android-runtime:mergeDebugAndroidTestAssets UP-TO-DATE
+> Task :interop:android-runtime:compressDebugAndroidTestAssets UP-TO-DATE
+> Task :interop:android-runtime:generateDebugAndroidTestGlobalSynthetics UP-TO-DATE
+> Task :interop:android-runtime:processDebugAndroidTestJavaRes UP-TO-DATE
+> Task :interop:android-runtime:processDebugJavaRes UP-TO-DATE
+> Task :interop:android-runtime:mergeDebugAndroidTestJavaResource UP-TO-DATE
+> Task :interop:android-runtime:checkDebugAndroidTestDuplicateClasses UP-TO-DATE
+> Task :interop:android-runtime:desugarDebugAndroidTestFileDependencies UP-TO-DATE
+> Task :interop:android-runtime:mergeExtDexDebugAndroidTest UP-TO-DATE
+> Task :interop:android-runtime:bundleLibRuntimeToDirDebug UP-TO-DATE
+> Task :interop:android-runtime:writeDebugAarMetadata UP-TO-DATE
+> Task :interop:android-runtime:checkDebugAndroidTestAarMetadata UP-TO-DATE
+> Task :interop:android-runtime:mergeLibDexDebugAndroidTest UP-TO-DATE
+> Task :interop:android-runtime:mapDebugAndroidTestSourceSetPaths UP-TO-DATE
+> Task :interop:android-runtime:compileDebugAndroidTestNavigationResources UP-TO-DATE
+> Task :interop:android-runtime:mapDebugSourceSetPaths UP-TO-DATE
+> Task :interop:android-runtime:compileDebugLibraryResources UP-TO-DATE
+> Task :interop:android-runtime:mergeDebugAndroidTestResources UP-TO-DATE
+> Task :interop:android-runtime:extractDeepLinksDebug UP-TO-DATE
+> Task :interop:android-runtime:processDebugManifest UP-TO-DATE
+> Task :interop:android-runtime:mergeDebugAndroidTestManifest UP-TO-DATE
+> Task :interop:android-runtime:processDebugAndroidTestManifest UP-TO-DATE
+> Task :interop:android-runtime:processDebugAndroidTestResources UP-TO-DATE
+> Task :interop:android-runtime:dexBuilderDebugAndroidTest UP-TO-DATE
+> Task :interop:android-runtime:mergeProjectDexDebugAndroidTest UP-TO-DATE
+> Task :interop:android-runtime:mergeDebugJniLibFolders UP-TO-DATE
+> Task :interop:android-runtime:mergeDebugNativeLibs NO-SOURCE
+> Task :interop:android-runtime:copyDebugJniLibsProjectOnly UP-TO-DATE
+> Task :interop:android-runtime:mergeDebugAndroidTestJniLibFolders UP-TO-DATE
+> Task :interop:android-runtime:mergeDebugAndroidTestNativeLibs NO-SOURCE
+> Task :interop:android-runtime:stripDebugAndroidTestDebugSymbols NO-SOURCE
+> Task :interop:android-runtime:validateSigningDebugAndroidTest UP-TO-DATE
+> Task :interop:android-runtime:writeDebugAndroidTestSigningConfigVersions UP-TO-DATE
+> Task :interop:android-runtime:packageDebugAndroidTest UP-TO-DATE
+> Task :interop:android-runtime:createDebugAndroidTestApkListingFileRedirect UP-TO-DATE
+Starting 9 tests on Pixel_9(AVD) - 17
+Starting 9 tests on Medium_Phone(AVD) - 8.0.0
+Pixel_9(AVD) - 17 Tests 7/9 completed. (0 skipped) (0 failed)
+Medium_Phone(AVD) - 8.0.0 Tests 9/9 completed. (0 skipped) (0 failed)
+Finished 9 tests on Medium_Phone(AVD) - 8.0.0
+Finished 9 tests on Pixel_9(AVD) - 17
+> Task :interop:android-runtime:connectedDebugAndroidTest
+
+[Incubating] Problems report is available at: file:///home/ben/projects/decent-wallet/build/reports/problems/problems-report.html
+
+BUILD SUCCESSFUL in 48s
+49 actionable tasks: 1 executed, 48 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.5.0/userguide/configuration_cache_enabling.html

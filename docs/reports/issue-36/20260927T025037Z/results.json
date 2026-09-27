@@ -1,0 +1,93 @@
+{
+  "issue": 36,
+  "generated_at_utc": "2026-09-27T02:52:03.298888+00:00",
+  "git_commit": "bba9776725527087c8578d31b7587317c6d3986b",
+  "git_branch": "feat/issue-36-android-gradle-instrumentation",
+  "git_worktree_status": "M .gitignore\n M CONTRIBUTING.md\n?? build.gradle.kts\n?? docs/reports/\n?? docs/research/android-api26-x86-avd-suitability.md\n?? docs/research/android-runtime-conformance-maven-feasibility.md\n?? docs/research/android-runtime-conformance-options.md\n?? gradle.properties\n?? gradle/\n?? gradlew\n?? gradlew.bat\n?? interop/android-runtime/\n?? scripts/\n?? settings.gradle.kts",
+  "java_version": "openjdk version \"17.0.2\" 2022-01-18\nOpenJDK Runtime Environment (build 17.0.2+8-86)\nOpenJDK 64-Bit Server VM (build 17.0.2+8-86, mixed mode, sharing)",
+  "java_home": "/home/ben/.local/share/mise/installs/java/17.0.2",
+  "android_sdk": "/home/ben/Android/Sdk",
+  "sdk_package_revisions": {
+    "emulator": "37.1.11",
+    "platform_tools": "37.0.1",
+    "build_tools": "37.0.0",
+    "compile_sdk_api": "37.0",
+    "compile_sdk_package_revision": "2"
+  },
+  "gradle_wrapper": "9.5.0",
+  "android_gradle_plugin": "9.3.1",
+  "kotlin_gradle_plugin": "2.4.20",
+  "build_tools": "37.0.0",
+  "command": "./gradlew --no-daemon --dependency-verification=strict :interop:android-runtime:connectedDebugAndroidTest",
+  "locked_build": true,
+  "targets": [
+    {
+      "avd_name": "Medium_Phone",
+      "avd_serial": "emulator-5554",
+      "android_api": 26,
+      "android_release": "8.0.0",
+      "abi": "x86",
+      "supported_abis": [
+        "x86"
+      ],
+      "build_fingerprint": "google/sdk_gphone_x86/generic_x86:8.0.0/OSR1.170901.043/4456315:user/release-keys",
+      "image": {
+        "avd_target": "android-26",
+        "avd_config_abi": "x86",
+        "avd_image_sysdir": "system-images/android-26/google_apis_playstore/x86/",
+        "system_image_package": "system-images/android-26/google_apis_playstore/x86",
+        "system_image_description": "System Image x86 with Google Play.",
+        "system_image_revision": "7",
+        "system_image_tag": "google_apis_playstore",
+        "system_image_abi": "x86"
+      },
+      "test_report_device_property": "Medium_Phone(AVD) - 8.0.0",
+      "tests": {
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "instrumentation_xml": "Medium_Phone-instrumentation.xml",
+      "gradle_log": "gradle-connectedAndroidTest.log",
+      "command": "./gradlew --no-daemon --dependency-verification=strict :interop:android-runtime:connectedDebugAndroidTest",
+      "dependency_locking": "checked-in Gradle lockfile",
+      "dependency_verification": "strict SHA-256 verification metadata"
+    },
+    {
+      "avd_name": "Pixel_9",
+      "avd_serial": "emulator-5556",
+      "android_api": 37,
+      "android_release": "17",
+      "abi": "x86_64",
+      "supported_abis": [
+        "x86_64",
+        "arm64-v8a"
+      ],
+      "build_fingerprint": "google/sdk_gphone16k_x86_64/emu64xa16k:17/CP41.260828.004.A7/16296984:user/dev-keys",
+      "image": {
+        "avd_target": "android-37.2",
+        "avd_config_abi": "x86_64",
+        "avd_image_sysdir": "system-images/android-37.2/google_apis_playstore_ps16k/x86_64/",
+        "system_image_package": "system-images/android-37.2/google_apis_playstore_ps16k/x86_64",
+        "system_image_description": "System Image Page Size 16k x86_64 with Google Play.",
+        "system_image_revision": "5",
+        "system_image_tag": "google_apis_playstore,page_size_16kb",
+        "system_image_abi": "x86_64"
+      },
+      "test_report_device_property": "Pixel_9(AVD) - 17",
+      "tests": {
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "instrumentation_xml": "Pixel_9-instrumentation.xml",
+      "gradle_log": "gradle-connectedAndroidTest.log",
+      "command": "./gradlew --no-daemon --dependency-verification=strict :interop:android-runtime:connectedDebugAndroidTest",
+      "dependency_locking": "checked-in Gradle lockfile",
+      "dependency_verification": "strict SHA-256 verification metadata"
+    }
+  ],
+  "coverage_limit": "API 26 x86 evidence does not establish x86_64 native ABI coverage."
+}
