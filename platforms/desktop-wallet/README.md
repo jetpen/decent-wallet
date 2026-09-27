@@ -1,0 +1,50 @@
+# Desktop wallet-container CLI
+
+This is the optional Linux desktop/Podman target for Issue #18. It packages the existing Python wallet core; it does not fork the cryptography or wallet-container implementation. The wallet artifact is the encrypted `.dw` file. The OCI image is only the runtime used to execute the desktop CLI.
+
+The CLI provides explicit container operations:
+
+- `create WALLET_PATH` creates a new v2 signing wallet using the OS-backed CSRNG.
+- `import WALLET_PATH BACKUP_PATH` authenticates and imports the exact encrypted bytes to a new destination.
+- `export WALLET_PATH BACKUP_PATH` unlocks the wallet and writes its exact encrypted bytes to a new destination.
+- `migrate WALLET_PATH` explicitly authenticates and migrates the immediately preceding v1 format to v2 in place.
+
+Every command locks its in-memory wallet session before exiting. Passwords are requested with hidden terminal input. The CLI refuses password entry when stdin is not a terminal and treats `getpass` echo-fallback warnings as errors. Passwords are never accepted as command arguments or environment variables. Output is limited to generic status/error categories; wallet payloads, keys, backup bytes, and raw filesystem exception values are not printed.
+
+Create, import, and export never overwrite an existing destination. Export and import operate on the encrypted bytes; no Registry state is read or changed. The CLI does not provide automatic transfer or synchronization. Use a caller-selected host directory and an external user-controlled transfer method for backups. Container v1 files must be migrated explicitly; direct import accepts v2 only.
+
+## Build and conformance
+
+From the repository root:
+
+```sh
+podman build -f platforms/desktop-wallet/Containerfile -t decent-wallet-desktop:local .
+CONTAINER_RUNTIME=podman platforms/desktop-wallet/verify-container.sh
+```
+
+The image installs dependencies through `uv sync --locked` from the repository's `uv.lock`. The verification script builds the `conformance` stage and runs the complete Python test suite, including the shared v2 known-answer vector and desktop CLI lifecycle/fault tests, with networking disabled, a read-only root filesystem, no Linux capabilities, and a temporary `/tmp` filesystem. It also builds the final `runtime` stage and smoke-tests the installed `decent-wallet --help` entry point under network-disabled, read-only, no-capability settings. Set `CONTAINER_RUNTIME=docker` only if a Docker-compatible daemon is available.
+
+## Rootless Podman use
+
+Create a private host directory and build the image once:
+
+```sh
+install -d -m 700 "$HOME/.local/share/decent-wallet"
+podman build -f platforms/desktop-wallet/Containerfile -t decent-wallet-desktop:local .
+```
+
+Run each command interactively, map the invoking UID/GID into the container, and mount only the selected wallet directory:
+
+```sh
+podman run --rm -it \
+  --network=none --read-only --cap-drop=all \
+  --security-opt=no-new-privileges --userns=keep-id \
+  --user "$(id -u):$(id -g)" \
+  --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  -v "$HOME/.local/share/decent-wallet:/wallet:rw,Z" \
+  decent-wallet-desktop:local create /wallet/main.dw
+```
+
+Use `export /wallet/main.dw /wallet/backup.dw`, `import /wallet/restored.dw /wallet/backup.dw`, or `migrate /wallet/main.dw` in the same invocation form. `-it` is required for hidden password prompts. On systems without SELinux, omit the `,Z` volume suffix. The destination for `create`, `import`, or `export` must not already exist. Keep the mounted directory private and never mount a general-purpose synchronized folder for automatic backup.
+
+For direct Python integration outside Podman, use the public `decent_wallet.Wallet` API. The CLI is not a GUI, consent interface, or Registry/DHT transport. Owner-key rotation remains available through the Python core API; no desktop-specific rotation UI or production Registry transport is provided here.
