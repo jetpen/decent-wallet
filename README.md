@@ -8,7 +8,7 @@ Current implementation includes:
 
 - Argon2id-protected, XChaCha20-Poly1305 encrypted wallet containers.
 - Version-2 authenticated container format. Version 1 is accepted only through explicit one-way migration; `Wallet.open()` and `Wallet.import_container()` remain v2-only. Other unsupported versions fail closed. See [ADR-0002](docs/adr/0002-wallet-container-v2-dispatch-intent.md) and [ADR-0003](docs/adr/0003-wallet-container-v1-to-v2-migration.md).
-- Normative [v2 container wire-format specification](docs/specs/wallet-container-v2-wire-format.md) and a public synthetic known-answer vector. The Android library and desktop/Podman CLI consume the same contract; iPhone support and complete cross-platform conformance remain incomplete.
+- Normative [v2 container wire-format specification](docs/specs/wallet-container-v2-wire-format.md) and a public synthetic known-answer vector. The Android library and desktop/Podman CLI consume the same contract; native iOS is excluded from the current MVP by [ADR-0004](docs/adr/0004-current-mvp-platform-scope.md), and full conformance across in-scope targets remains incomplete.
 - A Linux desktop/Podman CLI for create, exact encrypted export/import, and explicit v1-to-v2 migration. Passwords are accepted only through hidden interactive terminal prompts. See [platforms/desktop-wallet](platforms/desktop-wallet/README.md).
 - Atomic container writes, explicit authenticated v1-to-v2 migration, exact encrypted-container export/import, password rewrapping, bounded authentication delay, and lock/inactivity handling.
 - Local owner-key rotation: persist one encrypted pending successor; build and validate operation-5 drafts; locally prove possession without returning the proof signature; prepare publication consent, latch the exact envelope hash, conditionally dispatch, independently confirm via a fresh remote read, and promote the successor only from adapter-issued confirmation. Ambiguous outcomes retain both keys and the encrypted intent. This is a Python-core API over an injected transport; no production Registry transport is included, and Registry deployment compatibility is not verified.
@@ -18,7 +18,7 @@ Current implementation includes:
 - Public-only Identity/Registry adapter with canonical consent transcripts, replay/expiry handling, stale-state conditional writes, detached threshold proofs, and exact read-back confirmation.
 - Immutable public Identity drafts and portable proof bundles with independent signing, canonical exchange, merge, threshold validation, finalization, conditional publication, and exact read-back confirmation.
 
-The canonical accepted specification is [docs/specs/wallet-implementation.md](docs/specs/wallet-implementation.md). The Android library and desktop CLI are partial container-lifecycle targets. An iPhone adapter, GUI, interactive consent interface, and concrete production Registry/DHT transport remain outside the current implementation.
+The canonical accepted specification is [docs/specs/wallet-implementation.md](docs/specs/wallet-implementation.md). The Android library and desktop CLI are partial container-lifecycle targets. Native iOS is explicitly excluded from the current MVP by [ADR-0004](docs/adr/0004-current-mvp-platform-scope.md); a GUI, interactive consent interface, and concrete production Registry/DHT transport remain unimplemented.
 
 ## Deployment
 

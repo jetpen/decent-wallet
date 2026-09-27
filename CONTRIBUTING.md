@@ -2,7 +2,7 @@
 
 ## Scope and platform status
 
-The Python wallet library is the shared core. The repository also includes a production Android wallet-container library, a test-only Kotlin/JVM vector consumer, and a partial Linux desktop/Podman CLI target. There is no complete Android or desktop application, iPhone adapter, GUI, or production Registry/DHT transport. See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented) and [desktop CLI guide](platforms/desktop-wallet/README.md).
+The Python wallet library is the shared core. The repository also includes a production Android wallet-container library, a test-only Kotlin/JVM vector consumer, and a partial Linux desktop/Podman CLI target. Native iOS is excluded from the current MVP by [ADR-0004](docs/adr/0004-current-mvp-platform-scope.md). There is no complete Android or desktop application, GUI, or production Registry/DHT transport. See the [wallet implementation specification](docs/specs/wallet-implementation.md#kotlinjvm-v2-vector-consumer-issue-33-accepted-and-implemented) and [desktop CLI guide](platforms/desktop-wallet/README.md).
 
 Issue [#36](https://github.com/jetpen/decent-wallet/issues/36) tracks a separate test-only Android runtime-conformance harness for that verifier. The Gradle-only test harness and instrumentation suite are implemented; the production Android container library is a separate target. The latest #36 locked run passed all nine cases on both approved AVDs; see the evidence manifest and XML reports under `docs/reports/issue-36/20260927T025037Z/`. Bouncy Castle's build-time Android API 26 compatibility check remains static evidence only; runtime compatibility claims are limited to the named tested images and cases.
 
@@ -188,3 +188,9 @@ adb devices -l
 ```
 
 The Maven wrapper command above verifies only the separate Kotlin/JVM module; it is not part of the Android workflow. `emulator -list-avds` should show the approved `Medium_Phone` and `Pixel_9` AVDs. For Android conformance, use the single Gradle command above or the runner that supplies the same command and captures evidence. Do not use Maven, a physical device, or another emulator image as a substitute. API 26 evidence is limited to the selected x86 guest.
+
+## iPhone platform (deferred from current MVP)
+
+Native iPhone/iOS implementation is excluded from the current MVP by [ADR-0004](docs/adr/0004-current-mvp-platform-scope.md). The project has no Apple development hardware or macOS/Xcode environment to build and validate an iPhone target, so Apple tooling, signing, Simulator, and physical-device checks are not prerequisites for current MVP work. Issue #18 acceptance applies to Android and desktop/Podman.
+
+The shared wallet-container contract remains platform-neutral. Reconsider iOS only as a separately scoped future target when a supported Mac/Xcode/Simulator validation path is available; use a physical iPhone for device-specific acceptance when available. Future iOS compatibility should follow the pinned Xcode's device and Simulator support rather than compile-only legacy deployment targets.
