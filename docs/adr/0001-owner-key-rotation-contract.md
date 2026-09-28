@@ -4,6 +4,8 @@
 
 **Scope:** Decent Wallet Issue #18 and the required `decent-registry` wire support
 
+**Transport update:** [ADR-0006](0006-direct-dht-best-effort-rotation.md) supersedes only this ADR's implications of network-wide atomic conditional publication, deadline enforcement, and global confirmation. Operation-5 authorization and the wallet's exact-envelope latch, predecessor-history, ambiguous-outcome, no-retry, and durable-promotion safeguards remain in force.
+
 ## Context
 
 The wallet requires owner-key rotation without changing the Identity's raw owner-name bytes or Registry lookup key. Existing Registry transitions do not permit this:

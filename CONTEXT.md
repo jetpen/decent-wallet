@@ -20,6 +20,10 @@ _Avoid_: signer-set replacement, key update
 Encrypted wallet-local binding of a finalized operation-5 envelope to its Owner Name, predecessor/successor keys, predecessor state hash, and sequence; its presence means dispatch may have occurred and blocks further signing or cancellation until resolved.
 _Avoid_: publication confirmation, Registry acceptance
 
+**Peer-Observed Rotation Confirmation**:
+A wallet-local capability minted after a fresh DHT response returns the exact latched envelope and the wallet validates the complete predecessor chain; it is not evidence of a global commit or convergence.
+_Avoid_: global confirmation, network-wide commit
+
 **Signer-Set Replacement**:
 A change to the version-1 set of public keys authorized to sign Identity updates, distinct from changing the Identity Owner Key.
 _Avoid_: owner-key rotation

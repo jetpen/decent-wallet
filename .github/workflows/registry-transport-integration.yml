@@ -1,0 +1,73 @@
+name: Registry transport integration
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/registry-transport-integration.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/decent_wallet/identity.py"
+      - "src/decent_wallet/registry_transport.py"
+      - "tests/test_registry_transport_integration.py"
+      - "scripts/test-registry-integration.sh"
+      - "docs/adr/0006-direct-dht-best-effort-rotation.md"
+      - "docs/specs/wallet-implementation.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/registry-transport-integration.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/decent_wallet/identity.py"
+      - "src/decent_wallet/registry_transport.py"
+      - "tests/test_registry_transport_integration.py"
+      - "scripts/test-registry-integration.sh"
+      - "docs/adr/0006-direct-dht-best-effort-rotation.md"
+      - "docs/specs/wallet-implementation.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  direct-dht-transport:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out wallet
+        uses: actions/checkout@v4
+        with:
+          path: decent-wallet
+
+      # Pin the provider API used by the transport. Advance this SHA deliberately
+      # when a newer decent-registry revision becomes the supported integration target.
+      - name: Check out decent-registry
+        uses: actions/checkout@v4
+        with:
+          repository: jetpen/decent-registry
+          ref: 3e561bbdaf7c6da85528a717dd555445d5e7dff7
+          path: decent-registry
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.19"
+          enable-cache: true
+          cache-dependency-glob: decent-wallet/uv.lock
+
+      - name: Run locked wallet tests
+        working-directory: decent-wallet
+        run: uv run --locked --extra test pytest
+
+      - name: Run Registry/DHT integration tests
+        working-directory: decent-wallet
+        env:
+          DECENT_REGISTRY_PATH: ../decent-registry
+        run: scripts/test-registry-integration.sh
