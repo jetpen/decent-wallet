@@ -49,6 +49,7 @@ from .identity import (
     TransportFailure,
     build_identity_update,
 )
+from .registry_transport import RegistryTransport
 
 __all__ = [
     "CURRENT_FORMAT_VERSION",
@@ -90,6 +91,7 @@ __all__ = [
     "InvalidIdentityState",
     "PublishStatus",
     "RegistryAdapter",
+    "RegistryTransport",
     "StalePublication",
     "SubmissionResult",
     "TransportFailure",

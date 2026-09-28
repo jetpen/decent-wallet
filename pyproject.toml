@@ -19,6 +19,9 @@ decent-wallet = "decent_wallet.desktop_cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-trio>=0.8"]
+registry = [
+    "decent-registry @ git+https://github.com/jetpen/decent-registry.git@3e561bbdaf7c6da85528a717dd555445d5e7dff7",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

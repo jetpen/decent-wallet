@@ -7,12 +7,17 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
 RUN python -m pip install --no-cache-dir "uv==0.12.19"
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends build-essential git libgmp-dev \
+  && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv sync --locked --no-dev --no-editable
+RUN uv sync --locked --no-dev --extra registry --no-editable \
+  && uv cache clean
 
 FROM build AS conformance
-RUN uv sync --locked --extra test --no-editable
+RUN uv sync --locked --extra test --extra registry --no-editable \
+  && uv cache clean
 COPY tests ./tests
 ENV HOME=/tmp
 WORKDIR /tmp
@@ -23,7 +28,21 @@ FROM python:3.12-slim-bookworm AS runtime
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends libgmp10 \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /wallet
 COPY --from=build /opt/venv /opt/venv
 USER 65532:65532
 ENTRYPOINT ["decent-wallet"]
+
+FROM runtime AS runtime-conformance
+COPY --from=conformance /opt/venv /opt/venv
+COPY tests /tests
+COPY pyproject.toml /tests/pyproject.toml
+ENV HOME=/tmp
+WORKDIR /tmp
+ENTRYPOINT ["/opt/venv/bin/python"]
+CMD ["-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "addopts=", "-m", "registry_integration", "/tests/test_registry_transport_integration.py"]
+
+FROM runtime AS final

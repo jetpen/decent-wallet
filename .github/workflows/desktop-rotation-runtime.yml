@@ -1,0 +1,53 @@
+name: Desktop rotation runtime
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/desktop-rotation-runtime.yml"
+      - "platforms/desktop-wallet/Containerfile"
+      - "platforms/desktop-wallet/verify-container.sh"
+      - "platforms/desktop-wallet/README.md"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/decent_wallet/**"
+      - "tests/**"
+      - "docs/adr/0005-desktop-rotation-api-boundary.md"
+      - "docs/specs/wallet-implementation.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/desktop-rotation-runtime.yml"
+      - "platforms/desktop-wallet/Containerfile"
+      - "platforms/desktop-wallet/verify-container.sh"
+      - "platforms/desktop-wallet/README.md"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/decent_wallet/**"
+      - "tests/**"
+      - "docs/adr/0005-desktop-rotation-api-boundary.md"
+      - "docs/specs/wallet-implementation.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rootless-podman-rotation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out wallet
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman
+
+      - name: Verify rootless Podman
+        run: test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+
+      - name: Verify desktop/Podman conformance and rotation runtime
+        run: platforms/desktop-wallet/verify-container.sh
+        env:
+          CONTAINER_RUNTIME: podman
