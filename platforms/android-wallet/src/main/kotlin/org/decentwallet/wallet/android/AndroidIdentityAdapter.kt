@@ -252,12 +252,12 @@ class OwnerKeyRotationDispatchResult internal constructor(
 class OwnerKeyRotationPublication internal constructor(
     val intent: OwnerKeyRotationDispatchIntent,
     envelopeBytes: ByteArray,
-    predecessorEnvelopeBytes: ByteArray,
+    verifiedCandidateState: VerifiedIdentityState,
     val expiresAt: Long,
     private val seal: Any,
 ) {
     private val envelope = envelopeBytes.copyOf()
-    private val predecessorEnvelope = predecessorEnvelopeBytes.copyOf()
+    internal val verifiedCandidateState = verifiedCandidateState
     private val latchClaimed = AtomicBoolean(false)
     private val dispatchStarted = AtomicBoolean(false)
     @Volatile
@@ -265,8 +265,6 @@ class OwnerKeyRotationPublication internal constructor(
 
     val envelopeBytes: ByteArray
         get() = envelope.copyOf()
-
-    internal fun predecessorEnvelopeBytes(): ByteArray = predecessorEnvelope.copyOf()
 
     internal fun isAuthentic(): Boolean = seal === OwnerKeyRotationTokenAuthority.seal
 
@@ -357,6 +355,28 @@ class AndroidIdentityAdapter(
     private val transport: AndroidIdentityTransport,
     private val replayNonceStore: AndroidIdentityReplayNonceStore,
 ) {
+    /** Build operation 5 from the current, fully verified version-1 predecessor state. */
+    fun createVersionedOwnerKeyRotationDraft(
+        wallet: WalletSession,
+        ownerNameBytes: ByteArray,
+    ): VersionedOwnerKeyRotationDraft {
+        if (!rotationTransportAvailable()) throw WalletRotationTransportUnavailableException()
+        val ownerName = ownerNameBytes.copyOf()
+        var current: ByteArray? = null
+        try {
+            current = readCurrent(ownerName)
+                ?: throw WalletIdentityStateChangedException()
+            val predecessor = IdentityStateHistoryVerifier.resolve(ownerName, current) { stateHash ->
+                readByHash(ownerName, stateHash)
+            }
+            if (predecessor.signerSet.isEmpty()) throw WalletInvalidIdentityStateException()
+            return wallet.createVersionedOwnerKeyRotationDraft(ownerName, predecessor)
+        } finally {
+            ownerName.fill(0)
+            current?.fill(0)
+        }
+    }
+
     /** The authenticated origin and environment are trusted host context, not authenticated here. */
     fun prepareOwnerKeyRotationPublication(
         draft: OwnerKeyRotationDraft,
@@ -375,6 +395,7 @@ class AndroidIdentityAdapter(
         var envelope: ByteArray? = null
         var previous: ByteArray? = null
         var afterConsent: ByteArray? = null
+        var verifiedCandidate: VerifiedIdentityState? = null
         try {
             validateConsentContext(
                 authenticatedOrigin,
@@ -403,8 +424,7 @@ class AndroidIdentityAdapter(
 
             previous = readCurrent(ownerName)
                 ?: throw WalletIdentityStateChangedException()
-            val candidateStateHash = LegacyOwnerKeyRotation.verifyLegacyCandidate(previous, envelope, intent)
-            candidateStateHash.fill(0)
+            verifiedCandidate = verifyCandidateAgainstCurrent(ownerName, previous, envelope, intent)
 
             val nonceDigest = replayNonceDigest(ownerName, authenticatedOrigin, environment, nonceSnapshot)
             val nonceAccepted = try {
@@ -440,14 +460,25 @@ class AndroidIdentityAdapter(
 
             afterConsent = readCurrent(ownerName)
                 ?: throw WalletIdentityStateChangedException()
-            if (!afterConsent.contentEquals(previous)) throw WalletIdentityStateChangedException()
-            val revalidatedStateHash = LegacyOwnerKeyRotation.verifyLegacyCandidate(afterConsent, envelope, intent)
-            revalidatedStateHash.fill(0)
+            val revalidatedCandidate = try {
+                verifyCandidateAgainstCurrent(ownerName, afterConsent, envelope, intent)
+            } catch (_: Exception) {
+                throw WalletIdentityStateChangedException()
+            }
+            val initialStateHash = checkNotNull(verifiedCandidate).stateHash
+            val revalidatedStateHash = revalidatedCandidate.stateHash
+            val sameCandidateState = try {
+                initialStateHash.contentEquals(revalidatedStateHash)
+            } finally {
+                initialStateHash.fill(0)
+                revalidatedStateHash.fill(0)
+            }
+            if (!sameCandidateState) throw WalletIdentityStateChangedException()
 
             return OwnerKeyRotationPublication(
                 intent = intent,
                 envelopeBytes = envelope,
-                predecessorEnvelopeBytes = previous,
+                verifiedCandidateState = checkNotNull(verifiedCandidate),
                 expiresAt = expiresAt,
                 seal = OwnerKeyRotationTokenAuthority.seal,
             )
@@ -471,7 +502,6 @@ class AndroidIdentityAdapter(
         }
         val intent = publication.intent
         val ownerName = intent.ownerNameBytes
-        val predecessor = publication.predecessorEnvelopeBytes()
         val envelope = publication.envelopeBytes
         val expectedHash = intent.predecessorStateHash
         try {
@@ -497,16 +527,14 @@ class AndroidIdentityAdapter(
                 )
             }
             val candidateObservedLocally = envelopeMatchesIntent(current, intent)
-            val verifiedCurrentHash = try {
-                if (!current.contentEquals(predecessor)) null
-                else LegacyOwnerKeyRotation.verifyLegacyCandidate(current, envelope, intent)
+            val currentMatches = try {
+                verifyCandidateAgainstCurrent(ownerName, current, envelope, intent)
+                true
             } catch (_: Exception) {
-                null
+                false
             } finally {
                 current.fill(0)
             }
-            val currentMatches = verifiedCurrentHash != null
-            verifiedCurrentHash?.fill(0)
             if (!currentMatches) {
                 return prewriteFailure(
                     publication,
@@ -566,7 +594,6 @@ class AndroidIdentityAdapter(
             }
         } finally {
             ownerName.fill(0)
-            predecessor.fill(0)
             envelope.fill(0)
             expectedHash.fill(0)
         }
@@ -597,28 +624,118 @@ class AndroidIdentityAdapter(
         ownerName: ByteArray,
         remote: ByteArray,
     ): OwnerKeyRotationConfirmation? {
-        val predecessorHash = intent.predecessorStateHash
-        val predecessor = try {
-            readByHash(ownerName, predecessorHash)
+        if (!envelopeMatchesIntent(remote, intent)) return null
+        val state = try {
+            IdentityStateHistoryVerifier.resolve(ownerName, remote) { predecessorHash ->
+                readByHash(ownerName, predecessorHash)
+            }
         } catch (_: Exception) {
-            null
-        } finally {
-            predecessorHash.fill(0)
-        } ?: return null
+            return null
+        }
+        val expectedOwnerName = intent.ownerNameBytes
+        val expectedPredecessorOwner = intent.predecessorOwnerPublicKey
+        val expectedSuccessorOwner = intent.successorOwnerPublicKey
+        val expectedPredecessorHash = intent.predecessorStateHash
+        val observedOwnerName = state.ownerNameBytes
+        val observedPredecessorOwner = state.predecessorOwnerPublicKey
+        val observedSuccessorOwner = state.ownerPublicKey
+        val observedPredecessorHash = state.predecessorStateHash
+        val observedStateHash = state.stateHash
         try {
-            if (!envelopeMatchesIntent(remote, intent)) return null
-            val stateHash = try {
-                LegacyOwnerKeyRotation.verifyLegacyCandidate(predecessor, remote, intent)
-            } catch (_: Exception) {
+            if (!observedOwnerName.contentEquals(expectedOwnerName) ||
+                observedPredecessorOwner == null ||
+                !observedPredecessorOwner.contentEquals(expectedPredecessorOwner) ||
+                !observedSuccessorOwner.contentEquals(expectedSuccessorOwner) ||
+                observedPredecessorHash == null ||
+                !observedPredecessorHash.contentEquals(expectedPredecessorHash) ||
+                state.sequence != intent.sequence
+            ) {
                 return null
             }
-            return try {
-                OwnerKeyRotationTokenAuthority.confirmation(intent, stateHash)
-            } finally {
-                stateHash.fill(0)
+            return OwnerKeyRotationTokenAuthority.confirmation(intent, observedStateHash)
+        } finally {
+            expectedOwnerName.fill(0)
+            expectedPredecessorOwner.fill(0)
+            expectedSuccessorOwner.fill(0)
+            expectedPredecessorHash.fill(0)
+            observedOwnerName.fill(0)
+            observedPredecessorOwner?.fill(0)
+            observedSuccessorOwner.fill(0)
+            observedPredecessorHash?.fill(0)
+            observedStateHash.fill(0)
+        }
+    }
+
+    private fun verifyCandidateAgainstCurrent(
+        ownerName: ByteArray,
+        predecessorEnvelope: ByteArray,
+        candidateEnvelope: ByteArray,
+        intent: OwnerKeyRotationDispatchIntent,
+    ): VerifiedIdentityState {
+        if (!envelopeMatchesIntent(candidateEnvelope, intent)) throw WalletInvalidIdentityStateException()
+        val expectedPredecessorHash = intent.predecessorStateHash
+        val expectedOwnerName = intent.ownerNameBytes
+        val expectedPredecessorOwner = intent.predecessorOwnerPublicKey
+        val expectedSuccessorOwner = intent.successorOwnerPublicKey
+        val currentState = IdentityStateHistoryVerifier.resolve(ownerName, predecessorEnvelope) { stateHash ->
+            readByHash(ownerName, stateHash)
+        }
+        val currentOwnerName = currentState.ownerNameBytes
+        val currentOwner = currentState.ownerPublicKey
+        val currentStateHash = currentState.stateHash
+        try {
+            if (!currentOwnerName.contentEquals(expectedOwnerName) ||
+                !currentOwner.contentEquals(expectedPredecessorOwner) ||
+                !currentStateHash.contentEquals(expectedPredecessorHash)
+            ) {
+                throw WalletIdentityStateChangedException()
             }
         } finally {
-            predecessor.fill(0)
+            currentOwnerName.fill(0)
+            currentOwner.fill(0)
+            currentStateHash.fill(0)
+        }
+        val candidate = try {
+            IdentityStateHistoryVerifier.resolve(ownerName, candidateEnvelope) { requestedHash ->
+                if (requestedHash.contentEquals(expectedPredecessorHash)) {
+                    predecessorEnvelope.copyOf()
+                } else {
+                    readByHash(ownerName, requestedHash)
+                }
+            }
+        } catch (failure: WalletContainerException) {
+            throw failure
+        } catch (_: Exception) {
+            throw WalletInvalidIdentityStateException()
+        }
+        val candidateOwnerName = candidate.ownerNameBytes
+        val candidateOwner = candidate.ownerPublicKey
+        val candidatePredecessorOwner = candidate.predecessorOwnerPublicKey
+        val candidatePredecessorHash = candidate.predecessorStateHash
+        val candidateStateHash = candidate.stateHash
+        try {
+            if (!candidateOwnerName.contentEquals(expectedOwnerName) ||
+                !candidateOwner.contentEquals(expectedSuccessorOwner) ||
+                candidatePredecessorOwner == null ||
+                !candidatePredecessorOwner.contentEquals(expectedPredecessorOwner) ||
+                candidatePredecessorHash == null ||
+                !candidatePredecessorHash.contentEquals(expectedPredecessorHash) ||
+                candidate.sequence != intent.sequence ||
+                candidateStateHash.size != AndroidIdentityCrypto.KEY_BYTES
+            ) {
+                throw WalletInvalidIdentityStateException()
+            }
+            return candidate
+        } finally {
+            expectedPredecessorHash.fill(0)
+            expectedOwnerName.fill(0)
+            expectedPredecessorOwner.fill(0)
+            expectedSuccessorOwner.fill(0)
+            candidateOwnerName.fill(0)
+            candidateOwner.fill(0)
+            candidatePredecessorOwner?.fill(0)
+            candidatePredecessorHash?.fill(0)
+            candidateStateHash.fill(0)
         }
     }
 

@@ -1,0 +1,12 @@
+syntax = "proto3";
+package record.pb;
+
+option java_package = "org.decentwallet.wallet.android.dht.proto";
+option java_outer_classname = "RecordProtos";
+option java_multiple_files = true;
+
+message Record {
+  bytes key = 1;
+  bytes value = 2;
+  string timeReceived = 5;
+}

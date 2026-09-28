@@ -1,5 +1,6 @@
 package org.decentwallet.wallet.android
 
+import java.math.BigInteger
 import java.nio.file.Files
 import java.util.Base64
 import org.junit.Assert.assertArrayEquals
@@ -120,6 +121,266 @@ class AndroidIdentityAdapterTest {
             Files.walk(directory).use { paths ->
                 paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
             }
+        }
+    }
+
+    @Test
+    fun versionedPredecessorUsesExternalThresholdProofsForOperationFivePromotion() {
+        val directory = Files.createTempDirectory("wallet-android-versioned-rotation-")
+        val vectorText = String(
+            resource("/identity-owner-key-rotation-v1-predecessor-separate-owner.json"),
+            Charsets.UTF_8,
+        )
+        val ownerName = hexField(vectorText, "owner_name_utf8_hex")
+        val genesis = hexField(vectorText, "genesis_envelope_cbor_hex")
+        val genesisHash = hexField(vectorText, "genesis_state_hash_hex")
+        val predecessor = hexField(vectorText, "predecessor_envelope_cbor_hex")
+        val predecessorHash = hexField(vectorText, "predecessor_state_hash_hex")
+        val ownerSeed = syntheticSeed(200)
+        val pendingSeed = syntheticSeed(160)
+        val signerSeeds = listOf(syntheticSeed(0), syntheticSeed(32), syntheticSeed(64))
+        val ownerPublic = AndroidIdentityCrypto.publicKeyFromSeed(ownerSeed)
+        val pendingPublic = AndroidIdentityCrypto.publicKeyFromSeed(pendingSeed)
+        val payload = mutableMapOf<String, Any?>(
+            "private_seed" to ownerSeed.copyOf(),
+            "public_key" to ownerPublic.copyOf(),
+            "pending_private_seed" to pendingSeed.copyOf(),
+            "pending_public_key" to pendingPublic.copyOf(),
+        )
+        val wallet = AndroidWallet.create(
+            directory.resolve("wallet.dw"),
+            TEST_PASSWORD,
+            TEST_PASSWORD,
+            payload,
+        )
+        WalletJson.clearByteArrays(payload)
+        val signerPublics = signerSeeds.map(AndroidIdentityCrypto::publicKeyFromSeed)
+        val transport = VersionedIdentityTransport(
+            ownerName,
+            predecessor,
+            predecessorHash,
+            mapOf(genesisHash to genesis, predecessorHash to predecessor),
+        )
+        val adapter = AndroidIdentityAdapter(transport, InMemoryReplayNonceStore())
+        try {
+            assertArrayEquals(hexField(vectorText, "owner_public_key_hex"), ownerPublic)
+            val versionedDraft = adapter.createVersionedOwnerKeyRotationDraft(wallet, ownerName)
+            assertEquals(BigInteger.valueOf(3), versionedDraft.sequence)
+            assertArrayEquals(pendingPublic, versionedDraft.successorOwnerPublicKey)
+
+            val signedUpdate = versionedDraft.signedUpdateBytes
+            val digest = AndroidIdentityCrypto.sha256(signedUpdate)
+            val aliceSignature = AndroidIdentityCrypto.sign(signerSeeds[0], digest)
+            val bobSignature = AndroidIdentityCrypto.sign(signerSeeds[1], digest)
+            val finalizedDraft = try {
+                versionedDraft.finalizeWithProofs(
+                    listOf(
+                        OwnerKeyRotationProof("alice", aliceSignature),
+                        OwnerKeyRotationProof("bob", bobSignature),
+                    ),
+                )
+            } finally {
+                signedUpdate.fill(0)
+                digest.fill(0)
+                aliceSignature.fill(0)
+                bobSignature.fill(0)
+            }
+            val expectedCandidate = hexField(vectorText, "candidate_envelope_cbor_hex")
+            try {
+                assertArrayEquals(expectedCandidate, finalizedDraft.envelopeBytes)
+            } finally {
+                expectedCandidate.fill(0)
+            }
+
+            val payloadSnapshot = wallet.readPayload()
+            try {
+                assertArrayEquals(ownerSeed, payloadSnapshot["private_seed"] as ByteArray)
+                assertArrayEquals(pendingSeed, payloadSnapshot["pending_private_seed"] as ByteArray)
+                assertTrue(payloadSnapshot.keys.none { it.contains("signer", ignoreCase = true) })
+            } finally {
+                WalletJson.clearByteArrays(payloadSnapshot)
+            }
+
+            val publication = adapter.prepareOwnerKeyRotationPublication(
+                draft = finalizedDraft,
+                consent = { true },
+                authenticatedOrigin = "https://wallet.example",
+                environment = "testnet",
+                purpose = "publish owner-key rotation",
+                capability = "identity.rotate-owner-key",
+                expiresAt = 2_000_000_000L,
+                replayNonce = ByteArray(32) { (it + 1).toByte() },
+            )
+            val permit = wallet.latchOwnerKeyRotationDispatchIntent(publication)
+            val result = adapter.dispatchOwnerKeyRotation(publication, permit)
+
+            assertEquals(OwnerKeyRotationDispatchStatus.CONFIRMED, result.status)
+            assertEquals(1, transport.writeCount)
+            wallet.finalizeSigningKeyRotation(checkNotNull(result.confirmation))
+            assertArrayEquals(pendingPublic, wallet.ownerPublicKey)
+            assertEquals(null, wallet.pendingOwnerPublicKey)
+            assertArrayEquals(ownerName, transport.lastOwnerName)
+        } finally {
+            wallet.close()
+            ownerSeed.fill(0)
+            pendingSeed.fill(0)
+            signerSeeds.forEach { it.fill(0) }
+            ownerPublic.fill(0)
+            pendingPublic.fill(0)
+            signerPublics.forEach { it.fill(0) }
+            genesis.fill(0)
+            genesisHash.fill(0)
+            predecessor.fill(0)
+            predecessorHash.fill(0)
+            ownerName.fill(0)
+            vectorText.toByteArray(Charsets.UTF_8).fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun rejectsUnderThresholdProofSetForVersionedRotation() {
+        val fixture = createVersionedTestFixture()
+        val draft = fixture.adapter.createVersionedOwnerKeyRotationDraft(fixture.wallet, fixture.ownerName)
+        try {
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                draft.finalizeWithProofs(listOf(ownerKeyRotationProof(draft, "alice", fixture.signerSeeds[0])))
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun rejectsOutsiderProofForVersionedRotation() {
+        val fixture = createVersionedTestFixture()
+        val draft = fixture.adapter.createVersionedOwnerKeyRotationDraft(fixture.wallet, fixture.ownerName)
+        try {
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                draft.finalizeWithProofs(
+                    listOf(
+                        ownerKeyRotationProof(draft, "mallory", fixture.signerSeeds[0]),
+                        ownerKeyRotationProof(draft, "bob", fixture.signerSeeds[1]),
+                    ),
+                )
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun rejectsInvalidThresholdSignatureForVersionedRotation() {
+        val fixture = createVersionedTestFixture()
+        try {
+            val draft = fixture.adapter.createVersionedOwnerKeyRotationDraft(fixture.wallet, fixture.ownerName)
+            val aliceSignature = ownerKeyRotationProof(draft, "alice", fixture.signerSeeds[0]).signature
+            aliceSignature[0] = (aliceSignature[0].toInt() xor 1).toByte()
+            val proofs = listOf(
+                OwnerKeyRotationProof("alice", aliceSignature),
+                ownerKeyRotationProof(draft, "bob", fixture.signerSeeds[1]),
+            )
+
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                draft.finalizeWithProofs(proofs)
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun rejectsDuplicateThresholdSignerProofForVersionedRotation() {
+        val fixture = createVersionedTestFixture()
+        try {
+            val draft = fixture.adapter.createVersionedOwnerKeyRotationDraft(fixture.wallet, fixture.ownerName)
+            val aliceProof = ownerKeyRotationProof(draft, "alice", fixture.signerSeeds[0])
+            val bobProof = ownerKeyRotationProof(draft, "bob", fixture.signerSeeds[1])
+
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                draft.finalizeWithProofs(listOf(aliceProof, aliceProof, bobProof))
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun staleVersionedHeadIsRejectedBeforeConsent() {
+        val fixture = createVersionedTestFixture()
+        try {
+            val draft = finalizedVersionedDraft(fixture)
+            fixture.transport.setCurrent(fixture.genesis, fixture.genesisHash)
+            var consentCalls = 0
+
+            org.junit.Assert.assertThrows(WalletIdentityStateChangedException::class.java) {
+                prepareVersioned(fixture, draft) {
+                    consentCalls += 1
+                    true
+                }
+            }
+
+            assertEquals(0, consentCalls)
+            assertEquals(0, fixture.transport.writeCount)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun samePredecessorStateWithDifferentProofEnvelopeRemainsCurrentDuringConsent() {
+        val fixture = createVersionedTestFixture()
+        val alternateEnvelope = alternateVersionedEnvelope(
+            fixture.predecessor,
+            listOf("alice" to fixture.signerSeeds[0], "carol" to fixture.signerSeeds[2]),
+        )
+        try {
+            val draft = finalizedVersionedDraft(fixture)
+            val publication = prepareVersioned(fixture, draft) {
+                fixture.transport.setCurrent(alternateEnvelope, fixture.predecessorHash)
+                true
+            }
+
+            assertNotNull(publication)
+            assertEquals(0, fixture.transport.writeCount)
+        } finally {
+            alternateEnvelope.fill(0)
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun ambiguousVersionedDispatchReopensAndConfirmsWithoutRetry() {
+        val fixture = createVersionedTestFixture()
+        var reopened: WalletSession? = null
+        var candidateEnvelope: ByteArray? = null
+        try {
+            val draft = finalizedVersionedDraft(fixture)
+            candidateEnvelope = draft.envelopeBytes
+            fixture.transport.dropWrites = true
+            val publication = prepareVersioned(fixture, draft) { true }
+            val permit = fixture.wallet.latchOwnerKeyRotationDispatchIntent(publication)
+            val result = fixture.adapter.dispatchOwnerKeyRotation(publication, permit)
+
+            assertEquals(OwnerKeyRotationDispatchStatus.UNKNOWN, result.status)
+            assertEquals(1, fixture.transport.writeCount)
+            val intent = checkNotNull(fixture.wallet.ownerKeyRotationDispatchIntent)
+            fixture.wallet.close()
+            reopened = AndroidWallet.open(fixture.directory.resolve("wallet.dw"), TEST_PASSWORD)
+            assertNull(fixture.adapter.confirmOwnerKeyRotation(intent))
+            fixture.transport.setRemoteEnvelope(checkNotNull(candidateEnvelope))
+            val confirmation = checkNotNull(fixture.adapter.confirmOwnerKeyRotation(intent))
+            reopened.finalizeSigningKeyRotation(confirmation)
+
+            assertArrayEquals(fixture.pendingPublic, reopened.ownerPublicKey)
+            assertEquals(null, reopened.pendingOwnerPublicKey)
+            assertEquals(1, fixture.transport.writeCount)
+        } finally {
+            candidateEnvelope?.fill(0)
+            reopened?.close()
+            fixture.close()
         }
     }
 
@@ -686,6 +947,263 @@ class AndroidIdentityAdapterTest {
                 ByteArray(32) { index -> bytes[index % bytes.size] }
             },
         )
+
+    private fun finalizedVersionedDraft(fixture: VersionedTestFixture): OwnerKeyRotationDraft {
+        val draft = fixture.adapter.createVersionedOwnerKeyRotationDraft(fixture.wallet, fixture.ownerName)
+        return draft.finalizeWithProofs(
+            listOf(
+                ownerKeyRotationProof(draft, "alice", fixture.signerSeeds[0]),
+                ownerKeyRotationProof(draft, "bob", fixture.signerSeeds[1]),
+            ),
+        )
+    }
+
+    private fun prepareVersioned(
+        fixture: VersionedTestFixture,
+        draft: OwnerKeyRotationDraft,
+        consent: () -> Boolean,
+    ): OwnerKeyRotationPublication = fixture.adapter.prepareOwnerKeyRotationPublication(
+        draft = draft,
+        consent = { consent() },
+        authenticatedOrigin = "https://wallet.example",
+        environment = "testnet",
+        purpose = "publish owner-key rotation",
+        capability = "identity.rotate-owner-key",
+        expiresAt = 2_000_000_000L,
+        replayNonce = ByteArray(32) { (it + 1).toByte() },
+    )
+
+    private fun alternateVersionedEnvelope(
+        predecessor: ByteArray,
+        signers: List<Pair<String, ByteArray>>,
+    ): ByteArray {
+        val outer = IdentityCbor.decodeCanonical(predecessor) as? Map<*, *>
+            ?: throw WalletInvalidIdentityStateException()
+        val update = outer[BigInteger.valueOf(2)] as? ByteArray
+            ?: throw WalletInvalidIdentityStateException()
+        val digest = AndroidIdentityCrypto.sha256(update)
+        val proofValues = ArrayList<Map<BigInteger, Any?>>(signers.size)
+        try {
+            for ((signerId, signerSeed) in signers.sortedBy(Pair<String, ByteArray>::first)) {
+                val signature = AndroidIdentityCrypto.sign(signerSeed, digest)
+                proofValues.add(
+                    linkedMapOf(
+                        BigInteger.ONE to signerId,
+                        BigInteger.valueOf(2) to signature,
+                    ),
+                )
+            }
+            return IdentityCbor.encodeCanonical(
+                linkedMapOf<BigInteger, Any?>(
+                    BigInteger.ONE to BigInteger.ONE,
+                    BigInteger.valueOf(2) to update,
+                    BigInteger.valueOf(3) to proofValues,
+                ),
+            )
+        } finally {
+            digest.fill(0)
+            update.fill(0)
+            proofValues.forEach { (it[BigInteger.valueOf(2)] as? ByteArray)?.fill(0) }
+        }
+    }
+
+    private fun createVersionedTestFixture(): VersionedTestFixture {
+        val directory = Files.createTempDirectory("wallet-android-versioned-proof-")
+        val vectorText = String(
+            resource("/identity-owner-key-rotation-v1-predecessor-separate-owner.json"),
+            Charsets.UTF_8,
+        )
+        val ownerName = hexField(vectorText, "owner_name_utf8_hex")
+        val genesis = hexField(vectorText, "genesis_envelope_cbor_hex")
+        val genesisHash = hexField(vectorText, "genesis_state_hash_hex")
+        val predecessor = hexField(vectorText, "predecessor_envelope_cbor_hex")
+        val predecessorHash = hexField(vectorText, "predecessor_state_hash_hex")
+        val ownerSeed = syntheticSeed(200)
+        val pendingSeed = syntheticSeed(160)
+        val signerSeeds = listOf(syntheticSeed(0), syntheticSeed(32), syntheticSeed(64))
+        val ownerPublic = AndroidIdentityCrypto.publicKeyFromSeed(ownerSeed)
+        val pendingPublic = AndroidIdentityCrypto.publicKeyFromSeed(pendingSeed)
+        val payload = mutableMapOf<String, Any?>(
+            "private_seed" to ownerSeed.copyOf(),
+            "public_key" to ownerPublic.copyOf(),
+            "pending_private_seed" to pendingSeed.copyOf(),
+            "pending_public_key" to pendingPublic.copyOf(),
+        )
+        val wallet = AndroidWallet.create(
+            directory.resolve("wallet.dw"),
+            TEST_PASSWORD,
+            TEST_PASSWORD,
+            payload,
+        )
+        WalletJson.clearByteArrays(payload)
+        val transport = VersionedIdentityTransport(
+            ownerName,
+            predecessor,
+            predecessorHash,
+            mapOf(genesisHash to genesis, predecessorHash to predecessor),
+        )
+        return VersionedTestFixture(
+            directory = directory,
+            ownerName = ownerName,
+            genesis = genesis,
+            genesisHash = genesisHash,
+            predecessor = predecessor,
+            predecessorHash = predecessorHash,
+            ownerSeed = ownerSeed,
+            pendingSeed = pendingSeed,
+            signerSeeds = signerSeeds,
+            ownerPublic = ownerPublic,
+            pendingPublic = pendingPublic,
+            wallet = wallet,
+            transport = transport,
+            adapter = AndroidIdentityAdapter(transport, InMemoryReplayNonceStore()),
+            vectorText = vectorText,
+        )
+    }
+
+    private fun ownerKeyRotationProof(
+        draft: VersionedOwnerKeyRotationDraft,
+        signerId: String,
+        signerSeed: ByteArray,
+    ): OwnerKeyRotationProof {
+        val update = draft.signedUpdateBytes
+        val digest = AndroidIdentityCrypto.sha256(update)
+        val signature = AndroidIdentityCrypto.sign(signerSeed, digest)
+        return try {
+            OwnerKeyRotationProof(signerId, signature)
+        } finally {
+            update.fill(0)
+            digest.fill(0)
+            signature.fill(0)
+        }
+    }
+
+    private class VersionedTestFixture(
+        val directory: java.nio.file.Path,
+        val ownerName: ByteArray,
+        val genesis: ByteArray,
+        val genesisHash: ByteArray,
+        val predecessor: ByteArray,
+        val predecessorHash: ByteArray,
+        val ownerSeed: ByteArray,
+        val pendingSeed: ByteArray,
+        val signerSeeds: List<ByteArray>,
+        val ownerPublic: ByteArray,
+        val pendingPublic: ByteArray,
+        val wallet: WalletSession,
+        val transport: VersionedIdentityTransport,
+        val adapter: AndroidIdentityAdapter,
+        private val vectorText: String,
+    ) {
+        fun close() {
+            wallet.close()
+            ownerName.fill(0)
+            genesis.fill(0)
+            genesisHash.fill(0)
+            predecessor.fill(0)
+            predecessorHash.fill(0)
+            ownerSeed.fill(0)
+            pendingSeed.fill(0)
+            signerSeeds.forEach { it.fill(0) }
+            ownerPublic.fill(0)
+            pendingPublic.fill(0)
+            vectorText.toByteArray(Charsets.UTF_8).fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    private class VersionedIdentityTransport(
+        private val ownerName: ByteArray,
+        initialEnvelope: ByteArray,
+        initialStateHash: ByteArray,
+        initialHistory: Map<ByteArray, ByteArray>,
+    ) : AndroidIdentityTransport {
+        override val registryEnvironment: String = "testnet"
+        override val supportsOwnerKeyRotation: Boolean = true
+        private var currentEnvelope = initialEnvelope.copyOf()
+        private var currentStateHash = initialStateHash.copyOf()
+        private var remoteEnvelope: ByteArray? = initialEnvelope.copyOf()
+        private val history = HashMap<String, ByteArray>().apply {
+            initialHistory.forEach { (stateHash, envelope) ->
+                put(stateHashKey(stateHash), envelope.copyOf())
+            }
+        }
+        var writeCount: Int = 0
+            private set
+        var lastOwnerName: ByteArray? = null
+            private set
+        var dropWrites: Boolean = false
+
+        fun setCurrent(value: ByteArray, stateHash: ByteArray) {
+            currentEnvelope.fill(0)
+            currentEnvelope = value.copyOf()
+            currentStateHash.fill(0)
+            currentStateHash = stateHash.copyOf()
+        }
+
+        fun setRemoteEnvelope(value: ByteArray) {
+            remoteEnvelope?.fill(0)
+            remoteEnvelope = value.copyOf()
+        }
+
+        override fun getIdentityEnvelope(ownerNameBytes: ByteArray): ByteArray? {
+            require(ownerNameBytes.contentEquals(ownerName))
+            return currentEnvelope.copyOf()
+        }
+
+        override fun getIdentityEnvelopeByHash(
+            ownerNameBytes: ByteArray,
+            stateHash: ByteArray,
+        ): ByteArray? {
+            require(ownerNameBytes.contentEquals(ownerName))
+            return history[stateHashKey(stateHash)]?.copyOf()
+        }
+
+        override fun getRemoteIdentityEnvelope(ownerNameBytes: ByteArray): ByteArray? {
+            require(ownerNameBytes.contentEquals(ownerName))
+            return remoteEnvelope?.copyOf()
+        }
+
+        override fun putIdentityEnvelopeIfCurrent(
+            ownerNameBytes: ByteArray,
+            envelopeBytes: ByteArray,
+            expectedStateHash: ByteArray,
+            expiresAt: Long,
+        ) {
+            require(ownerNameBytes.contentEquals(ownerName))
+            if (!expectedStateHash.contentEquals(currentStateHash)) {
+                throw AndroidIdentityPreconditionFailedException()
+            }
+            if (expiresAt <= System.currentTimeMillis() / 1000) {
+                throw AndroidIdentityWriteExpiredException()
+            }
+            writeCount += 1
+            lastOwnerName = ownerNameBytes.copyOf()
+            if (dropWrites) throw java.io.IOException()
+            history[stateHashKey(currentStateHash)] = currentEnvelope.copyOf()
+            val nextHash = stateHashOf(envelopeBytes)
+            currentEnvelope.fill(0)
+            currentEnvelope = envelopeBytes.copyOf()
+            currentStateHash.fill(0)
+            currentStateHash = nextHash
+            history[stateHashKey(currentStateHash)] = currentEnvelope.copyOf()
+            remoteEnvelope?.fill(0)
+            remoteEnvelope = envelopeBytes.copyOf()
+        }
+
+        private fun stateHashOf(envelopeBytes: ByteArray): ByteArray {
+            val outer = IdentityCbor.decodeCanonical(envelopeBytes) as? Map<*, *>
+                ?: throw WalletInvalidIdentityStateException()
+            val update = outer[BigInteger.valueOf(2)] as? ByteArray
+                ?: throw WalletInvalidIdentityStateException()
+            return AndroidIdentityCrypto.sha256(update)
+        }
+
+        private fun stateHashKey(hash: ByteArray): String =
+            hash.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
 
     private class FakeIdentityTransport(
         private val ownerName: ByteArray,
