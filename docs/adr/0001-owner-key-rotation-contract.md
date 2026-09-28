@@ -54,7 +54,7 @@ The wallet retains the predecessor seed as active while the successor seed is pe
 Once this dispatch latch exists:
 
 - the wallet blocks Identity signing and publication, cancellation, and republishing;
-- a definitive pre-write rejection may clear the latch, leaving the successor pending for a new explicit attempt and fresh consent;
+- a typed expiry rejection may clear the latch only after an independent read does not show the exact candidate; stale-state and conditional-precondition conflicts remain latched unless exact candidate read-back plus predecessor verification issues confirmation;
 - any outcome that may have reached the Registry is `unknown`; both keys and the intent remain persisted, and only read-only confirmation is allowed;
 - observing the predecessor state alone does not prove non-acceptance;
 - no automatic retry, replacement, or rebase occurs.
@@ -67,7 +67,7 @@ The public-only `RegistryAdapter` issues an opaque `RotationConfirmation` only a
 
 ### Implementation status
 
-`decent-registry` main now implements operation 5 in PR #109 and independent owner-key read-back in PR #110, at commit [`dde0730482076cd00e6f115bdd25f4534ae5e927`](https://github.com/jetpen/decent-registry/commit/dde0730482076cd00e6f115bdd25f4534ae5e927). This confirms source support, not deployment. `decent-wallet` exposes the two-phase prepare/latch/dispatch/confirm/promote flow through an injected `IdentityTransport`; the concrete production transport and target deployment must be verified before use. The original compatibility analysis above remains pinned to the pre-change Registry commit.
+`decent-registry` main now implements operation 5 in PR #109 and independent owner-key read-back in PR #110, at commit [`dde0730482076cd00e6f115bdd25f4534ae5e927`](https://github.com/jetpen/decent-registry/commit/dde0730482076cd00e6f115bdd25f4534ae5e927). This confirms source support, not deployment. The Python core and Android library expose the two-phase prepare/latch/dispatch/confirm/promote flow through their injected public-only transport interfaces; the Android path currently supports verified legacy predecessors only. No concrete Android Registry/DHT client or production deployment is verified. An injected transport must use conditional publication and a fresh remote read that bypasses local cache before it may issue confirmation. The original compatibility analysis above remains pinned to the pre-change Registry commit.
 
 This reuses the existing canonical SignedUpdate digest, authorization map, and version-1 envelope while requiring a coordinated protocol deployment. The direct legacy path intentionally transitions to the existing 2-of-3 version-1 policy; the version-1 path does not also mutate signer governance.
 

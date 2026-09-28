@@ -51,6 +51,7 @@ class MemoryTransport:
         self.drop_writes = False
         self.raise_after_write = False
         self.reject_conditional = False
+        self.reject_expired = False
 
     def get_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
         return self.envelope
@@ -83,6 +84,8 @@ class MemoryTransport:
             raise ExpiredPublication()
         if self.reject_conditional:
             raise StalePublication()
+        if self.reject_expired:
+            raise ExpiredPublication()
         if not self.drop_writes:
             if self.envelope is not None and expected_state_hash is not None:
                 self.history[expected_state_hash] = self.envelope
@@ -1738,7 +1741,139 @@ def test_ambiguous_rotation_stays_latched_until_fresh_remote_confirmation_after_
     reopened.lock()
 
 
-def test_prewrite_rotation_rejection_clears_only_matching_latch_once(tmp_path):
+def test_stale_rotation_copy_confirms_exact_candidate_without_clearable_rejection(
+    tmp_path,
+):
+    (
+        wallets,
+        owner,
+        _predecessor,
+        _draft,
+        bundle,
+        _active_public_key,
+        successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(
+        adapter, bundle, b"same-candidate-other-copy"
+    )
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    transport.envelope = publication.envelope_bytes
+    transport.remote_envelope = publication.envelope_bytes
+    writes_before = len(transport.writes)
+
+    result = adapter.dispatch_owner_key_rotation(publication, permit)
+
+    assert result.status is PublishStatus.CONFIRMED
+    assert result.confirmation is not None
+    assert result.rejection is None
+    assert len(transport.writes) == writes_before
+    owner.finalize_signing_key_rotation(result.confirmation)
+    assert owner.public_key == successor_public_key
+    assert owner.pending_signing_public_key is None
+    assert owner.signing_key_rotation_dispatch_intent is None
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_conditional_rejection_confirms_exact_candidate_without_retry(tmp_path):
+    (
+        wallets,
+        owner,
+        _predecessor,
+        _draft,
+        bundle,
+        _active_public_key,
+        successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(
+        adapter, bundle, b"conditional-same-candidate-readback"
+    )
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    transport.reject_conditional = True
+    transport.remote_envelope = publication.envelope_bytes
+
+    result = adapter.dispatch_owner_key_rotation(publication, permit)
+
+    assert result.status is PublishStatus.CONFIRMED
+    assert result.confirmation is not None
+    assert result.rejection is None
+    assert len(transport.writes) == 2  # initial record plus the rejected conditional attempt
+    owner.finalize_signing_key_rotation(result.confirmation)
+    assert owner.public_key == successor_public_key
+    assert owner.pending_signing_public_key is None
+    assert owner.signing_key_rotation_dispatch_intent is None
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_candidate_without_predecessor_history_stays_unknown_on_precondition(
+    tmp_path,
+):
+    (
+        wallets,
+        owner,
+        predecessor,
+        _draft,
+        bundle,
+        _active_public_key,
+        _successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(
+        adapter, bundle, b"conditional-candidate-history-hidden-python"
+    )
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    transport.reject_conditional = True
+    transport.remote_envelope = publication.envelope_bytes
+    transport.history.pop(predecessor.state_hash)
+
+    result = adapter.dispatch_owner_key_rotation(publication, permit)
+
+    assert result.status is PublishStatus.UNKNOWN
+    assert result.confirmation is None
+    assert result.rejection is None
+    assert owner.signing_key_rotation_dispatch_intent == permit.intent
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_conditional_precondition_without_candidate_readback_stays_latched(
+    tmp_path,
+):
+    (
+        wallets,
+        owner,
+        _predecessor,
+        _draft,
+        bundle,
+        _active_public_key,
+        _successor_public_key,
+        adapter,
+        transport,
+    ) = make_legacy_rotation_bundle(tmp_path)
+    publication = prepare_rotation_publication(
+        adapter, bundle, b"conditional-other-copy-not-visible-python"
+    )
+    permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
+    transport.reject_conditional = True
+
+    result = adapter.dispatch_owner_key_rotation(publication, permit)
+
+    assert result.status is PublishStatus.UNKNOWN
+    assert result.rejection is None
+    assert owner.signing_key_rotation_dispatch_intent == permit.intent
+    with pytest.raises(RotationInProgress):
+        owner.cancel_signing_key_rotation()
+    for wallet in wallets.values():
+        wallet.lock()
+
+
+def test_prewrite_expiry_rejection_clears_only_matching_latch_once(tmp_path):
     (
         wallets,
         owner,
@@ -1771,11 +1906,11 @@ def test_prewrite_rotation_rejection_clears_only_matching_latch_once(tmp_path):
     publication = prepare_rotation_publication(adapter, bundle, b"rotation-stale")
     permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, publication)
     intent = permit.intent
-    transport.reject_conditional = True
+    transport.reject_expired = True
 
     rejected = adapter.dispatch_owner_key_rotation(publication, permit)
 
-    assert rejected.status is PublishStatus.STALE
+    assert rejected.status is PublishStatus.EXPIRED
     assert rejected.confirmation is None
     assert rejected.rejection is not None
     assert owner.signing_key_rotation_dispatch_intent == intent
@@ -1800,10 +1935,10 @@ def test_prewrite_rotation_rejection_clears_only_matching_latch_once(tmp_path):
     repeated_rejection = adapter.dispatch_owner_key_rotation(
         next_publication, next_permit
     )
-    assert repeated_rejection.status is PublishStatus.STALE
+    assert repeated_rejection.status is PublishStatus.EXPIRED
     assert repeated_rejection.rejection is not None
     owner.resolve_signing_key_rotation_rejection(repeated_rejection.rejection)
-    transport.reject_conditional = False
+    transport.reject_expired = False
     republished = adapter.publish_bundle(
         ordinary_bundle,
         consent=approved,
@@ -1929,11 +2064,12 @@ def test_rotation_refuses_unsupported_registry_before_consent_or_latch(tmp_path)
     permit = owner.latch_signing_key_rotation_dispatch_intent(bundle, ready)
     transport.supports_owner_key_rotation = False
     blocked = adapter.dispatch_owner_key_rotation(ready, permit)
-    assert blocked.status is PublishStatus.FAILED
-    assert blocked.rejection is not None
+    assert blocked.status is PublishStatus.UNKNOWN
+    assert blocked.rejection is None
     assert len(transport.writes) == writes_before
-    owner.resolve_signing_key_rotation_rejection(blocked.rejection)
-    assert owner.signing_key_rotation_dispatch_intent is None
+    assert owner.signing_key_rotation_dispatch_intent == permit.intent
+    with pytest.raises(RotationInProgress):
+        owner.cancel_signing_key_rotation()
     for wallet in wallets.values():
         wallet.lock()
 

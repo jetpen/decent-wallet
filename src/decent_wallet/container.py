@@ -1298,13 +1298,16 @@ class Wallet:
     def resolve_signing_key_rotation_rejection(
         self, rejection: "RotationDispatchRejection"
     ) -> None:
-        """Clear a dispatch latch only from a one-use, adapter-issued pre-write rejection."""
-        from .identity import InvalidIdentityRequest, RotationDispatchRejection
+        """Clear a dispatch latch only from a one-use, adapter-issued expiry rejection."""
+        from .identity import InvalidIdentityRequest, PublishStatus, RotationDispatchRejection
         from .signer import SignerUnavailable
 
         with self._rotation_lock:
             self._touch()
-            if not isinstance(rejection, RotationDispatchRejection):
+            if (
+                not isinstance(rejection, RotationDispatchRejection)
+                or rejection.status is not PublishStatus.EXPIRED
+            ):
                 raise InvalidIdentityRequest()
             raw_intent = self._payload.get(_ROTATION_DISPATCH_INTENT)
             if raw_intent is None:

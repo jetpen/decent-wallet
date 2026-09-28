@@ -149,6 +149,7 @@ class WalletSession internal constructor(
     private var rawContainer: ByteArray? = rawBytes
     private var dataEncryptionKey: ByteArray? = dek
     private var walletPayload: MutableMap<String, Any?>? = payload
+    private var activeOwnerKeyRotationPermit: OwnerKeyRotationDispatchPermit? = null
 
     val isUnlocked: Boolean
         @Synchronized get() = dataEncryptionKey != null
@@ -170,6 +171,14 @@ class WalletSession internal constructor(
                 throw WalletInvalidContainerException()
             }
             return pending.publicKey.copyOf()
+        }
+
+    val ownerKeyRotationDispatchIntent: OwnerKeyRotationDispatchIntent?
+        @Synchronized get() {
+            ensureUnlocked()
+            val payload = checkNotNull(walletPayload)
+            if (!payload.containsKey("rotation_dispatch_intent")) return null
+            return OwnerKeyRotationDispatchIntent.fromPayload(payload["rotation_dispatch_intent"])
         }
 
     @Synchronized
@@ -314,6 +323,160 @@ class WalletSession internal constructor(
     }
 
     @Synchronized
+    fun latchOwnerKeyRotationDispatchIntent(
+        publication: OwnerKeyRotationPublication,
+    ): OwnerKeyRotationDispatchPermit {
+        ensureUnlocked()
+        val payload = checkNotNull(walletPayload)
+        if (payload.containsKey("rotation_dispatch_intent") || activeOwnerKeyRotationPermit != null) {
+            throw WalletRotationInProgressException()
+        }
+        if (!publication.isAuthentic()) throw WalletInvalidIdentityStateException()
+        if (publication.expiresAt <= System.currentTimeMillis() / 1000) {
+            throw WalletRotationConsentExpiredException()
+        }
+        if (!publication.claimLatch()) throw WalletInvalidIdentityStateException()
+        val intent = publication.intent
+        val active = requireActiveKeyPair(payload)
+        val pending = optionalKeyPair(payload, "pending_private_seed", "pending_public_key")
+            ?: throw WalletInvalidIdentityStateException()
+        val expectedPredecessor = intent.predecessorOwnerPublicKey
+        val expectedSuccessor = intent.successorOwnerPublicKey
+        val predecessorEnvelope = publication.predecessorEnvelopeBytes()
+        val envelope = publication.envelopeBytes
+        var candidate: MutableMap<String, Any?>? = null
+        try {
+            if (!active.publicKey.contentEquals(expectedPredecessor) ||
+                !pending.publicKey.contentEquals(expectedSuccessor)
+            ) {
+                throw WalletInvalidIdentityStateException()
+            }
+            val verifiedStateHash = LegacyOwnerKeyRotation.verifyLegacyCandidate(
+                predecessorEnvelope,
+                envelope,
+                intent,
+            )
+            verifiedStateHash.fill(0)
+            @Suppress("UNCHECKED_CAST")
+            candidate = WalletJson.copyPayload(payload) as? MutableMap<String, Any?>
+                ?: throw WalletInvalidContainerException()
+            candidate["rotation_dispatch_intent"] = intent.toPayload()
+            val permit = OwnerKeyRotationTokenAuthority.permit(publication, intent)
+            if (!publication.attachPermit(permit)) throw WalletInvalidIdentityStateException()
+            persistPayloadCandidate(candidate)
+            candidate = null
+            activeOwnerKeyRotationPermit = permit
+            return permit
+        } finally {
+            expectedPredecessor.fill(0)
+            expectedSuccessor.fill(0)
+            predecessorEnvelope.fill(0)
+            envelope.fill(0)
+            candidate?.let {
+                WalletJson.clearByteArrays(it)
+                it.clear()
+            }
+        }
+    }
+
+    @Synchronized
+    fun resolveOwnerKeyRotationDispatchRejection(
+        rejection: OwnerKeyRotationDispatchRejection,
+    ) {
+        ensureUnlocked()
+        val payload = checkNotNull(walletPayload)
+        if (!payload.containsKey("rotation_dispatch_intent")) throw WalletInvalidIdentityStateException()
+        val intent = OwnerKeyRotationDispatchIntent.fromPayload(payload["rotation_dispatch_intent"])
+        val permit = activeOwnerKeyRotationPermit
+        if (permit == null || intent != rejection.intent || !rejection.canResolve(permit) ||
+            rejection.status != OwnerKeyRotationDispatchStatus.EXPIRED
+        ) {
+            throw WalletInvalidIdentityStateException()
+        }
+        @Suppress("UNCHECKED_CAST")
+        val candidate = WalletJson.copyPayload(payload) as? MutableMap<String, Any?>
+            ?: throw WalletInvalidContainerException()
+        var installed = false
+        try {
+            val removed = candidate.remove("rotation_dispatch_intent")
+                ?: throw WalletInvalidContainerException()
+            WalletJson.clearByteArrays(removed)
+            persistPayloadCandidate(candidate)
+            installed = true
+            activeOwnerKeyRotationPermit = null
+            rejection.markResolved()
+        } finally {
+            if (!installed) {
+                WalletJson.clearByteArrays(candidate)
+                candidate.clear()
+            }
+        }
+    }
+
+    @Synchronized
+    fun finalizeSigningKeyRotation(confirmation: OwnerKeyRotationConfirmation) {
+        ensureUnlocked()
+        val payload = checkNotNull(walletPayload)
+        if (!confirmation.isAuthentic() || !payload.containsKey("rotation_dispatch_intent")) {
+            throw WalletInvalidIdentityStateException()
+        }
+        val intent = OwnerKeyRotationDispatchIntent.fromPayload(payload["rotation_dispatch_intent"])
+        val confirmedIntent = confirmation.intent
+        val confirmedStateHash = confirmation.stateHash
+        val active = requireActiveKeyPair(payload)
+        val pending = optionalKeyPair(payload, "pending_private_seed", "pending_public_key")
+            ?: throw WalletInvalidIdentityStateException()
+        val expectedPredecessor = intent.predecessorOwnerPublicKey
+        val expectedSuccessor = intent.successorOwnerPublicKey
+        try {
+            if (intent != confirmedIntent || confirmedStateHash.size != AndroidIdentityCrypto.KEY_BYTES ||
+                !active.publicKey.contentEquals(expectedPredecessor) ||
+                !pending.publicKey.contentEquals(expectedSuccessor)
+            ) {
+                throw WalletInvalidIdentityStateException()
+            }
+        } finally {
+            confirmedStateHash.fill(0)
+            expectedPredecessor.fill(0)
+            expectedSuccessor.fill(0)
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        val candidate = WalletJson.copyPayload(payload) as? MutableMap<String, Any?>
+            ?: throw WalletInvalidContainerException()
+        var installed = false
+        try {
+            val pendingSeed = candidate.remove("pending_private_seed") as? ByteArray
+                ?: throw WalletInvalidContainerException()
+            val pendingPublicKey = candidate.remove("pending_public_key") as? ByteArray
+                ?: throw WalletInvalidContainerException()
+            val activeSeed = candidate["private_seed"] as? ByteArray
+                ?: throw WalletInvalidContainerException()
+            val activePublicKey = candidate["public_key"] as? ByteArray
+                ?: throw WalletInvalidContainerException()
+            val promotedSeed = pendingSeed.copyOf()
+            val promotedPublicKey = pendingPublicKey.copyOf()
+            pendingSeed.fill(0)
+            pendingPublicKey.fill(0)
+            activeSeed.fill(0)
+            activePublicKey.fill(0)
+            candidate["private_seed"] = promotedSeed
+            candidate["public_key"] = promotedPublicKey
+            val removedIntent = candidate.remove("rotation_dispatch_intent")
+                ?: throw WalletInvalidContainerException()
+            WalletJson.clearByteArrays(removedIntent)
+            persistPayloadCandidate(candidate)
+            installed = true
+            activeOwnerKeyRotationPermit = null
+        } finally {
+            if (!installed) {
+                WalletJson.clearByteArrays(candidate)
+                candidate.clear()
+            }
+        }
+    }
+
+    @Synchronized
     internal fun readPayload(): Map<String, Any?> {
         ensureUnlocked()
         @Suppress("UNCHECKED_CAST")
@@ -334,6 +497,7 @@ class WalletSession internal constructor(
 
     @Synchronized
     fun lock() {
+        activeOwnerKeyRotationPermit = null
         dataEncryptionKey?.fill(0)
         dataEncryptionKey = null
         walletPayload?.let(WalletJson::clearByteArrays)

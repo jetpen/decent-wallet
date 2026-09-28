@@ -25,3 +25,17 @@ class WalletRotationInProgressException : WalletContainerException("owner-key ro
 class WalletInvalidIdentityStateException : WalletContainerException("identity state is invalid")
 
 class WalletUnsupportedIdentityStateException : WalletContainerException("identity state format is unsupported")
+
+class WalletIdentityTransportException : WalletContainerException("identity transport operation failed")
+
+class WalletRotationTransportUnavailableException : WalletContainerException("owner-key rotation transport is unavailable")
+
+class WalletIdentityEnvironmentMismatchException : WalletContainerException("identity environment does not match the transport")
+
+class WalletRotationConsentRejectedException : WalletContainerException("owner-key rotation consent was not approved")
+
+class WalletRotationConsentExpiredException : WalletContainerException("owner-key rotation consent expired")
+
+class WalletIdentityReplayRejectedException : WalletContainerException("identity consent replay was rejected")
+
+class WalletIdentityStateChangedException : WalletContainerException("identity state changed before publication")

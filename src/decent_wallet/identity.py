@@ -949,11 +949,7 @@ class RotationDispatchRejection:
         status: PublishStatus,
         publication: RotationPublication,
     ) -> None:
-        if seal is not _ROTATION_CAPABILITY_SEAL or status not in {
-            PublishStatus.FAILED,
-            PublishStatus.STALE,
-            PublishStatus.EXPIRED,
-        }:
+        if seal is not _ROTATION_CAPABILITY_SEAL or status is not PublishStatus.EXPIRED:
             raise InvalidIdentityRequest()
         object.__setattr__(self, "status", status)
         for name in (
@@ -2037,38 +2033,86 @@ class RegistryAdapter:
                 publication=publication,
             )
 
+        def prewrite_result(
+            status: PublishStatus,
+            reason: str,
+            *,
+            candidate_observed_locally: bool = False,
+            clearable_rejection: bool = False,
+        ) -> RotationDispatchResult:
+            try:
+                remote_envelope = self._transport.get_remote_identity_envelope(
+                    owner_name_hex=intent.owner_name.hex()
+                )
+            except Exception:
+                return RotationDispatchResult(
+                    status=PublishStatus.UNKNOWN,
+                    reason="independent readback unavailable after pre-write rejection",
+                )
+            if type(remote_envelope) is not bytes:
+                return RotationDispatchResult(
+                    status=PublishStatus.UNKNOWN,
+                    reason="independent readback unavailable after pre-write rejection",
+                )
+            candidate_observed_remotely = (
+                hashlib.sha256(remote_envelope).digest() == intent.envelope_hash
+            )
+            if candidate_observed_locally or candidate_observed_remotely:
+                confirmation = self.confirm_owner_key_rotation(intent)
+                if confirmation is not None:
+                    return RotationDispatchResult(
+                        status=PublishStatus.CONFIRMED,
+                        confirmation=confirmation,
+                    )
+                return RotationDispatchResult(
+                    status=PublishStatus.UNKNOWN,
+                    reason="candidate observed but independent confirmation incomplete",
+                )
+            if not clearable_rejection:
+                return RotationDispatchResult(
+                    status=PublishStatus.UNKNOWN,
+                    reason="pre-write outcome cannot safely clear the durable intent",
+                )
+            return RotationDispatchResult(
+                status=status,
+                rejection=make_rejection(status),
+                reason=reason,
+            )
+
         with self._rotation_latches.owner_lock(publication.owner_name):
             if not self._rotation_latches.is_latched(intent):
                 raise InvalidIdentityRequest()
             if not self._rotation_transport_available(self._transport):
-                rejection = make_rejection(PublishStatus.FAILED)
-                return RotationDispatchResult(
-                    status=PublishStatus.FAILED,
-                    rejection=rejection,
-                    reason="rotation transport capability unavailable",
+                return prewrite_result(
+                    PublishStatus.FAILED,
+                    "rotation transport capability unavailable",
+                    clearable_rejection=False,
                 )
             try:
                 current = self.read_state(owner_name=publication.owner_name)
             except IdentityAdapterError:
-                rejection = make_rejection(PublishStatus.FAILED)
-                return RotationDispatchResult(
-                    status=PublishStatus.FAILED,
-                    rejection=rejection,
-                    reason="pre-write state validation failed",
+                return prewrite_result(
+                    PublishStatus.FAILED,
+                    "pre-write state validation failed",
+                    clearable_rejection=False,
                 )
             if not _same_state(publication._previous_state, current):
-                rejection = make_rejection(PublishStatus.STALE)
-                return RotationDispatchResult(
-                    status=PublishStatus.STALE,
-                    rejection=rejection,
-                    reason="accepted state changed before publication",
+                candidate_observed_locally = (
+                    current is not None
+                    and hashlib.sha256(current.envelope_bytes).digest()
+                    == intent.envelope_hash
+                )
+                return prewrite_result(
+                    PublishStatus.STALE,
+                    "accepted state changed before publication",
+                    candidate_observed_locally=candidate_observed_locally,
+                    clearable_rejection=False,
                 )
             if publication.expires_at <= int(time.time()):
-                rejection = make_rejection(PublishStatus.EXPIRED)
-                return RotationDispatchResult(
-                    status=PublishStatus.EXPIRED,
-                    rejection=rejection,
-                    reason="consent expired",
+                return prewrite_result(
+                    PublishStatus.EXPIRED,
+                    "consent expired",
+                    clearable_rejection=True,
                 )
 
             try:
@@ -2079,18 +2123,16 @@ class RegistryAdapter:
                     expires_at=publication.expires_at,
                 )
             except StalePublication:
-                rejection = make_rejection(PublishStatus.STALE)
-                return RotationDispatchResult(
-                    status=PublishStatus.STALE,
-                    rejection=rejection,
-                    reason="conditional publication rejected",
+                return prewrite_result(
+                    PublishStatus.STALE,
+                    "conditional publication rejected",
+                    clearable_rejection=False,
                 )
             except ExpiredPublication:
-                rejection = make_rejection(PublishStatus.EXPIRED)
-                return RotationDispatchResult(
-                    status=PublishStatus.EXPIRED,
-                    rejection=rejection,
-                    reason="consent expired",
+                return prewrite_result(
+                    PublishStatus.EXPIRED,
+                    "consent expired",
+                    clearable_rejection=True,
                 )
             except Exception:
                 confirmation = self.confirm_owner_key_rotation(intent)
