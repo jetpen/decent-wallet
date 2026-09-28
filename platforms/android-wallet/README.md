@@ -32,7 +32,7 @@ The library supports CSRNG-generated Ed25519 owner keys, encrypted pending-succe
 
 The module has no UI, interactive consent screen, or consumer payload-reading API. It now includes `AndroidDirectDhtIdentityTransport`, using jvm-libp2p TCP/Noise and standard Kad-DHT `GET_VALUE`/`PUT_VALUE` messages to explicitly configured, peer-ID-pinned Registry multiaddrs. Current and history-by-state-hash reads and confirmation use direct peer RPCs rather than a local DHT value store. Hash-addressed reads report absence only when every configured peer returns successfully without a value; if none provides the record and any peer errors, the result remains a transport failure. A matching-key `PUT_VALUE` acknowledgement is necessary but not confirmation: dispatch remains latched until a fresh direct read returns the exact candidate. Expected-state and expiry checks are client-side best-effort preconditions, not a network-wide compare-and-swap or remote deadline.
 
-The optional local interop test exercises a legacy-anchored owner-key rotation against the Python Registry implementation: direct current/history reads, publication, and exact fresh read-back. It proves loopback interoperability only. Production deployment, an independent second-peer read, Android-device execution of the new transport, and full cross-platform acceptance remain outstanding. Approved-AVD instrumentation still covers container lifecycle only; rotation/runtime behavior otherwise remains unit-tested. Automatic lifecycle hooks and hardware-backed protection are also absent.
+The optional host-JVM interop test exercises a legacy-anchored owner-key rotation against the Python Registry implementation, including direct current/history reads, publication, and fresh read-back; this is local loopback evidence only. `AndroidDirectDhtRegistryRuntimeTest` separately reads a seeded candidate and predecessor history from a local Registry through a distinct peer-ID-pinned read-back peer. It passed on both approved AVDs in sequential single-emulator runs. These local results do not establish deployed Registry acceptance or live Android write fan-out to an independent peer. Production deployment and full cross-platform acceptance remain outstanding. Automatic lifecycle hooks and hardware-backed protection are also absent.
 
 ## Build and test
 
@@ -46,23 +46,43 @@ From the repository root, with JDK 17 and Android SDK/build-tools 37 installed:
   :platforms:android-wallet:connectedDebugAndroidTest
 ```
 
-For optional local Android-to-Registry interoperability, start a peer from a sibling `decent-registry` checkout in one terminal:
+For local two-peer Registry interoperability, start the fixture from a sibling `decent-registry` checkout without `--seed-candidate`; the host-JVM interop test expects the legacy predecessor to be current:
 
 ```sh
-uv run --project /path/to/decent-registry python /path/to/decent-wallet/tests/interop/start_android_registry_peer.py
+uv run --locked --project /path/to/decent-registry --extra dev \
+  python /path/to/decent-wallet/tests/interop/start_android_registry_peer.py
 ```
 
-Copy the printed `READY` multiaddr, then run from the wallet repository root in another terminal:
+It prints `READY_WRITE` and `READY_READBACK` multiaddrs for distinct peers. For the optional host-JVM interop test, pass both printed addresses:
 
 ```sh
-DECENT_REGISTRY_TEST_PEER='<READY multiaddr>' \
+DECENT_REGISTRY_TEST_PEER='<READY_WRITE multiaddr>' \
+DECENT_REGISTRY_TEST_READBACK_PEER='<READY_READBACK multiaddr>' \
   ./gradlew --no-daemon --dependency-verification=strict \
   :platforms:android-wallet:testDebugUnitTest \
   --tests org.decentwallet.wallet.android.AndroidDirectDhtRegistryInteropTest
 ```
 
-The build maps the peer environment variable to a test system-property input, so a changed peer address invalidates Gradle's test result. The helper starts a temporary Registry with the shared synthetic legacy-anchor fixture. This is a host-JVM loopback test, not Android-device or production-deployment acceptance.
+For the Android runtime read test, stop the host-JVM fixture and restart it with `--seed-candidate`; this prepublishes the candidate so instrumentation can verify direct reads without mutating the fixture.
 
-The instrumentation tests are intended for the two approved Issue #36 targets: Medium_Phone (API 26, x86, Google Play) and Pixel_9 (API 37, x86_64, 16 KB page-size Google Play image). Connect both AVDs before running the connected test task.
+For Android instrumentation, use `adb reverse` to expose each host peer through loopback on the single running AVD. If the fixture reports host ports `<writer-port>` and `<readback-port>`, configure:
+
+```sh
+adb -s <serial> reverse tcp:31457 tcp:<writer-port>
+adb -s <serial> reverse tcp:31865 tcp:<readback-port>
+```
+
+Pass loopback addresses using the peer IDs from the corresponding `READY_*` lines:
+
+```sh
+DECENT_REGISTRY_TEST_PEER='/ip4/127.0.0.1/tcp/31457/p2p/<writer-peer-id>' \
+DECENT_REGISTRY_TEST_READBACK_PEER='/ip4/127.0.0.1/tcp/31865/p2p/<readback-peer-id>' \
+  ./gradlew --no-daemon --dependency-verification=strict \
+  :platforms/android-wallet:connectedDebugAndroidTest
+```
+
+Run approved AVDs sequentially, never concurrently: this machine cannot sustain multiple emulators. Shut down one AVD before starting the next, and inspect or save that run's `TEST-*.xml` before invoking Gradle for another target because the connected-test report directory is replaced. On Pixel_9, the direct `10.0.2.2` fixture path is blocked by Android 17 local-network permission enforcement: the test app targets API 37 and the merged manifest declares `INTERNET` but not `ACCESS_LOCAL_NETWORK`. Android documents that outgoing TCP to local-network addresses requires that runtime permission and commonly times out when denied (https://developer.android.com/privacy-and-security/local-network-permission). The library does not request this permission; host apps that need private-network Registry peers must declare and request it. For local AVD fixtures, `adb reverse` with loopback multiaddrs passed on both targets. These are local fixture results, not deployed Registry acceptance or proof of production Android write fan-out.
+
+The approved targets are Medium_Phone (API 26, x86, Google Play) and Pixel_9 (API 37, x86_64, 16 KB page-size Google Play image). The build maps both peer environment variables to test inputs, so changed addresses invalidate Gradle's cached test result.
 
 To have the unit test emit one randomized encrypted v2 file for an independent Python-core check, set `ANDROID_WALLET_INTEROP_FILE` to a path under the ignored module `build/` directory while running `createsAndReopensRandomizedV2Container`. Open that file with `decent_wallet.Wallet.open()` using the test password and compare `export_container()` to the original bytes. This optional artifact contains only a public synthetic test wallet.

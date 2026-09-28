@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from pathlib import Path
 from typing import cast
@@ -36,6 +37,17 @@ def _identity_envelope(
     )
     signed_update_bytes = cbor2.loads(envelope)[1]
     return envelope, hashlib.sha256(signed_update_bytes).digest()
+
+
+def test_registry_transport_requires_distinct_readback_peer_id(tmp_path):
+    bootstrap_peer = "/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWBootstrap"
+    same_peer_different_address = "/dns4/registry.example/tcp/9000/p2p/12D3KooWBootstrap"
+    with pytest.raises(ValueError, match="readback_peer must have a distinct peer ID"):
+        RegistryTransport(
+            bootstrap_peers=[bootstrap_peer],
+            readback_peer=same_peer_different_address,
+            store_path=tmp_path / "wallet-registry.lmdb",
+        )
 
 
 @pytest.mark.registry_integration
@@ -174,6 +186,78 @@ async def test_direct_dht_transport_conditionally_publishes_and_reads_exact_remo
             owner_name_hex=OWNER_NAME.hex(),
             state_hash=following_hash,
         ) is None
+
+
+@pytest.mark.registry_integration
+@pytest.mark.trio
+async def test_remote_readback_uses_independent_peer_after_writer_stops(tmp_path):
+    from decent_registry.dht.libp2p_dht import Libp2pKadDHT
+    from decent_registry.durable_store import LMDBDatastore
+    from decent_registry.record_validator import IdentityRecordResult
+
+    vector_path = Path(__file__).parent / "vectors" / "identity-owner-key-rotation-legacy.json"
+    vector = json.loads(vector_path.read_text(encoding="utf-8"))
+    owner_name = bytes.fromhex(vector["owner_name_utf8_hex"])
+    identity_key = hashlib.sha256(owner_name).hexdigest()
+    predecessor = bytes.fromhex(vector["predecessor_envelope_cbor_hex"])
+    candidate = bytes.fromhex(vector["candidate_envelope_cbor_hex"])
+    predecessor_hash = bytes.fromhex(vector["predecessor_state_hash_hex"])
+
+    async with Libp2pKadDHT(
+        durable_store=LMDBDatastore(path=tmp_path / "independent-reader.lmdb")
+    ) as reader:
+        readback_peer = reader.get_listen_multiaddr()
+        if "/p2p/" not in readback_peer:
+            readback_peer = f"{readback_peer}/p2p/{reader.host.get_id().to_string()}"
+        async with Libp2pKadDHT(
+            durable_store=LMDBDatastore(path=tmp_path / "writer.lmdb")
+        ) as writer:
+            writer_peer = writer.get_listen_multiaddr()
+            if "/p2p/" not in writer_peer:
+                writer_peer = f"{writer_peer}/p2p/{writer.host.get_id().to_string()}"
+            await reader.bootstrap(writer_peer)
+            await writer.bootstrap(readback_peer)
+            await writer.put_signed_identity_record(identity_key, predecessor)
+
+            # The second Registry accepts the anchor into its own durable history.
+            assert await reader.get_signed_identity_record(identity_key) is not None
+            transport = RegistryTransport(
+                bootstrap_peers=[writer_peer],
+                readback_peer=readback_peer,
+                store_path=tmp_path / "wallet-independent-readback.lmdb",
+                supports_owner_key_rotation=True,
+            )
+
+            def publish_candidate():
+                transport.put_identity_envelope(
+                    owner_name_hex=owner_name.hex(),
+                    envelope_cbor=candidate,
+                    expected_state_hash=predecessor_hash,
+                    expires_at=int(time.time()) + 120,
+                )
+
+            await trio.to_thread.run_sync(publish_candidate)
+            fresh_remote = await trio.to_thread.run_sync(
+                lambda: transport.get_remote_identity_envelope(
+                    owner_name_hex=owner_name.hex()
+                )
+            )
+            assert fresh_remote == candidate
+            accepted_on_second = await reader.get_signed_identity_record(identity_key)
+            assert isinstance(accepted_on_second, IdentityRecordResult)
+            assert accepted_on_second.seq == int(vector["candidate_sequence"])
+            assert await reader.get_identity_envelope_by_hash(
+                identity_key, predecessor_hash
+            ) == predecessor
+
+        # The writer is now stopped. A fresh direct read must use the separately
+        # configured peer, not the writer's durable cache or an unavailable writer.
+        remote = await trio.to_thread.run_sync(
+            lambda: transport.get_remote_identity_envelope(
+                owner_name_hex=owner_name.hex()
+            )
+        )
+        assert remote == candidate
 
 
 @pytest.mark.registry_integration

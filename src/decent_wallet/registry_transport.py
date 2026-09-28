@@ -16,6 +16,14 @@ from .identity import ExpiredPublication, StalePublication
 _Result = TypeVar("_Result")
 
 
+def _pinned_peer_id(peer: str) -> str | None:
+    marker = peer.rfind("/p2p/")
+    if marker < 0:
+        return None
+    peer_id = peer[marker + len("/p2p/") :].split("/", 1)[0]
+    return peer_id or None
+
+
 class RegistryTransport:
     """Bridge the wallet's synchronous Identity protocol to Registry's DHT API.
 
@@ -25,6 +33,9 @@ class RegistryTransport:
     ``supports_owner_key_rotation`` is a trusted operator assertion, not a
     network handshake, and defaults to false. Enable it only when every
     configured Registry peer is pinned to a compatible operation-5 validator.
+    ``readback_peer`` optionally pins a separate Registry peer for fresh
+    confirmation reads; it must have a different peer ID from every bootstrap
+    peer. If omitted, confirmation uses the configured bootstrap peers.
     """
 
     def __init__(
@@ -32,6 +43,7 @@ class RegistryTransport:
         *,
         bootstrap_peers: Sequence[str],
         store_path: str | Path,
+        readback_peer: str | None = None,
         supports_owner_key_rotation: bool = False,
     ) -> None:
         if type(supports_owner_key_rotation) is not bool:
@@ -47,6 +59,21 @@ class RegistryTransport:
             )
         if any("/p2p/" not in peer for peer in peers):
             raise ValueError("bootstrap peers must include /p2p/<peer-id>")
+        if readback_peer is not None:
+            if not isinstance(readback_peer, str) or not readback_peer:
+                raise ValueError("readback_peer must be a pinned Registry peer multiaddr")
+            readback_peer_id = _pinned_peer_id(readback_peer)
+            if readback_peer_id is None:
+                raise ValueError("readback_peer must include /p2p/<peer-id>")
+            bootstrap_peer_ids = {
+                peer_id
+                for peer in peers
+                if (peer_id := _pinned_peer_id(peer)) is not None
+            }
+            if readback_peer_id in bootstrap_peer_ids:
+                raise ValueError(
+                    "readback_peer must have a distinct peer ID from bootstrap peers"
+                )
         if store_path is None or not str(store_path):
             raise ValueError("a persistent Registry store_path is required")
 
@@ -65,6 +92,7 @@ class RegistryTransport:
             ) from exc
 
         self._bootstrap_peers = peers
+        self._readback_peer = readback_peer
         self._store_path = Path(store_path)
         self.supports_owner_key_rotation = supports_owner_key_rotation
         self._dht_mode = DHTMode.CLIENT
@@ -75,9 +103,21 @@ class RegistryTransport:
         self._publication_expired_type = IdentityPublicationExpired
 
     async def _execute(
-        self, operation: Callable[..., Awaitable[_Result]]
+        self,
+        operation: Callable[..., Awaitable[_Result]],
+        bootstrap_peers: Sequence[str] | None = None,
+        use_durable_store: bool = True,
     ) -> _Result:
-        store = self._datastore_type(path=self._store_path)
+        store = (
+            self._datastore_type(path=self._store_path)
+            if use_durable_store
+            else None
+        )
+        peers = (
+            self._bootstrap_peers
+            if bootstrap_peers is None
+            else tuple(bootstrap_peers)
+        )
         async with self._dht_type(
             listen="/ip4/127.0.0.1/tcp/0",
             durable_store=store,
@@ -85,7 +125,7 @@ class RegistryTransport:
         ) as dht:
             connected = False
             last_error: Exception | None = None
-            for peer in self._bootstrap_peers:
+            for peer in peers:
                 try:
                     await dht.bootstrap(peer)
                 except Exception as exc:
@@ -99,11 +139,22 @@ class RegistryTransport:
             service = self._registry_service_type(dht)
             return await operation(service, dht)
 
-    def _run(self, operation: Callable[..., Awaitable[_Result]]) -> _Result:
+    def _run(
+        self,
+        operation: Callable[..., Awaitable[_Result]],
+        *,
+        bootstrap_peers: Sequence[str] | None = None,
+        use_durable_store: bool = True,
+    ) -> _Result:
         """Run one Registry operation in a fresh Trio runtime."""
         import trio
 
-        return trio.run(self._execute, operation)
+        return trio.run(
+            self._execute,
+            operation,
+            bootstrap_peers,
+            use_durable_store,
+        )
 
     def get_identity_envelope(self, *, owner_name_hex: str) -> bytes | None:
         async def get(service, _dht):
@@ -131,7 +182,13 @@ class RegistryTransport:
             object_key_hex = hashlib.sha256(owner_name).hexdigest()
             return await dht.read_remote_identity_envelope(object_key_hex)
 
-        return self._run(get)
+        if self._readback_peer is None:
+            return self._run(get)
+        return self._run(
+            get,
+            bootstrap_peers=(self._readback_peer,),
+            use_durable_store=False,
+        )
 
     def put_identity_envelope(
         self,

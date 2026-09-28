@@ -63,7 +63,9 @@ git diff --check HEAD
 git diff --cached --check
 ```
 
-For local host-JVM interop, set `DECENT_REGISTRY_TEST_PEER` to the helper's `READY` multiaddr. Gradle tracks that value as a test system-property input, so changing the peer re-runs the interop test.
+For host-JVM interop, pass both `DECENT_REGISTRY_TEST_PEER` and `DECENT_REGISTRY_TEST_READBACK_PEER` using the fixture's `READY_WRITE` and `READY_READBACK` multiaddrs; Gradle tracks both values as test inputs. For Android runtime interop, seed the fixture, map stable device-loopback ports with `adb reverse`, and pass `/ip4/127.0.0.1/.../p2p/<peer-id>` addresses. Pixel_9/API 37 targets SDK 37; without the host app declaring and requesting `ACCESS_LOCAL_NETWORK`, Android 17 blocks outgoing TCP to `10.0.2.2` and typically surfaces a timeout. `adb reverse` loopback addresses passed without that permission. Do not add this runtime permission silently from a library; make LAN access an explicit host-app/privacy decision.
+
+Run approved AVDs sequentially, never concurrently, because this test host cannot sustain multiple emulators. Inspect or copy each device's `TEST-*.xml` before the next Gradle invocation; the connected-test report directory is replaced between runs.
 
 Run focused tests first using Gradle's `--tests '<fully.qualified.TestClass.testName>'` and pytest's `path::test_name` selector.
 
@@ -74,6 +76,7 @@ Run focused tests first using Gradle's `--tests '<fully.qualified.TestClass.test
 - A timed-out direct Kad-DHT RPC must close its stream, including a stream that resolves after negotiation timeout; closing must release the controller's pending response future.
 - Operation-3 generation gaps are valid when generation strictly increases; sequence linkage is checked separately. Follow the Python core, not a guessed `+1` generation rule.
 - Android minSdk is API 26. Check lint for API-level availability; avoid newer JDK methods unless the minimum SDK safely supports them.
+- If androidTest packaging reports duplicate Netty resources, exclude only `META-INF/INDEX.LIST`, merge `META-INF/io.netty.versions.properties` to preserve distinct module entries, and use `pickFirst` for license metadata only after verifying duplicate contents are identical.
 - A green unit suite using an injected fake transport proves library logic only. It does not prove concrete transport behavior, deployed Registry compatibility, emulator rotation, or global DHT behavior.
 - Keep docs precise: state what is implemented and unit-tested separately from what is runtime-tested or remotely accepted.
 - Do not commit or open a PR unless requested. If asked, stage explicit intended files and inspect the staged diff; preserve any pre-existing staged work.

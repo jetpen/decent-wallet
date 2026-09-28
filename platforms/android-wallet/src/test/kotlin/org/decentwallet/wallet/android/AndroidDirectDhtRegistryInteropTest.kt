@@ -11,7 +11,12 @@ class AndroidDirectDhtRegistryInteropTest {
     fun readsHistoryPublishesAndFreshReadsAgainstPythonRegistryPeer() {
         val peer = System.getProperty("decent.registry.test.peer")?.takeIf { it.isNotBlank() }
             ?: System.getenv("DECENT_REGISTRY_TEST_PEER")?.takeIf { it.isNotBlank() }
-        assumeTrue("set DECENT_REGISTRY_TEST_PEER to a live local Registry multiaddr", !peer.isNullOrBlank())
+        val readbackPeer = System.getProperty("decent.registry.test.readback.peer")?.takeIf { it.isNotBlank() }
+            ?: System.getenv("DECENT_REGISTRY_TEST_READBACK_PEER")?.takeIf { it.isNotBlank() }
+        assumeTrue(
+            "set DECENT_REGISTRY_TEST_PEER and DECENT_REGISTRY_TEST_READBACK_PEER to live local Registry multiaddrs",
+            !peer.isNullOrBlank() && !readbackPeer.isNullOrBlank(),
+        )
 
         val ownerName = fixtureHex("owner_name_utf8_hex")
         val predecessor = fixtureHex("predecessor_envelope_cbor_hex")
@@ -21,6 +26,7 @@ class AndroidDirectDhtRegistryInteropTest {
             AndroidRegistryDhtConfig(
                 registryEnvironment = "local-python-registry-interop",
                 registryPeers = listOf(peer!!),
+                readbackPeer = readbackPeer!!,
                 enableOwnerKeyRotation = true,
                 requestTimeoutMillis = 20_000,
             ),
