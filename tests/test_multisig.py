@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Barrier, Event
@@ -1203,6 +1205,117 @@ def test_versioned_owner_key_rotation_preserves_signer_governance_and_stays_loca
     assert accepted.threshold == predecessor.threshold
     for wallet in wallets.values():
         wallet.lock()
+
+
+def test_v1_rotation_predecessor_fixture_matches_python_core():
+    vector_path = (
+        Path(__file__).parent
+        / "vectors"
+        / "identity-owner-key-rotation-v1-predecessor-separate-owner.json"
+    )
+    vector = json.loads(vector_path.read_text(encoding="utf-8"))
+    owner_name = bytes.fromhex(vector["owner_name_utf8_hex"])
+    genesis = bytes.fromhex(vector["genesis_envelope_cbor_hex"])
+    predecessor = bytes.fromhex(vector["predecessor_envelope_cbor_hex"])
+    transport = MemoryTransport()
+    transport.envelope = predecessor
+    transport.remote_envelope = predecessor
+    transport.history[bytes.fromhex(vector["genesis_state_hash_hex"])] = genesis
+
+    state = RegistryAdapter(transport).read_state(owner_name=owner_name)
+
+    assert state is not None
+    assert state.owner_name == owner_name
+    assert state.owner_public_key == bytes.fromhex(vector["owner_public_key_hex"])
+    assert state.sequence == vector["predecessor_sequence"] == 2
+    assert state.generation == vector["predecessor_generation"] == 1
+    assert state.threshold == vector["predecessor_threshold"] == 2
+    assert state.predecessor_envelopes == (genesis,)
+    assert state.signer_set == tuple(
+        (item["signer_id"], bytes.fromhex(item["public_key_hex"]))
+        for item in vector["signer_set"]
+    )
+
+
+def test_v1_operation5_candidate_vector_matches_python_core():
+    vector_path = (
+        Path(__file__).parent
+        / "vectors"
+        / "identity-owner-key-rotation-v1-predecessor-separate-owner.json"
+    )
+    vector = json.loads(vector_path.read_text(encoding="utf-8"))
+    owner_name = bytes.fromhex(vector["owner_name_utf8_hex"])
+    genesis = bytes.fromhex(vector["genesis_envelope_cbor_hex"])
+    predecessor = bytes.fromhex(vector["predecessor_envelope_cbor_hex"])
+    candidate = bytes.fromhex(vector["candidate_envelope_cbor_hex"])
+    transport = MemoryTransport()
+    transport.envelope = candidate
+    transport.remote_envelope = candidate
+    transport.history[bytes.fromhex(vector["genesis_state_hash_hex"])] = genesis
+    transport.history[bytes.fromhex(vector["predecessor_state_hash_hex"])] = predecessor
+
+    state = RegistryAdapter(transport).read_state(owner_name=owner_name)
+
+    assert state is not None
+    assert state.owner_name == owner_name
+    assert state.owner_public_key == bytes.fromhex(vector["successor_owner_public_key_hex"])
+    assert state.sequence == vector["candidate_sequence"] == 3
+    assert state.generation == vector["candidate_generation"] == 1
+    assert state.threshold == vector["candidate_threshold"] == 2
+    assert state.state_hash == bytes.fromhex(vector["candidate_state_hash_hex"])
+    assert state.predecessor_envelopes == (predecessor, genesis)
+
+
+def test_versioned_owner_key_rotation_history_vector_matches_python_core():
+    vector_path = (
+        Path(__file__).parent
+        / "vectors"
+        / "identity-owner-key-rotation-versioned-history.json"
+    )
+    vector = json.loads(vector_path.read_text(encoding="utf-8"))
+    owner_name = bytes.fromhex(vector["owner_name_utf8_hex"])
+    genesis = bytes.fromhex(vector["genesis_envelope_cbor_hex"])
+    predecessor = bytes.fromhex(vector["predecessor_envelope_cbor_hex"])
+    candidate = bytes.fromhex(vector["candidate_envelope_cbor_hex"])
+    transport = MemoryTransport()
+    transport.envelope = candidate
+    transport.remote_envelope = candidate
+    transport.history[bytes.fromhex(vector["genesis_state_hash_hex"])] = genesis
+    transport.history[bytes.fromhex(vector["predecessor_state_hash_hex"])] = predecessor
+
+    state = RegistryAdapter(transport).read_state(owner_name=owner_name)
+
+    assert state is not None
+    assert state.owner_name == owner_name
+    assert state.owner_public_key == bytes.fromhex(vector["successor_owner_public_key_hex"])
+    assert state.sequence == vector["candidate_sequence"]
+    assert state.generation == vector["candidate_generation"]
+    assert state.threshold == vector["candidate_threshold"]
+    assert state.state_hash == bytes.fromhex(vector["candidate_state_hash_hex"])
+    assert state.predecessor_envelopes == (predecessor, genesis)
+
+
+def test_operation3_generation_skip_vector_matches_python_core():
+    vector_path = (
+        Path(__file__).parent / "vectors" / "identity-operation3-generation-skip.json"
+    )
+    vector = json.loads(vector_path.read_text(encoding="utf-8"))
+    owner_name = bytes.fromhex(vector["owner_name_utf8_hex"])
+    genesis = bytes.fromhex(vector["genesis_envelope_cbor_hex"])
+    candidate = bytes.fromhex(vector["candidate_envelope_cbor_hex"])
+    predecessor_hash = bytes.fromhex(vector["predecessor_state_hash_hex"])
+    transport = MemoryTransport()
+    transport.envelope = candidate
+    transport.remote_envelope = candidate
+    transport.history[predecessor_hash] = genesis
+
+    state = RegistryAdapter(transport).read_state(owner_name=owner_name)
+
+    assert state is not None
+    assert state.sequence == vector["candidate_sequence"]
+    assert state.generation == vector["candidate_generation"] == 3
+    assert state.state_hash == bytes.fromhex(vector["candidate_state_hash_hex"])
+    assert state.predecessor_envelopes == (genesis,)
 
 
 def make_legacy_rotation_bundle(tmp_path):

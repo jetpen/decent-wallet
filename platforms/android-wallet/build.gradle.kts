@@ -1,3 +1,4 @@
+import org.gradle.api.tasks.testing.Test
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
@@ -49,9 +50,24 @@ tasks.withType<KotlinCompile>().configureEach {
     }
 }
 
+tasks.withType<Test>().configureEach {
+    systemProperty(
+        "decent.registry.test.peer",
+        providers.environmentVariable("DECENT_REGISTRY_TEST_PEER").orElse("").get(),
+    )
+}
+
 dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.86")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.86")
+    implementation("org.bouncycastle:bcutil-jdk18on:1.86")
     implementation("com.fasterxml.jackson.core:jackson-core:2.22.2")
+    implementation("com.google.protobuf:protobuf-java:3.25.5")
+    implementation("io.libp2p:jvm-libp2p:1.3.7-RELEASE") {
+        exclude(group = "io.netty", module = "netty-codec-native-quic")
+        exclude(group = "io.netty", module = "netty-tcnative-boringssl-static")
+        exclude(group = "io.netty", module = "netty-transport-classes-epoll")
+    }
 
     testImplementation("junit:junit:4.13.2")
 

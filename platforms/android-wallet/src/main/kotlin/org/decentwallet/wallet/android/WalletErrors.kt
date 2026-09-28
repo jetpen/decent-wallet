@@ -1,6 +1,9 @@
 package org.decentwallet.wallet.android
 
-open class WalletContainerException internal constructor(message: String) : Exception(message)
+open class WalletContainerException internal constructor(
+    message: String,
+    cause: Throwable? = null,
+) : Exception(message, cause)
 
 class WalletLockedException : WalletContainerException("wallet is locked")
 
@@ -26,7 +29,8 @@ class WalletInvalidIdentityStateException : WalletContainerException("identity s
 
 class WalletUnsupportedIdentityStateException : WalletContainerException("identity state format is unsupported")
 
-class WalletIdentityTransportException : WalletContainerException("identity transport operation failed")
+class WalletIdentityTransportException(cause: Throwable? = null) :
+    WalletContainerException("identity transport operation failed", cause)
 
 class WalletRotationTransportUnavailableException : WalletContainerException("owner-key rotation transport is unavailable")
 
