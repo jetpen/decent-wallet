@@ -10,12 +10,12 @@ import pytest
 import trio
 
 from decent_wallet.identity import ExpiredPublication, StalePublication
-from decent_wallet.registry_transport import RegistryTransport
 from decent_wallet import (
     ConsentDecision,
     IdentityBundle,
     PublishStatus,
     RegistryAdapter,
+    RegistryTransport,
     Wallet,
 )
 
@@ -178,8 +178,10 @@ async def test_direct_dht_transport_conditionally_publishes_and_reads_exact_remo
 
 @pytest.mark.registry_integration
 @pytest.mark.trio
-async def test_operation_five_unknown_dispatch_confirms_only_after_fresh_peer_readback(
+@pytest.mark.parametrize("outcome", ["success", "expired", "ambiguous"])
+async def test_operation_five_desktop_api_handles_dispatch_outcomes(
     tmp_path,
+    outcome: str,
 ):
     from decent_registry.dht.libp2p_dht import Libp2pKadDHT
     from decent_registry.durable_store import LMDBDatastore
@@ -235,14 +237,16 @@ async def test_operation_five_unknown_dispatch_confirms_only_after_fresh_peer_re
             return IdentityBundle.from_submission(submission)
 
         genesis_bundle = await run_in_thread(create_genesis_bundle)
+        genesis_envelope = genesis_bundle.finalize()
         await seed_service.put_identity_envelope(
             owner_name_hex=owner_name_hex,
-            envelope_cbor=genesis_bundle.finalize(),
+            envelope_cbor=genesis_envelope,
         )
 
-        class AmbiguousAfterWriteTransport:
-            def __init__(self, inner: RegistryTransport) -> None:
+        class DispatchOutcomeTransport:
+            def __init__(self, inner: RegistryTransport, outcome: str) -> None:
                 self.inner = inner
+                self.outcome = outcome
                 self.supports_owner_key_rotation = (
                     inner.supports_owner_key_rotation
                 )
@@ -282,17 +286,20 @@ async def test_operation_five_unknown_dispatch_confirms_only_after_fresh_peer_re
                 expires_at: int,
             ) -> None:
                 self.write_attempts += 1
+                if self.outcome == "expired":
+                    raise ExpiredPublication()
                 self.inner.put_identity_envelope(
                     owner_name_hex=owner_name_hex,
                     envelope_cbor=envelope_cbor,
                     expected_state_hash=expected_state_hash,
                     expires_at=expires_at,
                 )
-                self.hide_remote_readback = True
-                raise TimeoutError("simulated lost acknowledgement after dispatch")
+                if self.outcome == "ambiguous":
+                    self.hide_remote_readback = True
+                    raise TimeoutError("simulated lost acknowledgement after dispatch")
 
-        ambiguous_transport = AmbiguousAfterWriteTransport(transport)
-        adapter = RegistryAdapter(ambiguous_transport)
+        dispatch_transport = DispatchOutcomeTransport(transport, outcome)
+        adapter = RegistryAdapter(dispatch_transport)
 
         def prepare_rotation():
             predecessor = adapter.read_state(owner_name=OWNER_NAME)
@@ -347,35 +354,66 @@ async def test_operation_five_unknown_dispatch_confirms_only_after_fresh_peer_re
         ) = await run_in_thread(prepare_rotation)
         finalized_envelope = publication.envelope_bytes
 
-        def dispatch_ambiguous():
+        def dispatch():
             return adapter.dispatch_owner_key_rotation(publication, permit)
 
-        dispatch_result = await run_in_thread(dispatch_ambiguous)
-        assert dispatch_result.status is PublishStatus.UNKNOWN
-        assert dispatch_result.confirmation is None
+        dispatch_result = await run_in_thread(dispatch)
+        assert dispatch_transport.write_attempts == 1
         assert owner.public_key == active_public_key
         assert owner.pending_signing_public_key == successor_public_key
         assert owner.signing_key_rotation_dispatch_intent == permit.intent
-        assert ambiguous_transport.write_attempts == 1
 
-        remote_before_recovery = await run_in_thread(
-            lambda: transport.get_remote_identity_envelope(
-                owner_name_hex=owner_name_hex
+        if outcome == "expired":
+            assert dispatch_result.status is PublishStatus.EXPIRED
+            assert dispatch_result.confirmation is None
+            rejection = dispatch_result.rejection
+            assert rejection is not None
+            assert await run_in_thread(
+                lambda: transport.get_remote_identity_envelope(
+                    owner_name_hex=owner_name_hex
+                )
+            ) == genesis_envelope
+            await run_in_thread(
+                lambda: owner.resolve_signing_key_rotation_rejection(rejection)
             )
-        )
-        assert remote_before_recovery == finalized_envelope
+            assert owner.signing_key_rotation_dispatch_intent is None
+            assert owner.public_key == active_public_key
+            assert owner.pending_signing_public_key == successor_public_key
+            await run_in_thread(owner.cancel_signing_key_rotation)
+            assert owner.pending_signing_public_key is None
+            assert await seed_service.get_identity_envelope(
+                owner_name_hex=owner_name_hex
+            ) == genesis_envelope
+            await run_in_thread(owner.lock)
+            await run_in_thread(bob.lock)
+            await run_in_thread(carol.lock)
+            return
 
-        ambiguous_transport.hide_remote_readback = False
-        confirmation = await run_in_thread(
-            lambda: adapter.confirm_owner_key_rotation(permit.intent)
-        )
+        if outcome == "ambiguous":
+            assert dispatch_result.status is PublishStatus.UNKNOWN
+            assert dispatch_result.confirmation is None
+            remote_before_recovery = await run_in_thread(
+                lambda: transport.get_remote_identity_envelope(
+                    owner_name_hex=owner_name_hex
+                )
+            )
+            assert remote_before_recovery == finalized_envelope
+            dispatch_transport.hide_remote_readback = False
+            confirmation = await run_in_thread(
+                lambda: adapter.confirm_owner_key_rotation(permit.intent)
+            )
+        else:
+            assert outcome == "success"
+            assert dispatch_result.status is PublishStatus.CONFIRMED
+            confirmation = dispatch_result.confirmation
+
         assert confirmation is not None
         await run_in_thread(lambda: owner.finalize_signing_key_rotation(confirmation))
 
         assert owner.public_key == successor_public_key
         assert owner.pending_signing_public_key is None
         assert owner.signing_key_rotation_dispatch_intent is None
-        assert ambiguous_transport.write_attempts == 1
+        assert dispatch_transport.write_attempts == 1
         assert await seed_service.get_identity_envelope(
             owner_name_hex=owner_name_hex
         ) == finalized_envelope
