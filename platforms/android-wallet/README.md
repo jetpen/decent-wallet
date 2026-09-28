@@ -63,7 +63,7 @@ DECENT_REGISTRY_TEST_READBACK_PEER='<READY_READBACK multiaddr>' \
   --tests org.decentwallet.wallet.android.AndroidDirectDhtRegistryInteropTest
 ```
 
-For the Android runtime read test, stop the host-JVM fixture and restart it with `--seed-candidate`; this prepublishes the candidate so instrumentation can verify direct reads without mutating the fixture.
+For the Android runtime publication/read-back test, start the two-peer fixture without `--seed-candidate`. Instrumentation verifies the predecessor is current, publishes the candidate through the Android direct-DHT transport, then creates a fresh transport and verifies the exact candidate from the independent read-back peer. Each run mutates the fixture, so stop and restart it without `--seed-candidate` before testing another AVD.
 
 For Android instrumentation, use `adb reverse` to expose each host peer through loopback on the single running AVD. If the fixture reports host ports `<writer-port>` and `<readback-port>`, configure:
 

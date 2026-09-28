@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets
 
 class AndroidDirectDhtRegistryRuntimeTest {
     @Test
-    fun readsVersionedHistoryAndCandidateFromIndependentRegistryPeers() {
+    fun publishesCandidateAndConfirmsItFromIndependentPeerOnAndroid() {
         val api = Build.VERSION.SDK_INT
         val abi = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
         assertTrue(
@@ -28,32 +28,65 @@ class AndroidDirectDhtRegistryRuntimeTest {
         )
 
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val ownerName = fixtureHex(instrumentation, "owner_name_utf8_hex")
-        val predecessor = fixtureHex(instrumentation, "predecessor_envelope_cbor_hex")
-        val candidate = fixtureHex(instrumentation, "candidate_envelope_cbor_hex")
-        val predecessorHash = fixtureHex(instrumentation, "predecessor_state_hash_hex")
-        val transport = AndroidDirectDhtIdentityTransport(
-            AndroidRegistryDhtConfig(
+        var ownerName = byteArrayOf()
+        var predecessor = byteArrayOf()
+        var candidate = byteArrayOf()
+        var predecessorHash = byteArrayOf()
+        var transport: AndroidDirectDhtIdentityTransport? = null
+        var freshReadbackTransport: AndroidDirectDhtIdentityTransport? = null
+        try {
+            ownerName = fixtureHex(instrumentation, "owner_name_utf8_hex")
+            predecessor = fixtureHex(instrumentation, "predecessor_envelope_cbor_hex")
+            candidate = fixtureHex(instrumentation, "candidate_envelope_cbor_hex")
+            predecessorHash = fixtureHex(instrumentation, "predecessor_state_hash_hex")
+            val config = AndroidRegistryDhtConfig(
                 registryEnvironment = "local-two-peer-registry-runtime",
                 registryPeers = listOf(writerPeer!!),
                 readbackPeer = readbackPeer!!,
                 enableOwnerKeyRotation = true,
                 requestTimeoutMillis = 30_000,
-            ),
-        )
-        try {
-            assertArrayEquals(candidate, transport.getIdentityEnvelope(ownerName))
-            assertArrayEquals(
-                predecessor,
-                transport.getIdentityEnvelopeByHash(ownerName, predecessorHash),
             )
-            assertArrayEquals(candidate, transport.getRemoteIdentityEnvelope(ownerName))
+            val publishingTransport = AndroidDirectDhtIdentityTransport(config)
+            transport = publishingTransport
+            assertEnvelopeEquals(predecessor, publishingTransport.getIdentityEnvelope(ownerName))
+            assertEnvelopeEquals(predecessor, publishingTransport.getRemoteIdentityEnvelope(ownerName))
+            assertEnvelopeEquals(
+                predecessor,
+                publishingTransport.getIdentityEnvelopeByHash(ownerName, predecessorHash),
+            )
+
+            publishingTransport.putIdentityEnvelopeIfCurrent(
+                ownerNameBytes = ownerName,
+                envelopeBytes = candidate,
+                expectedStateHash = predecessorHash,
+                expiresAt = Long.MAX_VALUE,
+            )
+            assertEnvelopeEquals(candidate, publishingTransport.getIdentityEnvelope(ownerName))
+
+            val freshReader = AndroidDirectDhtIdentityTransport(config)
+            freshReadbackTransport = freshReader
+            assertEnvelopeEquals(candidate, freshReader.getRemoteIdentityEnvelope(ownerName))
         } finally {
-            transport.close()
-            ownerName.fill(0)
-            predecessor.fill(0)
-            candidate.fill(0)
-            predecessorHash.fill(0)
+            try {
+                freshReadbackTransport?.close()
+            } finally {
+                try {
+                    transport?.close()
+                } finally {
+                    ownerName.fill(0)
+                    predecessor.fill(0)
+                    candidate.fill(0)
+                    predecessorHash.fill(0)
+                }
+            }
+        }
+    }
+
+    private fun assertEnvelopeEquals(expected: ByteArray, actual: ByteArray?) {
+        try {
+            assertArrayEquals(expected, actual)
+        } finally {
+            actual?.fill(0)
         }
     }
 
