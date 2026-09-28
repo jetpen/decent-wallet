@@ -3,6 +3,7 @@ package org.decentwallet.wallet.android
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
@@ -11,6 +12,529 @@ import java.nio.file.Files
 import java.util.LinkedHashMap
 
 class AndroidWalletTest {
+    @Test
+    fun generatedSigningWalletPersistsOnePendingSuccessorAcrossReopen() {
+        val directory = Files.createTempDirectory("wallet-android-pending-key-")
+        val path = directory.resolve("wallet.dw")
+        val password = "a sufficiently long test password"
+        val wallet = AndroidWallet.createWithGeneratedKey(path, password, password)
+        val activeBefore = wallet.ownerPublicKey
+        val originalBytes = wallet.exportContainer()
+        val pending = wallet.prepareSigningKeyRotation()
+        val storedBytes = wallet.exportContainer()
+        try {
+            assertArrayEquals(activeBefore, wallet.ownerPublicKey)
+            assertArrayEquals(pending, checkNotNull(wallet.pendingOwnerPublicKey))
+            assertArrayEquals(pending, wallet.prepareSigningKeyRotation())
+            assertArrayEquals(Files.readAllBytes(path), storedBytes)
+            assertTrue(storedBytes.isNotEmpty())
+            val originalEnvelope = WalletJson.parse(originalBytes, ContainerCrypto.MAX_CONTAINER_BYTES) as Map<*, *>
+            val updatedEnvelope = WalletJson.parse(storedBytes, ContainerCrypto.MAX_CONTAINER_BYTES) as Map<*, *>
+            assertEquals(originalEnvelope["kdf"], updatedEnvelope["kdf"])
+            assertEquals(originalEnvelope["wrap"], updatedEnvelope["wrap"])
+            val originalPayload = originalEnvelope["payload"] as Map<*, *>
+            val updatedPayload = updatedEnvelope["payload"] as Map<*, *>
+            assertNotEquals(originalPayload["nonce"], updatedPayload["nonce"])
+        } finally {
+            wallet.close()
+        }
+
+        val reopened = AndroidWallet.open(path, password)
+        try {
+            assertArrayEquals(activeBefore, reopened.ownerPublicKey)
+            assertArrayEquals(pending, checkNotNull(reopened.pendingOwnerPublicKey))
+            assertArrayEquals(storedBytes, reopened.exportContainer())
+        } finally {
+            reopened.close()
+        }
+
+        val imported = AndroidWallet.importContainer(
+            directory.resolve("imported.dw"),
+            storedBytes,
+            password,
+        )
+        try {
+            assertArrayEquals(activeBefore, imported.ownerPublicKey)
+            assertArrayEquals(pending, checkNotNull(imported.pendingOwnerPublicKey))
+            assertArrayEquals(storedBytes, imported.exportContainer())
+        } finally {
+            imported.close()
+            originalBytes.fill(0)
+            activeBefore.fill(0)
+            pending.fill(0)
+            storedBytes.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun generatedWalletRejectsCsrngFailureWithoutCreatingFile() {
+        val directory = Files.createTempDirectory("wallet-android-csrng-failure-")
+        val path = directory.resolve("wallet.dw")
+        val failure = org.junit.Assert.assertThrows(WalletKeyGenerationException::class.java) {
+            AndroidWallet.createWithGeneratedKeyForTest(
+                path,
+                "a sufficiently long test password",
+                "a sufficiently long test password",
+                object : java.security.SecureRandom() {
+                    override fun nextBytes(bytes: ByteArray) {
+                        throw IllegalStateException("synthetic entropy failure")
+                    }
+                },
+            )
+        }
+        assertEquals("key generation failed", failure.message)
+        assertFalse(Files.exists(path))
+        Files.walk(directory).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        }
+    }
+
+    @Test
+    fun generatedWalletRequestsExactlyOneEd25519SeedFromCsrng() {
+        val directory = Files.createTempDirectory("wallet-android-exact-seed-")
+        val path = directory.resolve("wallet.dw")
+        val password = "a sufficiently long test password"
+        val seed = syntheticSeed(128)
+        val requests = mutableListOf<Int>()
+        val random = object : java.security.SecureRandom() {
+            override fun nextBytes(bytes: ByteArray) {
+                requests += bytes.size
+                seed.copyInto(bytes)
+            }
+        }
+        val wallet = AndroidWallet.createWithGeneratedKeyForTest(path, password, password, random)
+        val expectedPublic = AndroidIdentityCrypto.publicKeyFromSeed(seed)
+        try {
+            assertEquals(listOf(AndroidIdentityCrypto.KEY_BYTES), requests)
+            assertArrayEquals(expectedPublic, wallet.ownerPublicKey)
+        } finally {
+            wallet.close()
+            seed.fill(0)
+            expectedPublic.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun pendingKeyCsrngFailureLeavesContainerUnchanged() {
+        val directory = Files.createTempDirectory("wallet-android-pending-csrng-failure-")
+        val path = directory.resolve("wallet.dw")
+        val password = "a sufficiently long test password"
+        val wallet = AndroidWallet.createWithGeneratedKey(path, password, password)
+        val active = wallet.ownerPublicKey
+        val before = wallet.exportContainer()
+        try {
+            org.junit.Assert.assertThrows(WalletKeyGenerationException::class.java) {
+                wallet.prepareSigningKeyRotation(
+                    object : java.security.SecureRandom() {
+                        override fun nextBytes(bytes: ByteArray) {
+                            throw IllegalStateException("synthetic entropy failure")
+                        }
+                    },
+                )
+            }
+            assertArrayEquals(before, wallet.exportContainer())
+            assertArrayEquals(active, wallet.ownerPublicKey)
+            assertEquals(null, wallet.pendingOwnerPublicKey)
+        } finally {
+            wallet.close()
+            active.fill(0)
+            before.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun unresolvedDispatchIntentBlocksPreparingAnotherSuccessor() {
+        val directory = Files.createTempDirectory("wallet-android-latched-rotation-")
+        val path = directory.resolve("wallet.dw")
+        val password = "a sufficiently long test password"
+        val seed = ByteArray(32) { (it + 1).toByte() }
+        val publicKey = AndroidIdentityCrypto.publicKeyFromSeed(seed)
+        val wallet = AndroidWallet.create(
+            path,
+            password,
+            password,
+            mapOf(
+                "private_seed" to seed,
+                "public_key" to publicKey,
+                "rotation_dispatch_intent" to emptyMap<String, Any?>(),
+            ),
+        )
+        try {
+            org.junit.Assert.assertThrows(WalletRotationInProgressException::class.java) {
+                wallet.prepareSigningKeyRotation()
+            }
+            org.junit.Assert.assertThrows(WalletRotationInProgressException::class.java) {
+                wallet.cancelSigningKeyRotation()
+            }
+            assertArrayEquals(publicKey, wallet.ownerPublicKey)
+            assertEquals(null, wallet.pendingOwnerPublicKey)
+        } finally {
+            wallet.close()
+            seed.fill(0)
+            publicKey.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun cancellationPersistsAndKeepsTheActiveKeyAcrossReopen() {
+        val directory = Files.createTempDirectory("wallet-android-cancel-key-")
+        val path = directory.resolve("wallet.dw")
+        val password = "a sufficiently long test password"
+        val wallet = AndroidWallet.createWithGeneratedKey(path, password, password)
+        val active = wallet.ownerPublicKey
+        val pending = wallet.prepareSigningKeyRotation()
+        var cancelledBytes = ByteArray(0)
+        try {
+            assertTrue(wallet.cancelSigningKeyRotation())
+            assertEquals(null, wallet.pendingOwnerPublicKey)
+            assertFalse(wallet.cancelSigningKeyRotation())
+            assertArrayEquals(active, wallet.ownerPublicKey)
+            cancelledBytes = wallet.exportContainer()
+            assertArrayEquals(Files.readAllBytes(path), cancelledBytes)
+        } finally {
+            wallet.close()
+        }
+
+        val reopened = AndroidWallet.open(path, password)
+        try {
+            assertArrayEquals(active, reopened.ownerPublicKey)
+            assertEquals(null, reopened.pendingOwnerPublicKey)
+            assertArrayEquals(cancelledBytes, reopened.exportContainer())
+        } finally {
+            reopened.close()
+            active.fill(0)
+            pending.fill(0)
+            cancelledBytes.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun failedCancellationRollsBackAndKeepsPendingKeyUsable() {
+        val directory = Files.createTempDirectory("wallet-android-cancel-rollback-")
+        val path = directory.resolve("wallet.dw")
+        val password = "a sufficiently long test password"
+        val setup = AndroidWallet.createWithGeneratedKey(path, password, password)
+        val active = setup.ownerPublicKey
+        val pending = setup.prepareSigningKeyRotation()
+        setup.close()
+        val before = Files.readAllBytes(path)
+        var syncCalls = 0
+        val wallet = openWithFileReplacement(path, password) { target, bytes, expected ->
+            AtomicWalletFiles.replaceForTest(target, bytes, expected) {
+                syncCalls++
+                if (syncCalls == 1) throw IOException("synthetic directory sync failure")
+            }
+        }
+        try {
+            org.junit.Assert.assertThrows(WalletStorageException::class.java) {
+                wallet.cancelSigningKeyRotation()
+            }
+            assertTrue(wallet.isUnlocked)
+            assertArrayEquals(active, wallet.ownerPublicKey)
+            assertArrayEquals(pending, checkNotNull(wallet.pendingOwnerPublicKey))
+            assertArrayEquals(before, Files.readAllBytes(path))
+        } finally {
+            wallet.close()
+        }
+        val reopened = AndroidWallet.open(path, password)
+        try {
+            assertArrayEquals(active, reopened.ownerPublicKey)
+            assertArrayEquals(pending, checkNotNull(reopened.pendingOwnerPublicKey))
+        } finally {
+            reopened.close()
+            active.fill(0)
+            pending.fill(0)
+            before.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun unknownCancellationOutcomeLocksAndClearsTheSession() {
+        val directory = Files.createTempDirectory("wallet-android-cancel-unknown-")
+        val path = directory.resolve("wallet.dw")
+        val password = "a sufficiently long test password"
+        val setup = AndroidWallet.createWithGeneratedKey(path, password, password)
+        setup.prepareSigningKeyRotation().fill(0)
+        setup.close()
+        val wallet = openWithFileReplacement(path, password) { target, bytes, expected ->
+            AtomicWalletFiles.replaceForTest(target, bytes, expected) {
+                throw IOException("synthetic directory sync failure")
+            }
+        }
+        org.junit.Assert.assertThrows(WalletStorageOutcomeUnknownException::class.java) {
+            wallet.cancelSigningKeyRotation()
+        }
+        assertFalse(wallet.isUnlocked)
+        org.junit.Assert.assertThrows(WalletLockedException::class.java) {
+            wallet.ownerPublicKey
+        }
+        wallet.close()
+        Files.walk(directory).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        }
+    }
+
+    @Test
+    fun verifiedLegacyOperation5VectorProducesExactUpdateAndEnvelope() {
+        val vector = resource("/identity-owner-key-rotation-legacy.json")
+        val vectorText = String(vector, Charsets.UTF_8)
+        val ownerName = decodeHex(jsonHexField(vectorText, "owner_name_utf8_hex"))
+        val predecessorEnvelope = decodeHex(jsonHexField(vectorText, "predecessor_envelope_cbor_hex"))
+        val expectedStateHash = decodeHex(jsonHexField(vectorText, "predecessor_state_hash_hex"))
+        val expectedUpdate = decodeHex(jsonHexField(vectorText, "candidate_signed_update_cbor_hex"))
+        val expectedEnvelope = decodeHex(jsonHexField(vectorText, "candidate_envelope_cbor_hex"))
+        val activeSeed = syntheticSeed(0)
+        val successorSeed = syntheticSeed(32)
+        val bobSeed = syntheticSeed(64)
+        val carolSeed = syntheticSeed(96)
+        val activePublic = AndroidIdentityCrypto.publicKeyFromSeed(activeSeed)
+        val successorPublic = AndroidIdentityCrypto.publicKeyFromSeed(successorSeed)
+        val bobPublic = AndroidIdentityCrypto.publicKeyFromSeed(bobSeed)
+        val carolPublic = AndroidIdentityCrypto.publicKeyFromSeed(carolSeed)
+        val directory = Files.createTempDirectory("wallet-android-operation5-vector-")
+        val password = "a sufficiently long test password"
+        val wallet = AndroidWallet.create(
+            directory.resolve("wallet.dw"),
+            password,
+            password,
+            mapOf(
+                "private_seed" to activeSeed,
+                "public_key" to activePublic,
+                "pending_private_seed" to successorSeed,
+                "pending_public_key" to successorPublic,
+            ),
+        )
+        try {
+            val draft = wallet.createLegacyOwnerKeyRotationDraft(
+                ownerName,
+                predecessorEnvelope,
+                listOf(
+                    IdentityRotationSigner("alice-next", successorPublic),
+                    IdentityRotationSigner("bob", bobPublic),
+                    IdentityRotationSigner("carol", carolPublic),
+                ),
+            )
+            assertArrayEquals(ownerName, draft.ownerNameBytes)
+            assertArrayEquals(expectedStateHash, draft.predecessorStateHash)
+            assertEquals(BigInteger.valueOf(8), draft.sequence)
+            assertArrayEquals(successorPublic, draft.successorOwnerPublicKey)
+            assertArrayEquals(expectedUpdate, draft.signedUpdateBytes)
+            assertArrayEquals(expectedEnvelope, draft.envelopeBytes)
+            assertArrayEquals(activePublic, wallet.ownerPublicKey)
+            assertArrayEquals(successorPublic, checkNotNull(wallet.pendingOwnerPublicKey))
+        } finally {
+            wallet.close()
+            vector.fill(0)
+            ownerName.fill(0)
+            predecessorEnvelope.fill(0)
+            expectedStateHash.fill(0)
+            expectedUpdate.fill(0)
+            expectedEnvelope.fill(0)
+            activeSeed.fill(0)
+            successorSeed.fill(0)
+            bobSeed.fill(0)
+            carolSeed.fill(0)
+            activePublic.fill(0)
+            successorPublic.fill(0)
+            bobPublic.fill(0)
+            carolPublic.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun legacyRotationDraftRejectsDifferentOwnerNameBytes() {
+        val vector = resource("/identity-owner-key-rotation-legacy.json")
+        val text = String(vector, Charsets.UTF_8)
+        val ownerName = decodeHex(jsonHexField(text, "owner_name_utf8_hex"))
+        val predecessor = decodeHex(jsonHexField(text, "predecessor_envelope_cbor_hex"))
+        val mismatchedName = ownerName.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        val directory = Files.createTempDirectory("wallet-android-owner-name-mismatch-")
+        val wallet = createRotationTestWallet(directory)
+        try {
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                wallet.createLegacyOwnerKeyRotationDraft(mismatchedName, predecessor, rotationSigners())
+            }
+        } finally {
+            wallet.close()
+            vector.fill(0)
+            ownerName.fill(0)
+            predecessor.fill(0)
+            mismatchedName.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun legacyRotationDraftRejectsInvalidPredecessorSignature() {
+        val vector = resource("/identity-owner-key-rotation-legacy.json")
+        val text = String(vector, Charsets.UTF_8)
+        val ownerName = decodeHex(jsonHexField(text, "owner_name_utf8_hex"))
+        val predecessor = decodeHex(jsonHexField(text, "predecessor_envelope_cbor_hex"))
+        val tampered = predecessor.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
+        val directory = Files.createTempDirectory("wallet-android-bad-predecessor-")
+        val wallet = createRotationTestWallet(directory)
+        try {
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                wallet.createLegacyOwnerKeyRotationDraft(ownerName, tampered, rotationSigners())
+            }
+        } finally {
+            wallet.close()
+            vector.fill(0)
+            ownerName.fill(0)
+            predecessor.fill(0)
+            tampered.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun legacyRotationDraftRequiresThePersistedPendingKey() {
+        val vector = resource("/identity-owner-key-rotation-legacy.json")
+        val text = String(vector, Charsets.UTF_8)
+        val ownerName = decodeHex(jsonHexField(text, "owner_name_utf8_hex"))
+        val predecessor = decodeHex(jsonHexField(text, "predecessor_envelope_cbor_hex"))
+        val directory = Files.createTempDirectory("wallet-android-no-pending-key-")
+        val wallet = createRotationTestWallet(directory, pendingSeedStart = null)
+        try {
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                wallet.createLegacyOwnerKeyRotationDraft(ownerName, predecessor, rotationSigners())
+            }
+        } finally {
+            wallet.close()
+            vector.fill(0)
+            ownerName.fill(0)
+            predecessor.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun legacyRotationDraftRequiresTheActiveKeyToAuthorizePredecessor() {
+        val vector = resource("/identity-owner-key-rotation-legacy.json")
+        val text = String(vector, Charsets.UTF_8)
+        val ownerName = decodeHex(jsonHexField(text, "owner_name_utf8_hex"))
+        val predecessor = decodeHex(jsonHexField(text, "predecessor_envelope_cbor_hex"))
+        val directory = Files.createTempDirectory("wallet-android-wrong-active-key-")
+        val wallet = createRotationTestWallet(directory, activeSeedStart = 64, pendingSeedStart = 32)
+        try {
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                wallet.createLegacyOwnerKeyRotationDraft(ownerName, predecessor, rotationSigners())
+            }
+        } finally {
+            wallet.close()
+            vector.fill(0)
+            ownerName.fill(0)
+            predecessor.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun legacyRotationDraftRejectsDuplicateSignerIds() {
+        val vector = resource("/identity-owner-key-rotation-legacy.json")
+        val text = String(vector, Charsets.UTF_8)
+        val ownerName = decodeHex(jsonHexField(text, "owner_name_utf8_hex"))
+        val predecessor = decodeHex(jsonHexField(text, "predecessor_envelope_cbor_hex"))
+        val signers = rotationSigners()
+        val duplicateIds = listOf(
+            signers[0],
+            signers[1],
+            IdentityRotationSigner("bob", signers[2].publicKey),
+        )
+        val directory = Files.createTempDirectory("wallet-android-duplicate-signer-id-")
+        val wallet = createRotationTestWallet(directory)
+        try {
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                wallet.createLegacyOwnerKeyRotationDraft(ownerName, predecessor, duplicateIds)
+            }
+        } finally {
+            wallet.close()
+            vector.fill(0)
+            ownerName.fill(0)
+            predecessor.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun legacyRotationDraftRejectsNonCanonicalPredecessorEncoding() {
+        val vector = resource("/identity-owner-key-rotation-legacy.json")
+        val text = String(vector, Charsets.UTF_8)
+        val ownerName = decodeHex(jsonHexField(text, "owner_name_utf8_hex"))
+        val predecessor = decodeHex(jsonHexField(text, "predecessor_envelope_cbor_hex"))
+        val nonCanonical = byteArrayOf(0xb9.toByte(), 0, 2) + predecessor.copyOfRange(1, predecessor.size)
+        val directory = Files.createTempDirectory("wallet-android-noncanonical-predecessor-")
+        val wallet = createRotationTestWallet(directory)
+        try {
+            org.junit.Assert.assertThrows(WalletInvalidIdentityStateException::class.java) {
+                wallet.createLegacyOwnerKeyRotationDraft(ownerName, nonCanonical, rotationSigners())
+            }
+        } finally {
+            wallet.close()
+            vector.fill(0)
+            ownerName.fill(0)
+            predecessor.fill(0)
+            nonCanonical.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun legacyRotationDraftRejectsVersionOnePredecessorWithoutFullHistory() {
+        val vector = resource("/identity-owner-key-rotation-legacy.json")
+        val text = String(vector, Charsets.UTF_8)
+        val ownerName = decodeHex(jsonHexField(text, "owner_name_utf8_hex"))
+        val versionOneEnvelope = decodeHex(jsonHexField(text, "candidate_envelope_cbor_hex"))
+        val directory = Files.createTempDirectory("wallet-android-v1-predecessor-")
+        val wallet = createRotationTestWallet(directory)
+        try {
+            org.junit.Assert.assertThrows(WalletUnsupportedIdentityStateException::class.java) {
+                wallet.createLegacyOwnerKeyRotationDraft(ownerName, versionOneEnvelope, rotationSigners())
+            }
+        } finally {
+            wallet.close()
+            vector.fill(0)
+            ownerName.fill(0)
+            versionOneEnvelope.fill(0)
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
     @Test
     fun opensSharedVectorAndLocksItsSession() {
         val vector = resource("/wallet-container-v2.json")
@@ -402,6 +926,67 @@ class AndroidWalletTest {
         assertFalse(wallet.isUnlocked)
         org.junit.Assert.assertThrows(WalletLockedException::class.java) { wallet.readPayload() }
         Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+    }
+
+    private fun createRotationTestWallet(
+        directory: java.nio.file.Path,
+        activeSeedStart: Int = 0,
+        pendingSeedStart: Int? = 32,
+    ): WalletSession {
+        val activeSeed = syntheticSeed(activeSeedStart)
+        val activePublic = AndroidIdentityCrypto.publicKeyFromSeed(activeSeed)
+        val payload = mutableMapOf<String, Any?>(
+            "private_seed" to activeSeed,
+            "public_key" to activePublic,
+        )
+        val pendingSeed = pendingSeedStart?.let(::syntheticSeed)
+        val pendingPublic = pendingSeed?.let(AndroidIdentityCrypto::publicKeyFromSeed)
+        if (pendingSeed != null && pendingPublic != null) {
+            payload["pending_private_seed"] = pendingSeed
+            payload["pending_public_key"] = pendingPublic
+        }
+        return try {
+            AndroidWallet.create(
+                directory.resolve("wallet.dw"),
+                "a sufficiently long test password",
+                "a sufficiently long test password",
+                payload,
+            )
+        } finally {
+            WalletJson.clearByteArrays(payload)
+            payload.clear()
+        }
+    }
+
+    private fun rotationSigners(): List<IdentityRotationSigner> {
+        val seeds = listOf(syntheticSeed(32), syntheticSeed(64), syntheticSeed(96))
+        val publicKeys = seeds.map(AndroidIdentityCrypto::publicKeyFromSeed)
+        return try {
+            listOf(
+                IdentityRotationSigner("alice-next", publicKeys[0]),
+                IdentityRotationSigner("bob", publicKeys[1]),
+                IdentityRotationSigner("carol", publicKeys[2]),
+            )
+        } finally {
+            seeds.forEach { it.fill(0) }
+            publicKeys.forEach { it.fill(0) }
+        }
+    }
+
+    private fun syntheticSeed(start: Int): ByteArray = ByteArray(32) { index -> (start + index).toByte() }
+
+    private fun jsonHexField(source: String, name: String): String =
+        Regex("\\\"${Regex.escape(name)}\\\"\\s*:\\s*\\\"([0-9a-f]+)\\\"")
+            .find(source)?.groupValues?.get(1) ?: error("missing public rotation-vector field")
+
+    private fun openWithFileReplacement(
+        path: java.nio.file.Path,
+        password: String,
+        replaceFile: (java.nio.file.Path, ByteArray, ByteArray) -> Unit,
+    ): WalletSession {
+        val raw = AtomicWalletFiles.read(path)
+        val opened = ContainerCrypto.open(raw, password)
+        return WalletSession(path, raw, opened.dek, opened.payload, replaceFile)
     }
 
     private fun decodeHex(value: String): ByteArray = ByteArray(value.length / 2) { index ->

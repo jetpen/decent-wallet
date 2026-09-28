@@ -26,7 +26,9 @@ Call `background()` from the app's lifecycle handling when the wallet should loc
 
 The v2 profile uses Argon2id v1.3 (65,536 KiB, 3 iterations, 4 lanes) and XChaCha20-Poly1305, strict duplicate-key rejection, canonical UTF-8 JSON, and version-bound associated data. Passwords must contain at least 16 Unicode scalar values. Error messages do not include passwords, keys, payloads, or raw storage errors.
 
-This module does not provide UI, payload-reading APIs to consumers, signing, key rotation, Registry/DHT transport, automatic lifecycle hooks, or hardware-backed protection. Those remain separate Issue #18 slices.
+The library supports CSRNG-generated Ed25519 owner keys, encrypted pending-successor preparation/cancellation, and an offline legacy-predecessor operation-5 draft/proof API. It verifies the exact predecessor signature and Owner Name bytes, checks the successor key pair and 2-of-3 signer set, and locally signs/verifies the candidate update digest with the pending key to prove possession; that PoP signature is discarded and is not included in the returned envelope. Version-1 predecessors are rejected until complete history verification is implemented. The active key remains unchanged; the API does not establish that the supplied predecessor is current Registry state.
+
+This is a local-only slice: the module still has no UI, consumer payload-reading API, consent flow, dispatch-latch persistence/resolution or network write, Registry/DHT transport, independent remote confirmation, key promotion, automatic lifecycle hooks, or hardware-backed protection. Local draft creation does not mean a Registry transition was published or accepted; those remain separate Issue #18 slices.
 
 ## Build and test
 

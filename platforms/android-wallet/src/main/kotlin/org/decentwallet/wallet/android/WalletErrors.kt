@@ -15,3 +15,13 @@ class WalletUnsupportedFormatException : WalletContainerException("wallet format
 class WalletStorageException : WalletContainerException("wallet storage operation failed")
 
 class WalletStorageOutcomeUnknownException : WalletContainerException("wallet storage outcome is unknown")
+
+class WalletKeyGenerationException : WalletContainerException("key generation failed")
+
+class WalletSigningException : WalletContainerException("signing operation failed")
+
+class WalletRotationInProgressException : WalletContainerException("owner-key rotation is unresolved")
+
+class WalletInvalidIdentityStateException : WalletContainerException("identity state is invalid")
+
+class WalletUnsupportedIdentityStateException : WalletContainerException("identity state format is unsupported")
