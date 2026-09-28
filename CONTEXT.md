@@ -17,7 +17,7 @@ Replacement of an Identity Owner Key with a successor while retaining the same O
 _Avoid_: signer-set replacement, key update
 
 **Rotation Dispatch Intent**:
-Encrypted wallet-local binding of a finalized operation-5 envelope to its Owner Name, predecessor/successor keys, predecessor state hash, and sequence; its presence means dispatch may have occurred and blocks further signing or cancellation until resolved.
+Encrypted wallet-local binding of a finalized operation-5 envelope to its Registry environment, Owner Name, predecessor/successor keys, predecessor state hash, and sequence; its presence means dispatch may have occurred and blocks further signing or cancellation until resolved.
 _Avoid_: publication confirmation, Registry acceptance
 
 **Peer-Observed Rotation Confirmation**:

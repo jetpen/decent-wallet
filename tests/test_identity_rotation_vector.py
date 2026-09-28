@@ -5,7 +5,7 @@ from pathlib import Path
 import cbor2
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from decent_wallet.identity import IdentityBundle, IdentityDraft, IdentityProof
+from decent_wallet.identity import ConsentTranscript, IdentityBundle, IdentityDraft, IdentityProof
 
 
 def test_legacy_operation5_vector_matches_python_identity_codec() -> None:
@@ -56,3 +56,30 @@ def test_legacy_operation5_vector_matches_python_identity_codec() -> None:
         (IdentityProof(None, predecessor_public_key, proof[2]),),
     )
     assert bundle.finalize() == candidate_envelope
+
+
+def test_legacy_operation5_consent_transcript_matches_shared_vector() -> None:
+    vector_path = Path(__file__).parent / "vectors" / "identity-owner-key-rotation-legacy.json"
+    vector = json.loads(vector_path.read_text(encoding="utf-8"))
+    envelope = bytes.fromhex(vector["candidate_envelope_cbor_hex"])
+    transcript = ConsentTranscript(
+        authenticated_origin=vector["consent_authenticated_origin"],
+        environment=vector["consent_environment"],
+        operation=vector["consent_operation"],
+        payload_hash=hashlib.sha256(envelope).digest(),
+        purpose=vector["consent_purpose"],
+        capability=vector["consent_capability"],
+        expires_at=vector["consent_expires_at"],
+        replay_nonce=bytes.fromhex(vector["consent_replay_nonce_hex"]),
+        sequence=vector["candidate_sequence"],
+        generation=vector["consent_generation"],
+        review_payload=envelope,
+    )
+    canonical = bytes.fromhex(vector["consent_transcript_cbor_hex"])
+    assert transcript.canonical_bytes() == canonical
+    assert transcript.digest.hex() == vector["consent_transcript_digest_hex"]
+    decoded = cbor2.loads(canonical)
+    assert decoded[4] == hashlib.sha256(envelope).digest()
+    assert decoded[9] == vector["candidate_sequence"]
+    assert decoded[10] == vector["consent_generation"]
+    assert decoded[13] == envelope

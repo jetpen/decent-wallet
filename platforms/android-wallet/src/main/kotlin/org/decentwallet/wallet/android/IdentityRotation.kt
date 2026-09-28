@@ -140,7 +140,7 @@ internal object LegacyOwnerKeyRotation {
         }
     }
 
-    private fun parseLegacyPredecessor(envelopeBytes: ByteArray): LegacyPredecessor {
+    internal fun parseLegacyPredecessor(envelopeBytes: ByteArray): LegacyPredecessor {
         val outer = IdentityCbor.decodeCanonical(envelopeBytes) as? Map<*, *> ?: invalidIdentityState()
         val keys = integerKeys(outer)
         if (keys == setOf(ONE, K2, K3)) {
@@ -178,6 +178,100 @@ internal object LegacyOwnerKeyRotation {
             sequence = sequence,
             stateHash = AndroidIdentityCrypto.sha256(updateBytes),
         )
+    }
+
+    fun verifyLegacyCandidate(
+        predecessorEnvelopeBytes: ByteArray,
+        candidateEnvelopeBytes: ByteArray,
+        intent: OwnerKeyRotationDispatchIntent,
+    ): ByteArray {
+        val predecessor = parseLegacyPredecessor(predecessorEnvelopeBytes)
+        try {
+            val outer = IdentityCbor.decodeCanonical(candidateEnvelopeBytes) as? Map<*, *>
+                ?: invalidIdentityState()
+            val envelope = exactMap(outer, setOf(ONE, K2, K3))
+            if (envelope[ONE] != ONE) invalidIdentityState()
+            val updateBytes = envelope[K2] as? ByteArray ?: invalidIdentityState()
+            val proofs = envelope[K3] as? List<*> ?: invalidIdentityState()
+            if (proofs.size != 1) invalidIdentityState()
+            val proof = exactMap(proofs.single(), setOf(ONE, K2))
+            if (proof[ONE] != null) invalidIdentityState()
+            val signature = proof[K2] as? ByteArray ?: invalidIdentityState()
+            if (signature.size != AndroidIdentityCrypto.SIGNATURE_BYTES) invalidIdentityState()
+
+            val update = IdentityCbor.decodeCanonical(updateBytes) as? Map<*, *>
+                ?: invalidIdentityState()
+            val decoded = exactMap(update, setOf(ONE, K2, K3, K4))
+            val record = exactMap(decoded[ONE], setOf(ONE, K2))
+            val ownerName = record[ONE] as? ByteArray ?: invalidIdentityState()
+            val successorPublicKey = record[K2] as? ByteArray ?: invalidIdentityState()
+            if (successorPublicKey.size != AndroidIdentityCrypto.KEY_BYTES) invalidIdentityState()
+            IdentityCbor.requireValidUtf8(ownerName)
+            val payload = decoded[K2] as? Map<*, *> ?: invalidIdentityState()
+            if (payload.isNotEmpty()) invalidIdentityState()
+            val sequence = decoded[K3] as? BigInteger ?: invalidIdentityState()
+            val authorization = exactMap(decoded[K4], setOf(ONE, K2, K3, K4, K5, K6, K7))
+            if (authorization[ONE] != ONE || authorization[K2] != ONE ||
+                authorization[K3] != FIVE || authorization[K4] != ONE || authorization[K5] != TWO
+            ) {
+                invalidIdentityState()
+            }
+            val predecessorHash = authorization[K7] as? ByteArray ?: invalidIdentityState()
+            val signerValues = authorization[K6] as? List<*> ?: invalidIdentityState()
+            if (signerValues.size != 3) invalidIdentityState()
+            val signerIds = HashSet<String>()
+            val signerKeys = ArrayList<ByteArray>(3)
+            var previousIdBytes: ByteArray? = null
+            for (value in signerValues) {
+                val signer = exactMap(value, setOf(ONE, K2))
+                val signerId = signer[ONE] as? String ?: invalidIdentityState()
+                val signerIdBytes = IdentityCbor.encodeUtf8(signerId)
+                if (signerIdBytes.isEmpty() || signerIdBytes.size > MAX_SIGNER_ID_BYTES ||
+                    !signerIds.add(signerId)
+                ) {
+                    invalidIdentityState()
+                }
+                if (previousIdBytes != null && compareUtf8(previousIdBytes, signerIdBytes) >= 0) {
+                    invalidIdentityState()
+                }
+                previousIdBytes = signerIdBytes
+                val signerPublicKey = signer[K2] as? ByteArray ?: invalidIdentityState()
+                if (signerPublicKey.size != AndroidIdentityCrypto.KEY_BYTES ||
+                    signerKeys.any { AndroidIdentityCrypto.equalPublicKeys(it, signerPublicKey) }
+                ) {
+                    invalidIdentityState()
+                }
+                signerKeys.add(signerPublicKey)
+            }
+            if (signerKeys.none { AndroidIdentityCrypto.equalPublicKeys(it, successorPublicKey) }) {
+                invalidIdentityState()
+            }
+
+            val envelopeHash = AndroidIdentityCrypto.sha256(candidateEnvelopeBytes)
+            val updateDigest = AndroidIdentityCrypto.sha256(updateBytes)
+            try {
+                if (!ownerName.contentEquals(intent.ownerNameBytes) ||
+                    !successorPublicKey.contentEquals(intent.successorOwnerPublicKey) ||
+                    !predecessor.ownerName.contentEquals(intent.ownerNameBytes) ||
+                    !predecessor.ownerPublicKey.contentEquals(intent.predecessorOwnerPublicKey) ||
+                    !predecessor.stateHash.contentEquals(intent.predecessorStateHash) ||
+                    !predecessorHash.contentEquals(intent.predecessorStateHash) ||
+                    sequence != intent.sequence || sequence != predecessor.sequence.add(ONE) ||
+                    !envelopeHash.contentEquals(intent.envelopeHash) ||
+                    !AndroidIdentityCrypto.verify(predecessor.ownerPublicKey, updateDigest, signature)
+                ) {
+                    invalidIdentityState()
+                }
+                return updateDigest.copyOf()
+            } finally {
+                envelopeHash.fill(0)
+                updateDigest.fill(0)
+            }
+        } finally {
+            predecessor.ownerName.fill(0)
+            predecessor.ownerPublicKey.fill(0)
+            predecessor.stateHash.fill(0)
+        }
     }
 
     private fun validateSuccessorSigners(
@@ -230,7 +324,7 @@ internal object LegacyOwnerKeyRotation {
 
     private fun invalidIdentityState(): Nothing = throw WalletInvalidIdentityStateException()
 
-    private data class LegacyPredecessor(
+    internal data class LegacyPredecessor(
         val ownerName: ByteArray,
         val ownerPublicKey: ByteArray,
         val sequence: BigInteger,
