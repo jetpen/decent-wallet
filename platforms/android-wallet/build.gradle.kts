@@ -7,6 +7,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val registryTestPeer = providers.environmentVariable("DECENT_REGISTRY_TEST_PEER").orElse("")
+val registryTestReadbackPeer = providers.environmentVariable("DECENT_REGISTRY_TEST_READBACK_PEER").orElse("")
+
 android {
     namespace = "org.decentwallet.wallet.android"
     compileSdk = 37
@@ -15,6 +18,8 @@ android {
     defaultConfig {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunnerArguments["decentRegistryTestPeer"] = registryTestPeer.get()
+        testInstrumentationRunnerArguments["decentRegistryTestReadbackPeer"] = registryTestReadbackPeer.get()
     }
 
     sourceSets {
@@ -25,6 +30,14 @@ android {
         getByName("androidTest") {
             assets.srcDir(rootProject.file("tests/vectors"))
             assets.srcDir(rootProject.file("tests/fixtures"))
+        }
+    }
+
+    packaging {
+        resources {
+            excludes += "META-INF/INDEX.LIST"
+            merges += "META-INF/io.netty.versions.properties"
+            pickFirsts += "META-INF/LICENSE.md"
         }
     }
 
@@ -51,10 +64,13 @@ tasks.withType<KotlinCompile>().configureEach {
 }
 
 tasks.withType<Test>().configureEach {
-    systemProperty(
-        "decent.registry.test.peer",
-        providers.environmentVariable("DECENT_REGISTRY_TEST_PEER").orElse("").get(),
-    )
+    systemProperty("decent.registry.test.peer", registryTestPeer.get())
+    systemProperty("decent.registry.test.readback.peer", registryTestReadbackPeer.get())
+}
+
+tasks.matching { it.name == "connectedDebugAndroidTest" }.configureEach {
+    inputs.property("decentRegistryTestPeer", registryTestPeer)
+    inputs.property("decentRegistryTestReadbackPeer", registryTestReadbackPeer)
 }
 
 dependencies {

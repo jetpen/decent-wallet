@@ -11,6 +11,28 @@ class AndroidRegistryDhtConfig(
 ) {
     val registryEnvironment: String = registryEnvironment
     val registryPeers: List<String> = registryPeers.toList()
+    private var configuredReadbackPeer: String? = null
+    val readbackPeer: String?
+        get() = configuredReadbackPeer
+
+    constructor(
+        registryEnvironment: String,
+        registryPeers: List<String>,
+        enableOwnerKeyRotation: Boolean = false,
+        requestTimeoutMillis: Long = DEFAULT_REQUEST_TIMEOUT_MILLIS,
+        readbackPeer: String?,
+    ) : this(registryEnvironment, registryPeers, enableOwnerKeyRotation, requestTimeoutMillis) {
+        readbackPeer?.let { peer ->
+            require(peer.isNotBlank() && peer.startsWith("/") && pinnedPeerId(peer) != null) {
+                "readback peer must be a complete pinned /p2p/<peer-id> multiaddr"
+            }
+            val readbackPeerId = pinnedPeerId(peer)
+            require(this.registryPeers.none { pinnedPeerId(it) == readbackPeerId }) {
+                "readback peer must have a distinct peer ID from Registry peers"
+            }
+        }
+        configuredReadbackPeer = readbackPeer
+    }
 
     init {
         require(registryEnvironment.isNotBlank() && registryEnvironment.length <= 256) {
@@ -33,11 +55,20 @@ class AndroidRegistryDhtConfig(
     internal val primaryPeer: String
         get() = registryPeers.first()
 
+    internal val historyPeers: List<String>
+        get() = registryPeers + listOfNotNull(readbackPeer)
+
     internal companion object {
         const val DEFAULT_REQUEST_TIMEOUT_MILLIS = 10_000L
         const val MIN_REQUEST_TIMEOUT_MILLIS = 1_000L
         const val MAX_REQUEST_TIMEOUT_MILLIS = 60_000L
         const val MAX_REGISTRY_PEERS = 16
+
+        private fun pinnedPeerId(peer: String): String? {
+            val marker = peer.lastIndexOf("/p2p/")
+            if (marker < 0) return null
+            return peer.substring(marker + 5).substringBefore('/').takeIf { it.isNotBlank() }
+        }
     }
 }
 
@@ -54,7 +85,7 @@ class AndroidDirectDhtIdentityTransport internal constructor(
 ) : AndroidIdentityTransport, AutoCloseable {
     constructor(config: AndroidRegistryDhtConfig) : this(
         config,
-        JvmLibp2pKadDhtRpcClient(config.requestTimeoutMillis, config.registryPeers),
+        JvmLibp2pKadDhtRpcClient(config.requestTimeoutMillis, config.historyPeers),
         { System.currentTimeMillis() / 1_000 },
     )
 
@@ -64,11 +95,14 @@ class AndroidDirectDhtIdentityTransport internal constructor(
     override val supportsOwnerKeyRotation: Boolean
         get() = config.enableOwnerKeyRotation
 
-    override fun getIdentityEnvelope(ownerNameBytes: ByteArray): ByteArray? {
+    override fun getIdentityEnvelope(ownerNameBytes: ByteArray): ByteArray? =
+        readIdentityEnvelopeFromPeer(ownerNameBytes, config.primaryPeer)
+
+    private fun readIdentityEnvelopeFromPeer(ownerNameBytes: ByteArray, peer: String): ByteArray? {
         val ownerName = ownerNameBytes.copyOf()
         val key = AndroidRegistryDhtKey.identity(ownerName)
         return try {
-            dhtClient.getValue(config.primaryPeer, key)?.copyOf()
+            dhtClient.getValue(peer, key)?.copyOf()
         } catch (failure: Exception) {
             throw WalletIdentityTransportException(failure)
         } finally {
@@ -83,7 +117,7 @@ class AndroidDirectDhtIdentityTransport internal constructor(
         val key = AndroidRegistryDhtKey.history(ownerName, hash)
         var lastFailure: Exception? = null
         try {
-            for (peer in config.registryPeers) {
+            for (peer in config.historyPeers) {
                 try {
                     val value = dhtClient.getValue(peer, key)
                     if (value != null) return value.copyOf()
@@ -103,7 +137,11 @@ class AndroidDirectDhtIdentityTransport internal constructor(
 
     override fun getRemoteIdentityEnvelope(ownerNameBytes: ByteArray): ByteArray? {
         // This path never consults a local value store or a prior GET/PUT response.
-        return getIdentityEnvelope(ownerNameBytes)
+        // When configured, the readback peer must have a distinct pinned peer ID.
+        return readIdentityEnvelopeFromPeer(
+            ownerNameBytes,
+            config.readbackPeer ?: config.primaryPeer,
+        )
     }
 
     override fun putIdentityEnvelopeIfCurrent(
@@ -165,13 +203,24 @@ class AndroidDirectDhtIdentityTransport internal constructor(
             if (expiresAt <= epochSeconds()) throw AndroidIdentityWriteExpiredException()
             val key = AndroidRegistryDhtKey.identity(ownerName)
             try {
-                // After this call begins, every non-typed failure is ambiguous. Never retry here.
-                val acknowledged = try {
-                    dhtClient.putValue(config.primaryPeer, key, candidateEnvelope)
-                } catch (failure: Exception) {
-                    throw WalletIdentityTransportException(failure)
+                // Send standard PUT_VALUE once to each explicitly configured peer. A distinct
+                // readback peer is also a write target so it can independently serve confirmation.
+                var dispatchStarted = false
+                var acknowledgedByAnyPeer = false
+                for (peer in config.historyPeers) {
+                    if (expiresAt <= epochSeconds()) {
+                        if (dispatchStarted) throw WalletIdentityTransportException()
+                        throw AndroidIdentityWriteExpiredException()
+                    }
+                    dispatchStarted = true
+                    // A transport exception or mismatched-key response after dispatch is
+                    // ambiguous. Stop fanout rather than sending the candidate elsewhere without
+                    // knowing whether this peer accepted it; the caller must resolve via read-back.
+                    val acknowledged = dhtClient.putValue(peer, key, candidateEnvelope)
+                    if (!acknowledged) throw WalletIdentityTransportException()
+                    acknowledgedByAnyPeer = true
                 }
-                if (!acknowledged) throw WalletIdentityTransportException()
+                if (!acknowledgedByAnyPeer) throw WalletIdentityTransportException()
             } finally {
                 key.fill(0)
             }

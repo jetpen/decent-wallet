@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -42,6 +43,121 @@ class AndroidDirectDhtIdentityTransportTest {
     }
 
     @Test
+    fun independentlyConfiguredReadbackPeerIsUsedOnlyForRemoteRead() {
+        val ownerName = fixtureHex("owner_name_utf8_hex")
+        val predecessor = fixtureHex("predecessor_envelope_cbor_hex")
+        val candidate = fixtureHex("candidate_envelope_cbor_hex")
+        val identityKey = AndroidRegistryDhtKey.identity(ownerName)
+        val client = FakeKadDhtClient()
+        client.records[peerOne to identityKey.toHexForTest()] = predecessor.copyOf()
+        client.records[peerTwo to identityKey.toHexForTest()] = candidate.copyOf()
+        val transport = AndroidDirectDhtIdentityTransport(
+            AndroidRegistryDhtConfig(
+                registryEnvironment = "testnet",
+                registryPeers = listOf(peerOne),
+                readbackPeer = peerTwo,
+                enableOwnerKeyRotation = true,
+            ),
+            client,
+            { 1_000 },
+        )
+        try {
+            assertArrayEquals(predecessor, transport.getIdentityEnvelope(ownerName))
+            assertArrayEquals(candidate, transport.getRemoteIdentityEnvelope(ownerName))
+            assertEquals(listOf(peerOne, peerTwo), client.getCalls.map { it.first })
+            assertEquals(
+                listOf(identityKey.toHexForTest(), identityKey.toHexForTest()),
+                client.getCalls.map { it.second.toHexForTest() },
+            )
+            assertTrue(client.putCalls.isEmpty())
+        } finally {
+            transport.close()
+            ownerName.fill(0)
+            predecessor.fill(0)
+            candidate.fill(0)
+            identityKey.fill(0)
+        }
+    }
+
+    @Test
+    fun readbackPeerIsAppendedAfterExistingPositionalConfigArguments() {
+        val config = AndroidRegistryDhtConfig("testnet", listOf(peerOne), true, 15_000)
+        assertTrue(config.enableOwnerKeyRotation)
+        assertEquals(15_000, config.requestTimeoutMillis)
+        assertNull(config.readbackPeer)
+    }
+
+    @Test
+    fun previousJvmConstructorDescriptorsRemainAvailable() {
+        val configClass = AndroidRegistryDhtConfig::class.java
+        val previousParameters = arrayOf(
+            String::class.java,
+            List::class.java,
+            Boolean::class.javaPrimitiveType!!,
+            Long::class.javaPrimitiveType!!,
+        )
+        configClass.getConstructor(*previousParameters)
+        configClass.getDeclaredConstructor(
+            *previousParameters,
+            Int::class.javaPrimitiveType!!,
+            Class.forName("kotlin.jvm.internal.DefaultConstructorMarker"),
+        )
+    }
+
+    @Test
+    fun readbackPeerMustHaveADistinctPinnedPeerId() {
+        val samePeerDifferentAddress = peerOne.replace("/tcp/4001/", "/tcp/4003/")
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidRegistryDhtConfig(
+                registryEnvironment = "testnet",
+                registryPeers = listOf(peerOne),
+                readbackPeer = samePeerDifferentAddress,
+                enableOwnerKeyRotation = true,
+            )
+        }
+    }
+
+    @Test
+    fun conditionalPublicationIncludesIndependentReadbackPeerInWriteFanout() {
+        val ownerName = fixtureHex("owner_name_utf8_hex")
+        val predecessor = fixtureHex("predecessor_envelope_cbor_hex")
+        val candidate = fixtureHex("candidate_envelope_cbor_hex")
+        val expectedHash = fixtureHex("predecessor_state_hash_hex")
+        val client = FakeKadDhtClient()
+        val identityKey = AndroidRegistryDhtKey.identity(ownerName)
+        client.records[peerOne to identityKey.toHexForTest()] = predecessor.copyOf()
+        addHistory(client, ownerName)
+        val transport = AndroidDirectDhtIdentityTransport(
+            AndroidRegistryDhtConfig(
+                registryEnvironment = "testnet",
+                registryPeers = listOf(peerOne),
+                readbackPeer = peerTwo,
+                enableOwnerKeyRotation = true,
+            ),
+            client,
+            { 1_000 },
+        )
+        try {
+            transport.putIdentityEnvelopeIfCurrent(
+                ownerNameBytes = ownerName,
+                envelopeBytes = candidate,
+                expectedStateHash = expectedHash,
+                expiresAt = 2_000,
+            )
+            assertEquals(listOf(peerOne, peerTwo), client.putCalls.map { it.first })
+            assertArrayEquals(candidate, client.records[peerOne to identityKey.toHexForTest()])
+            assertArrayEquals(candidate, client.records[peerTwo to identityKey.toHexForTest()])
+        } finally {
+            transport.close()
+            ownerName.fill(0)
+            predecessor.fill(0)
+            candidate.fill(0)
+            expectedHash.fill(0)
+            identityKey.fill(0)
+        }
+    }
+
+    @Test
     fun historyLookupUsesRawOwnerAndStateHashesAndTriesConfiguredPeers() {
         val ownerName = fixtureHex("owner_name_utf8_hex")
         val stateHash = fixtureHex("genesis_state_hash_hex")
@@ -49,7 +165,16 @@ class AndroidDirectDhtIdentityTransportTest {
         val client = FakeKadDhtClient()
         val key = AndroidRegistryDhtKey.history(ownerName, stateHash)
         client.records[peerTwo to key.toHexForTest()] = genesis.copyOf()
-        val transport = transport(client)
+        val transport = AndroidDirectDhtIdentityTransport(
+            AndroidRegistryDhtConfig(
+                registryEnvironment = "testnet",
+                registryPeers = listOf(peerOne),
+                readbackPeer = peerTwo,
+                enableOwnerKeyRotation = true,
+            ),
+            client,
+            { 1_000 },
+        )
         try {
             assertArrayEquals(genesis, transport.getIdentityEnvelopeByHash(ownerName, stateHash))
             assertEquals(listOf(peerOne, peerTwo), client.getCalls.map { it.first })
@@ -158,6 +283,145 @@ class AndroidDirectDhtIdentityTransportTest {
     }
 
     @Test
+    fun expiryAfterFirstPeerDispatchIsAmbiguousAndStopsFanout() {
+        val ownerName = fixtureHex("owner_name_utf8_hex")
+        val predecessor = fixtureHex("predecessor_envelope_cbor_hex")
+        val candidate = fixtureHex("candidate_envelope_cbor_hex")
+        val expectedHash = fixtureHex("predecessor_state_hash_hex")
+        val identityKey = AndroidRegistryDhtKey.identity(ownerName)
+        var now = 1_000L
+        val client = FakeKadDhtClient().apply {
+            records[peerOne to identityKey.toHexForTest()] = predecessor.copyOf()
+            afterPut = { now = 2_000L }
+        }
+        addHistory(client, ownerName)
+        val transport = AndroidDirectDhtIdentityTransport(
+            AndroidRegistryDhtConfig(
+                registryEnvironment = "testnet",
+                registryPeers = listOf(peerOne),
+                readbackPeer = peerTwo,
+                enableOwnerKeyRotation = true,
+            ),
+            client,
+            { now },
+        )
+        try {
+            assertThrows(WalletIdentityTransportException::class.java) {
+                transport.putIdentityEnvelopeIfCurrent(
+                    ownerNameBytes = ownerName,
+                    envelopeBytes = candidate,
+                    expectedStateHash = expectedHash,
+                    expiresAt = 1_500,
+                )
+            }
+            assertEquals(listOf(peerOne), client.putCalls.map { it.first })
+            assertArrayEquals(candidate, client.records[peerOne to identityKey.toHexForTest()])
+            assertNull(client.records[peerTwo to identityKey.toHexForTest()])
+        } finally {
+            transport.close()
+            ownerName.fill(0)
+            predecessor.fill(0)
+            candidate.fill(0)
+            expectedHash.fill(0)
+            identityKey.fill(0)
+        }
+    }
+
+    @Test
+    fun mismatchedPutResponseStopsFanoutAsAmbiguous() {
+        val ownerName = fixtureHex("owner_name_utf8_hex")
+        val predecessor = fixtureHex("predecessor_envelope_cbor_hex")
+        val candidate = fixtureHex("candidate_envelope_cbor_hex")
+        val expectedHash = fixtureHex("predecessor_state_hash_hex")
+        val identityKey = AndroidRegistryDhtKey.identity(ownerName)
+        val client = FakeKadDhtClient().apply {
+            records[peerOne to identityKey.toHexForTest()] = predecessor.copyOf()
+            putResults[peerOne] = false
+        }
+        addHistory(client, ownerName)
+        val transport = AndroidDirectDhtIdentityTransport(
+            AndroidRegistryDhtConfig(
+                registryEnvironment = "testnet",
+                registryPeers = listOf(peerOne),
+                readbackPeer = peerTwo,
+                enableOwnerKeyRotation = true,
+            ),
+            client,
+            { 1_000 },
+        )
+        try {
+            assertThrows(WalletIdentityTransportException::class.java) {
+                transport.putIdentityEnvelopeIfCurrent(
+                    ownerNameBytes = ownerName,
+                    envelopeBytes = candidate,
+                    expectedStateHash = expectedHash,
+                    expiresAt = 2_000,
+                )
+            }
+            assertEquals(listOf(peerOne), client.putCalls.map { it.first })
+            assertArrayEquals(candidate, client.records[peerOne to identityKey.toHexForTest()])
+            assertNull(client.records[peerTwo to identityKey.toHexForTest()])
+        } finally {
+            transport.close()
+            ownerName.fill(0)
+            predecessor.fill(0)
+            candidate.fill(0)
+            expectedHash.fill(0)
+            identityKey.fill(0)
+        }
+    }
+
+    @Test
+    fun ambiguousPutStopsFanoutAfterFirstPeer() {
+        val ownerName = fixtureHex("owner_name_utf8_hex")
+        val predecessor = fixtureHex("predecessor_envelope_cbor_hex")
+        val candidate = fixtureHex("candidate_envelope_cbor_hex")
+        val expectedHash = fixtureHex("predecessor_state_hash_hex")
+        val identityKey = AndroidRegistryDhtKey.identity(ownerName)
+        var firstDispatch = true
+        val client = FakeKadDhtClient().apply {
+            records[peerOne to identityKey.toHexForTest()] = predecessor.copyOf()
+            afterPut = {
+                if (firstDispatch) {
+                    firstDispatch = false
+                    throw IOException("synthetic lost acknowledgement")
+                }
+            }
+        }
+        addHistory(client, ownerName)
+        val transport = AndroidDirectDhtIdentityTransport(
+            AndroidRegistryDhtConfig(
+                registryEnvironment = "testnet",
+                registryPeers = listOf(peerOne),
+                readbackPeer = peerTwo,
+                enableOwnerKeyRotation = true,
+            ),
+            client,
+            { 1_000 },
+        )
+        try {
+            assertThrows(WalletIdentityTransportException::class.java) {
+                transport.putIdentityEnvelopeIfCurrent(
+                    ownerNameBytes = ownerName,
+                    envelopeBytes = candidate,
+                    expectedStateHash = expectedHash,
+                    expiresAt = 2_000,
+                )
+            }
+            assertEquals(listOf(peerOne), client.putCalls.map { it.first })
+            assertArrayEquals(candidate, client.records[peerOne to identityKey.toHexForTest()])
+            assertNull(client.records[peerTwo to identityKey.toHexForTest()])
+        } finally {
+            transport.close()
+            ownerName.fill(0)
+            predecessor.fill(0)
+            candidate.fill(0)
+            expectedHash.fill(0)
+            identityKey.fill(0)
+        }
+    }
+
+    @Test
     fun validCandidatePublishesExactBytesAndFreshReadSeesPeerValue() {
         val ownerName = fixtureHex("owner_name_utf8_hex")
         val predecessor = fixtureHex("predecessor_envelope_cbor_hex")
@@ -174,9 +438,8 @@ class AndroidDirectDhtIdentityTransportTest {
                 expectedStateHash = expectedHash,
                 expiresAt = 2_000,
             )
-            assertEquals(1, client.putCalls.size)
-            assertEquals(peerOne, client.putCalls.single().first)
-            assertArrayEquals(candidate, client.putCalls.single().third)
+            assertEquals(listOf(peerOne, peerTwo), client.putCalls.map { it.first })
+            assertTrue(client.putCalls.all { it.third.contentEquals(candidate) })
             assertArrayEquals(candidate, transport.getRemoteIdentityEnvelope(ownerName))
         } finally {
             transport.close()
@@ -244,6 +507,8 @@ class AndroidDirectDhtIdentityTransportTest {
         val failures = mutableMapOf<String, Exception>()
         val getCalls = mutableListOf<Pair<String, ByteArray>>()
         val putCalls = mutableListOf<Triple<String, ByteArray, ByteArray>>()
+        val putResults = mutableMapOf<String, Boolean>()
+        var afterPut: (() -> Unit)? = null
 
         override fun getValue(peerMultiaddr: String, key: ByteArray): ByteArray? {
             getCalls += peerMultiaddr to key.copyOf()
@@ -254,7 +519,8 @@ class AndroidDirectDhtIdentityTransportTest {
         override fun putValue(peerMultiaddr: String, key: ByteArray, value: ByteArray): Boolean {
             putCalls += Triple(peerMultiaddr, key.copyOf(), value.copyOf())
             records[peerMultiaddr to key.toHexForTest()] = value.copyOf()
-            return true
+            afterPut?.invoke()
+            return putResults[peerMultiaddr] ?: true
         }
 
         override fun close() = Unit
