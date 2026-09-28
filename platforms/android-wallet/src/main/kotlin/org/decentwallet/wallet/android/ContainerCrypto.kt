@@ -105,6 +105,59 @@ internal object ContainerCrypto {
         }
     }
 
+    fun resealPayload(raw: ByteArray, dek: ByteArray, payload: Map<String, Any?>): ByteArray {
+        if (dek.size != KEY_BYTES) invalidContainer()
+        val envelope = parseEnvelope(raw, CURRENT_VERSION)
+        var typedPayload: ByteArray? = null
+        var payloadNonce: ByteArray? = null
+        var payloadAad: ByteArray? = null
+        var payloadCiphertext: ByteArray? = null
+        var payloadTag: ByteArray? = null
+        try {
+            val encodedPayload = WalletJson.encodePayload(payload)
+            typedPayload = encodedPayload
+            val freshNonce = randomBytes(NONCE_BYTES)
+            payloadNonce = freshNonce
+            val nonceText = WalletJson.encodeBase64(freshNonce)
+            val aad = WalletJson.canonicalBytes(
+                mapOf(
+                    "format" to FORMAT,
+                    "version" to BigInteger.valueOf(CURRENT_VERSION.toLong()),
+                    "payload" to mapOf("algorithm" to "xchacha20-poly1305", "nonce" to nonceText),
+                ),
+            )
+            payloadAad = aad
+            val sealed = encrypt(dek, freshNonce, aad, encodedPayload)
+            val ciphertext = sealed.first
+            val tag = sealed.second
+            payloadCiphertext = ciphertext
+            payloadTag = tag
+            val updatedEnvelope = envelope.toMutableMap()
+            updatedEnvelope["payload"] = mapOf(
+                "algorithm" to "xchacha20-poly1305",
+                "nonce" to nonceText,
+                "ciphertext" to WalletJson.encodeBase64(ciphertext),
+                "tag" to WalletJson.encodeBase64(tag),
+            )
+            val bytes = WalletJson.canonicalBytes(updatedEnvelope)
+            if (bytes.size > MAX_CONTAINER_BYTES) {
+                bytes.fill(0)
+                invalidContainer()
+            }
+            return bytes
+        } catch (failure: WalletContainerException) {
+            throw failure
+        } catch (_: Exception) {
+            throw WalletStorageException()
+        } finally {
+            typedPayload?.fill(0)
+            payloadNonce?.fill(0)
+            payloadAad?.fill(0)
+            payloadCiphertext?.fill(0)
+            payloadTag?.fill(0)
+        }
+    }
+
     fun migrate(password: String, v1Bytes: ByteArray): CreatedContainer {
         val opened = open(v1Bytes, password, LEGACY_VERSION)
         val envelope = objectValue(WalletJson.parse(v1Bytes, MAX_CONTAINER_BYTES))
