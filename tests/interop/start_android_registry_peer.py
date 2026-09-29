@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -36,6 +37,11 @@ def parse_args() -> argparse.Namespace:
         "--seed-candidate",
         action="store_true",
         help="also publish the shared versioned rotation candidate before reporting READY",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        help="use this empty directory for separate writer.lmdb and readback.lmdb files",
     )
     return parser.parse_args()
 
@@ -73,7 +79,16 @@ async def main() -> None:
     scratch = Path(os.environ.get("TMPDIR", Path.home() / ".cache" / "decent-wallet"))
     scratch.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="android-registry-mesh-", dir=scratch) as root:
+    if args.data_dir is None:
+        root_context = tempfile.TemporaryDirectory(prefix="android-registry-mesh-", dir=scratch)
+    else:
+        root_path = args.data_dir.expanduser().resolve()
+        root_path.mkdir(parents=True, exist_ok=True)
+        if any(root_path.iterdir()):
+            raise RuntimeError("--data-dir must be empty")
+        root_context = nullcontext(str(root_path))
+
+    with root_context as root:
         root_path = Path(root)
         async with Libp2pKadDHT(
             listen="/ip4/127.0.0.1/tcp/0",
