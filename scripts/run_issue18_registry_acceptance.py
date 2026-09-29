@@ -28,6 +28,10 @@ from typing import NoReturn
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_REPO_DEFAULT = ROOT.parent / "decent-registry"
 FIXTURE_SCRIPT = ROOT / "tests" / "interop" / "start_android_registry_peer.py"
+PODMAN_FIXTURE_SCRIPT = ROOT / "tests" / "interop" / "start_podman_registry_peers.py"
+PODMAN_DESKTOP_TEST = ROOT / "tests" / "test_issue18_podman_registry_deployment.py"
+PODMAN_DESKTOP_TEST_NAME = "test_podman_writer_publication_remains_peer_scoped"
+PODMAN_DESKTOP_TEST_CLASS = "tests.test_issue18_podman_registry_deployment"
 ROTATION_TEST_NAME = "rotatesWalletThroughDirectDhtAndPersistsPromotionOnAndroid"
 ROTATION_TEST_CLASS = "org.decentwallet.wallet.android.AndroidDirectDhtRegistryRuntimeTest"
 JVM_INTEROP_TEST_NAME = "readsHistoryPublishesAndFreshReadsAgainstPythonRegistryPeer"
@@ -57,6 +61,48 @@ APPROVED_ANDROID_TARGETS = {
     },
 }
 ANDROID_QUEUE_MAXSIZE = 4
+FIXTURE_STARTUP_TIMEOUT_SECONDS = 90.0
+PODMAN_FIXTURE_STARTUP_TIMEOUT_SECONDS = 540.0
+FIXTURE_ERROR_PREFIX = "FIXTURE_ERROR\t"
+SAFE_FIXTURE_ERRORS = {
+    "Podman executable was not found",
+    "the Registry fixture requires rootless Podman",
+    "data directory must be a real, empty directory",
+    "data directory must be empty",
+    "could not prepare the empty data directory",
+    "Registry peer did not report a valid peer address",
+    "Registry peer container exited during startup",
+    "Registry peer did not become ready before the startup deadline",
+    "could not determine the writer peer's internal address",
+    "could not load the synthetic legacy Registry vector",
+    "could not seed or confirm the synthetic Registry record",
+    "Registry peer bootstrap failed",
+    "Registry peer publication failed",
+    "Registry peer readback bootstrap failed",
+    "Registry peer readback failed",
+    "Registry peer did not confirm the synthetic legacy record",
+    "Registry peer did not return the synthetic record",
+    "Registry peer did not have the expected synthetic record",
+    "synthetic Registry Owner Name must be valid hex",
+    "Registry peer seed timed out",
+    "Registry peers did not receive distinct peer identities",
+    "Podman command exceeded its time limit",
+    "Podman command could not be started",
+    "Podman could not prepare the Registry peer fixture",
+    "could not fully tear down Podman Registry resources",
+}
+READINESS_DIAGNOSTIC = re.compile(
+    r"Registry peer readiness failed \(bootstrap_records=[0-9]{1,2}, "
+    r"address_error=(?:bootstrap_count|bootstrap_prefix|bootstrap_format|bootstrap_suffix|address_value|container_port|peer_id|logs_unavailable|none), "
+    r"tcp_ready=(?:true|false)\)"
+)
+SEED_ERROR_DIAGNOSTIC = re.compile(
+    r"(?:Registry peer (?:bootstrap|publication|readback bootstrap|readback) failed|"
+    r"Registry (?:peer seed|readback confirmation) failed|"
+    r"could not seed or confirm the synthetic Registry record) "
+    r"\(error=[A-Za-z][A-Za-z0-9]{0,39}"
+    r"(?:; detail=[A-Za-z0-9 _\[\]().,:;?-]{1,200})?\)"
+)
 
 
 class HarnessError(RuntimeError):
@@ -68,6 +114,16 @@ class RegistryPeerAddress:
     multiaddr: str
     port: int
     peer_id: str
+
+
+def safe_fixture_error_message(message: str) -> str:
+    if (
+        message in SAFE_FIXTURE_ERRORS
+        or READINESS_DIAGNOSTIC.fullmatch(message)
+        or SEED_ERROR_DIAGNOSTIC.fullmatch(message)
+    ):
+        return message
+    return "Registry peer fixture failed"
 
 
 def parse_peer_multiaddr(value: str) -> RegistryPeerAddress:
@@ -362,12 +418,86 @@ def ensure_distinct_lmdb_stores(writer_path: Path, readback_path: Path) -> None:
         raise HarnessError("Registry peers must use separate LMDB files")
 
 
-class RegistryPeerFixture:
-    """Start the real Python Registry two-peer fixture and always tear it down."""
+def fixture_startup_timeout(peer_backend: str, override: float | None) -> float:
+    if override is not None:
+        return override
+    if peer_backend == "process":
+        return FIXTURE_STARTUP_TIMEOUT_SECONDS
+    if peer_backend == "podman":
+        return PODMAN_FIXTURE_STARTUP_TIMEOUT_SECONDS
+    raise HarnessError(f"unsupported Registry peer backend: {peer_backend}")
 
-    def __init__(self, registry_repo: Path, timeout_seconds: float = 90.0):
+
+def registry_python_executable(uv: str, registry_repo: Path) -> str:
+    project = registry_repo.expanduser().resolve()
+    try:
+        result = subprocess.run(
+            [
+                uv,
+                "run",
+                "--locked",
+                "--project",
+                str(project),
+                "--extra",
+                "dev",
+                "python",
+                "-c",
+                "import sys; print(sys.executable)",
+            ],
+            cwd=project,
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise HarnessError("could not resolve the locked Registry Python environment") from None
+    executable = result.stdout.strip()
+    if result.returncode != 0 or not executable or "\n" in executable:
+        raise HarnessError("could not resolve the locked Registry Python environment")
+    path = Path(executable)
+    if not path.is_absolute() or not path.is_file():
+        raise HarnessError("locked Registry project returned an invalid Python executable")
+    return str(path)
+
+
+def registry_store_paths(data_root: Path, peer_backend: str) -> tuple[Path, Path]:
+    if peer_backend == "process":
+        return data_root / "writer.lmdb", data_root / "readback.lmdb"
+    if peer_backend == "podman":
+        return (
+            data_root / "writer" / "writer.lmdb",
+            data_root / "readback" / "readback.lmdb",
+        )
+    raise HarnessError(f"unsupported Registry peer backend: {peer_backend}")
+
+
+def validate_peer_backend_mode(*, peer_backend: str, desktop_only: bool) -> None:
+    if peer_backend == "podman" and not desktop_only:
+        raise HarnessError(
+            "Podman is currently a desktop-only diagnostic; JVM/device acceptance "
+            "requires a deployment that delivers the candidate to a distinct read-back peer"
+        )
+
+
+class RegistryPeerFixture:
+    """Start a managed two-peer Registry fixture and always tear it down."""
+
+    def __init__(
+        self,
+        registry_repo: Path,
+        timeout_seconds: float | None = None,
+        *,
+        peer_backend: str = "process",
+    ):
+        if peer_backend not in {"process", "podman"}:
+            raise HarnessError(f"unsupported Registry peer backend: {peer_backend}")
         self.registry_repo = registry_repo.resolve()
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = fixture_startup_timeout(peer_backend, timeout_seconds)
+        self.peer_backend = peer_backend
+        self.fixture_script = (
+            FIXTURE_SCRIPT if peer_backend == "process" else PODMAN_FIXTURE_SCRIPT
+        )
         self.process: subprocess.Popen[str] | None = None
         self._lines: list[str] = []
         self._messages: queue.Queue[str | None] = queue.Queue(maxsize=ANDROID_QUEUE_MAXSIZE)
@@ -375,6 +505,7 @@ class RegistryPeerFixture:
         self._scratch: tempfile.TemporaryDirectory[str] | None = None
         self._data_root: Path | None = None
         self._ready = threading.Event()
+        self._stop_signal_sent = False
         self.writer: RegistryPeerAddress | None = None
         self.readback: RegistryPeerAddress | None = None
         self.writer_store: Path | None = None
@@ -383,11 +514,12 @@ class RegistryPeerFixture:
     def __enter__(self) -> RegistryPeerFixture:
         if not self.registry_repo.is_dir():
             raise HarnessError(f"decent-registry checkout not found: {self.registry_repo}")
-        if not FIXTURE_SCRIPT.is_file():
-            raise HarnessError(f"Registry fixture script not found: {FIXTURE_SCRIPT}")
+        if not self.fixture_script.is_file():
+            raise HarnessError(f"Registry fixture script not found: {self.fixture_script}")
         uv = shutil.which("uv")
         if uv is None:
             raise HarnessError("uv is required to start the locked decent-registry fixture")
+        fixture_python = registry_python_executable(uv, self.registry_repo)
 
         scratch_root = Path(os.environ.get("TMPDIR", Path.home() / ".cache" / "decent-wallet"))
         scratch_root.mkdir(parents=True, exist_ok=True)
@@ -396,21 +528,13 @@ class RegistryPeerFixture:
         self._data_root.mkdir()
         env = os.environ.copy()
         env["TMPDIR"] = self._scratch.name
-        command = [
-            uv,
-            "run",
-            "--locked",
-            "--project",
-            str(self.registry_repo),
-            "--extra",
-            "dev",
-            "python",
-            str(FIXTURE_SCRIPT),
-            "--advertise-host",
-            "127.0.0.1",
-            "--data-dir",
-            str(self._data_root),
-        ]
+        command = [fixture_python, str(self.fixture_script)]
+        if self.peer_backend == "process":
+            command.extend(
+                ["--advertise-host", "127.0.0.1", "--data-dir", str(self._data_root)]
+            )
+        else:
+            command.extend(["--data-dir", str(self._data_root), "--wallet-repo", str(ROOT)])
         print(f"Starting temporary Registry peers: {' '.join(command)}", flush=True)
         try:
             self.process = subprocess.Popen(
@@ -436,6 +560,10 @@ class RegistryPeerFixture:
                     continue
                 if line is None:
                     raise HarnessError(self._fixture_exited_message())
+                if line.startswith(FIXTURE_ERROR_PREFIX):
+                    self._lines.append("FIXTURE_ERROR")
+                    detail = safe_fixture_error_message(line.split("\t", 1)[1].strip())
+                    raise HarnessError(f"Registry fixture failed: {detail}")
                 if not line.startswith(("READY_WRITE\t", "READY_READBACK\t")):
                     continue
                 self._lines.append(line)
@@ -446,15 +574,12 @@ class RegistryPeerFixture:
                     for entry in self._lines
                 ) == 2:
                     self.writer, self.readback = parse_ready_lines(self._lines)
-                    self.writer_store = self._data_root / "writer.lmdb"
-                    self.readback_store = self._data_root / "readback.lmdb"
+                    self.writer_store, self.readback_store = registry_store_paths(
+                        self._data_root, self.peer_backend
+                    )
                     ensure_distinct_lmdb_stores(self.writer_store, self.readback_store)
                     self._ready.set()
-                    print(
-                        f"Managed peers ready: writer={self.writer.peer_id}, "
-                        f"readback={self.readback.peer_id}; separate LMDB files verified.",
-                        flush=True,
-                    )
+                    print("Managed writer/read-back peers ready; separate LMDB files verified.", flush=True)
                     return self
             tags = [line.split("\t", 1)[0] for line in self._lines]
             raise HarnessError(
@@ -469,7 +594,9 @@ class RegistryPeerFixture:
         assert self.process is not None and self.process.stdout is not None
         try:
             for line in self.process.stdout:
-                if self._ready.is_set() or not line.startswith(("READY_WRITE\t", "READY_READBACK\t")):
+                if self._ready.is_set() or not line.startswith(
+                    ("READY_WRITE\t", "READY_READBACK\t", FIXTURE_ERROR_PREFIX)
+                ):
                     continue
                 try:
                     self._messages.put_nowait(line)
@@ -489,12 +616,14 @@ class RegistryPeerFixture:
     def stop(self) -> None:
         process = self.process
         if process is not None and process.poll() is None:
+            self._stop_signal_sent = True
             try:
                 os.killpg(process.pid, signal.SIGINT)
             except (ProcessLookupError, PermissionError):
                 process.send_signal(signal.SIGINT)
+            stop_timeout = 45 if self.peer_backend == "podman" else 15
             try:
-                process.wait(timeout=15)
+                process.wait(timeout=stop_timeout)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
@@ -519,6 +648,12 @@ class RegistryPeerFixture:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.stop()
         if self.process is not None:
+            exit_code = self.process.poll()
+            expected_signal_exits = {-signal.SIGINT, 128 + signal.SIGINT}
+            if exit_code != 0 and not (
+                self._stop_signal_sent and exit_code in expected_signal_exits
+            ):
+                raise HarnessError(f"Registry fixture teardown failed (exit={exit_code})")
             print("Temporary Registry peers stopped and scratch LMDB data removed.", flush=True)
 
 
@@ -562,6 +697,58 @@ def run_desktop_integration() -> int:
     ]
     print("Running desktop RegistryTransport integration tests; pytest owns their peer fixtures.", flush=True)
     return run_command(command, cwd=ROOT, env=os.environ.copy(), timeout=1800)
+
+
+def run_podman_desktop_registry_diagnostic(
+    registry_repo: Path, fixture_timeout: float
+) -> int:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise HarnessError("uv is required for the Podman Registry diagnostic")
+    if not PODMAN_DESKTOP_TEST.is_file():
+        raise HarnessError("Podman Registry desktop diagnostic test is missing")
+    with RegistryPeerFixture(
+        registry_repo, timeout_seconds=fixture_timeout, peer_backend="podman"
+    ) as fixture:
+        assert fixture.writer is not None and fixture.readback is not None
+        assert fixture._scratch is not None
+        report = Path(fixture._scratch.name) / "desktop-podman-diagnostic.xml"
+        env = os.environ.copy()
+        env["DECENT_REGISTRY_ACCEPTANCE_WRITER_PEER"] = fixture.writer.multiaddr
+        env["DECENT_REGISTRY_ACCEPTANCE_READBACK_PEER"] = fixture.readback.multiaddr
+        command = [
+            uv,
+            "run",
+            "--locked",
+            "--project",
+            str(ROOT),
+            "--extra",
+            "test",
+            "--extra",
+            "registry",
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-o",
+            "addopts=",
+            f"--junitxml={report}",
+            f"{PODMAN_DESKTOP_TEST}::{PODMAN_DESKTOP_TEST_NAME}",
+        ]
+        code = run_command(command, cwd=ROOT, env=env, timeout=600)
+        if code:
+            return code
+        verify_junit_test_result(
+            [report], PODMAN_DESKTOP_TEST_CLASS, PODMAN_DESKTOP_TEST_NAME
+        )
+        print(
+            "Podman Registry diagnostic passed: writer returned the candidate and the "
+            "distinct read-back peer retained the seeded predecessor. Independent-candidate "
+            "confirmation remains blocked pending a deployment that delivers the candidate "
+            "to a distinct peer.",
+            flush=True,
+        )
+    return 0
 
 
 def android_sdk_path(env: dict[str, str], sdk_default: Path | None = None) -> Path:
@@ -629,10 +816,14 @@ def gradle_environment(
     return env
 
 
-def run_jvm_registry_interop(registry_repo: Path, fixture_timeout: float) -> int:
+def run_jvm_registry_interop(
+    registry_repo: Path, fixture_timeout: float, peer_backend: str = "process"
+) -> int:
     before_reports = report_snapshot(JVM_RESULTS)
     gradle_code: int | None = None
-    with RegistryPeerFixture(registry_repo, timeout_seconds=fixture_timeout) as fixture:
+    with RegistryPeerFixture(
+        registry_repo, timeout_seconds=fixture_timeout, peer_backend=peer_backend
+    ) as fixture:
         assert fixture.writer is not None and fixture.readback is not None
         env = gradle_environment()
         env["DECENT_REGISTRY_TEST_PEER"] = fixture.writer.multiaddr
@@ -688,7 +879,12 @@ def android_report_snapshot() -> dict[Path, tuple[int, int]]:
     return report_snapshot(ANDROID_RESULTS)
 
 
-def run_android_runtime(registry_repo: Path, requested_serial: str | None, fixture_timeout: float) -> int:
+def run_android_runtime(
+    registry_repo: Path,
+    requested_serial: str | None,
+    fixture_timeout: float,
+    peer_backend: str = "process",
+) -> int:
     adb = adb_path()
     subprocess.run([str(adb), "start-server"], cwd=ROOT, timeout=30, check=True)
     devices = subprocess.run(
@@ -717,7 +913,9 @@ def run_android_runtime(registry_repo: Path, requested_serial: str | None, fixtu
     result_summary: dict[str, int] | None = None
     cleanup_errors: list[str] = []
     try:
-        with RegistryPeerFixture(registry_repo, timeout_seconds=fixture_timeout) as fixture:
+        with RegistryPeerFixture(
+            registry_repo, timeout_seconds=fixture_timeout, peer_backend=peer_backend
+        ) as fixture:
             assert fixture.writer is not None and fixture.readback is not None
             writer_device_port, readback_device_port = select_reverse_ports(
                 adb_output(adb, serial, "reverse", "--list")
@@ -795,16 +993,28 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run desktop RegistryTransport integration and/or Android runtime acceptance. "
-            "Peer processes, LMDB scratch data, and adb reverse mappings are managed and cleaned up."
+            "The process fixture is the default; --peer-backend podman is currently a "
+            "desktop-only diagnostic on a private local network. Peers, scratch data, and "
+            "adb reverse mappings are managed and cleaned up."
         )
     )
     selection = parser.add_mutually_exclusive_group()
-    selection.add_argument("--desktop-only", action="store_true", help="run Python RegistryTransport tests only")
+    selection.add_argument(
+        "--desktop-only",
+        action="store_true",
+        help="run Python RegistryTransport tests (plus the Podman diagnostic if selected)",
+    )
     selection.add_argument("--jvm-only", action="store_true", help="run Android host-JVM interop only")
     selection.add_argument(
         "--android-only",
         action="store_true",
         help="run host-JVM interop and Android device instrumentation, skipping Python tests",
+    )
+    parser.add_argument(
+        "--peer-backend",
+        choices=("process", "podman"),
+        default="process",
+        help="local Registry peer backend (podman currently supports --desktop-only diagnostics)",
     )
     parser.add_argument("--serial", help="the sole connected emulator serial (for example emulator-5554)")
     parser.add_argument(
@@ -816,29 +1026,56 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fixture-timeout",
         type=float,
-        default=90.0,
-        help="seconds to wait for both Registry peers to become ready",
+        default=None,
+        help="seconds to wait for Registry peers (defaults: 90 for process, 540 for Podman)",
     )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.fixture_timeout <= 0:
-        fail("--fixture-timeout must be positive")
-    if args.desktop_only:
-        return run_desktop_integration()
     try:
+        validate_peer_backend_mode(
+            peer_backend=args.peer_backend,
+            desktop_only=args.desktop_only,
+        )
+    except HarnessError as exc:
+        print(f"Issue #18 Registry acceptance harness: {exc}", file=sys.stderr, flush=True)
+        return 1
+    if args.fixture_timeout is not None and args.fixture_timeout <= 0:
+        fail("--fixture-timeout must be positive")
+    fixture_timeout = fixture_startup_timeout(args.peer_backend, args.fixture_timeout)
+    try:
+        if args.desktop_only:
+            code = run_desktop_integration()
+            if code or args.peer_backend != "podman":
+                return code
+            return run_podman_desktop_registry_diagnostic(
+                args.registry_repo, fixture_timeout
+            )
         if not args.android_only and not args.jvm_only:
             code = run_desktop_integration()
             if code:
                 return code
-        code = run_jvm_registry_interop(args.registry_repo, args.fixture_timeout)
+            if args.peer_backend == "podman":
+                code = run_podman_desktop_registry_diagnostic(
+                    args.registry_repo, fixture_timeout
+                )
+                if code:
+                    return code
+        code = run_jvm_registry_interop(
+            args.registry_repo, fixture_timeout, peer_backend=args.peer_backend
+        )
         if code:
             return code
         if args.jvm_only:
             return 0
-        return run_android_runtime(args.registry_repo, args.serial, args.fixture_timeout)
+        return run_android_runtime(
+            args.registry_repo,
+            args.serial,
+            fixture_timeout,
+            peer_backend=args.peer_backend,
+        )
     except HarnessError as exc:
         print(f"Issue #18 Registry acceptance harness: {exc}", file=sys.stderr, flush=True)
         return 1
