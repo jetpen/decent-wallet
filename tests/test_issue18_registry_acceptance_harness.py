@@ -399,15 +399,26 @@ def test_is_jdk17_version_rejects_other_versions(version_output: str) -> None:
     assert not HARNESS.is_jdk17_version(version_output)
 
 
-def test_gradle_environment_sets_both_android_sdk_variables(tmp_path: Path) -> None:
+def test_gradle_environment_sets_both_android_sdk_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jdk_home = tmp_path / "jdk17"
+    monkeypatch.setattr(HARNESS, "jdk17_home", lambda _env: jdk_home)
     env = HARNESS.gradle_environment({"ANDROID_HOME": str(tmp_path)})
 
     assert env["ANDROID_HOME"] == str(tmp_path)
     assert env["ANDROID_SDK_ROOT"] == str(tmp_path)
+    assert env["JAVA_HOME"] == str(jdk_home)
+    assert env["PATH"].startswith(f"{jdk_home / 'bin'}:")
 
 
-def test_gradle_environment_finds_standard_sdk_path_when_unset(tmp_path: Path) -> None:
+def test_gradle_environment_finds_standard_sdk_path_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jdk_home = tmp_path / "jdk17"
+    monkeypatch.setattr(HARNESS, "jdk17_home", lambda _env: jdk_home)
     env = HARNESS.gradle_environment({}, sdk_default=tmp_path)
 
     assert env["ANDROID_HOME"] == str(tmp_path)
     assert env["ANDROID_SDK_ROOT"] == str(tmp_path)
+    assert env["JAVA_HOME"] == str(jdk_home)

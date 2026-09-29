@@ -18,6 +18,7 @@ RUN uv sync --locked --no-dev --extra registry --no-editable \
 FROM build AS conformance
 RUN uv sync --locked --extra test --extra registry --no-editable \
   && uv cache clean
+COPY scripts ./scripts
 COPY tests ./tests
 ENV HOME=/tmp
 WORKDIR /tmp
