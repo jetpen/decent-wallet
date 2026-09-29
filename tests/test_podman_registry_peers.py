@@ -1,10 +1,23 @@
+import importlib.util
 import json
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
-from tests.interop import podman_registry_node as node
-from tests.interop import start_podman_registry_peers as peers
+
+def _load_interop_module(module_name: str) -> ModuleType:
+    module_path = Path(__file__).parent / "interop" / f"{module_name}.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load interop module {module_name}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+node = _load_interop_module("podman_registry_node")
+peers = _load_interop_module("start_podman_registry_peers")
 
 
 WRITER_PEER_ID = "12D3KooWPSZfHTwEMA91h9NVw3ocpuNWAzKLjBEU9ofioP795EHB"
