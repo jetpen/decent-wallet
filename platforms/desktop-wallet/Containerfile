@@ -46,4 +46,8 @@ WORKDIR /tmp
 ENTRYPOINT ["/opt/venv/bin/python"]
 CMD ["-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "addopts=", "-m", "registry_integration", "/tests/test_registry_transport_integration.py"]
 
+FROM runtime AS registry-peer
+COPY tests/interop/podman_registry_node.py /opt/registry_peer_node.py
+ENTRYPOINT ["/opt/venv/bin/decent-registry"]
+
 FROM runtime AS final

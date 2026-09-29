@@ -298,6 +298,7 @@ def test_registry_fixture_stops_on_keyboard_interrupt_during_startup(
     process = FakeProcess()
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     monkeypatch.setattr(HARNESS.shutil, "which", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(HARNESS, "registry_python_executable", lambda *_args: "/usr/bin/python3")
     monkeypatch.setattr(HARNESS.subprocess, "Popen", lambda *_args, **_kwargs: process)
     monkeypatch.setattr(HARNESS.os, "killpg", lambda *_args: (_ for _ in ()).throw(ProcessLookupError()))
     monkeypatch.setattr(
@@ -422,3 +423,214 @@ def test_gradle_environment_finds_standard_sdk_path_when_unset(
     assert env["ANDROID_HOME"] == str(tmp_path)
     assert env["ANDROID_SDK_ROOT"] == str(tmp_path)
     assert env["JAVA_HOME"] == str(jdk_home)
+
+
+def test_registry_peer_fixture_defaults_to_process_backend() -> None:
+    fixture = HARNESS.RegistryPeerFixture(Path("."))
+
+    assert fixture.peer_backend == "process"
+    assert fixture.fixture_script == HARNESS.FIXTURE_SCRIPT
+
+
+def test_registry_peer_fixture_selects_podman_backend(tmp_path: Path) -> None:
+    fixture = HARNESS.RegistryPeerFixture(tmp_path, peer_backend="podman")
+
+    assert fixture.peer_backend == "podman"
+    assert fixture.fixture_script == HARNESS.PODMAN_FIXTURE_SCRIPT
+
+
+def test_registry_peer_fixture_rejects_unsupported_backend(tmp_path: Path) -> None:
+    with pytest.raises(HARNESS.HarnessError, match="peer backend"):
+        HARNESS.RegistryPeerFixture(tmp_path, peer_backend="compose")
+
+
+def test_registry_store_paths_are_separate_for_each_backend(tmp_path: Path) -> None:
+    process_paths = HARNESS.registry_store_paths(tmp_path, "process")
+    podman_paths = HARNESS.registry_store_paths(tmp_path, "podman")
+
+    assert process_paths == (tmp_path / "writer.lmdb", tmp_path / "readback.lmdb")
+    assert podman_paths == (
+        tmp_path / "writer" / "writer.lmdb",
+        tmp_path / "readback" / "readback.lmdb",
+    )
+
+
+def test_podman_peer_backend_is_limited_to_desktop_diagnostic() -> None:
+    with pytest.raises(HARNESS.HarnessError, match="desktop-only diagnostic"):
+        HARNESS.validate_peer_backend_mode(peer_backend="podman", desktop_only=False)
+
+    HARNESS.validate_peer_backend_mode(peer_backend="podman", desktop_only=True)
+    HARNESS.validate_peer_backend_mode(peer_backend="process", desktop_only=False)
+
+
+def test_parse_args_accepts_podman_peer_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        HARNESS.sys,
+        "argv",
+        ["run_issue18_registry_acceptance.py", "--jvm-only", "--peer-backend", "podman"],
+    )
+
+    args = HARNESS.parse_args()
+
+    assert args.peer_backend == "podman"
+
+
+def test_fixture_error_message_redacts_unrecognized_details() -> None:
+    assert HARNESS.safe_fixture_error_message(
+        "Registry peer did not become ready before the startup deadline"
+    ) == "Registry peer did not become ready before the startup deadline"
+    assert HARNESS.safe_fixture_error_message(
+        "Registry peer readiness failed (bootstrap_records=0, address_error=bootstrap_count, tcp_ready=true)"
+    ) == "Registry peer readiness failed (bootstrap_records=0, address_error=bootstrap_count, tcp_ready=true)"
+    assert HARNESS.safe_fixture_error_message(
+        "Registry peer publication failed (error=ValueError)"
+    ) == "Registry peer publication failed (error=ValueError)"
+    assert HARNESS.safe_fixture_error_message(
+        "could not seed or confirm the synthetic Registry record (error=ValueError)"
+    ) == "could not seed or confirm the synthetic Registry record (error=ValueError)"
+    assert HARNESS.safe_fixture_error_message(
+        "could not seed or confirm the synthetic Registry record "
+        "(error=RuntimeError; detail=no tcp addr)"
+    ) == (
+        "could not seed or confirm the synthetic Registry record "
+        "(error=RuntimeError; detail=no tcp addr)"
+    )
+    assert HARNESS.safe_fixture_error_message(
+        "Registry peer seed failed (error=RuntimeError; detail=no tcp addr)"
+    ) == "Registry peer seed failed (error=RuntimeError; detail=no tcp addr)"
+    assert HARNESS.safe_fixture_error_message(
+        "/home/ben/.hermes/cache/scratch/node_privkey.bin"
+    ) == "Registry peer fixture failed"
+
+
+def test_fixture_stdout_pump_keeps_only_readiness_and_safe_error_records() -> None:
+    fixture = HARNESS.RegistryPeerFixture(Path("."), peer_backend="podman")
+
+    class FixtureProcess:
+        stdout = io.StringIO(
+            "arbitrary fixture log with peer data\n"
+            "FIXTURE_ERROR\tRegistry peer did not become ready before the startup deadline\n"
+        )
+
+    fixture.process = FixtureProcess()
+    fixture._pump_stdout()
+
+    assert fixture._messages.get_nowait() == (
+        "FIXTURE_ERROR\tRegistry peer did not become ready before the startup deadline\n"
+    )
+    assert fixture._messages.get_nowait() is None
+
+
+def test_fixture_startup_timeout_is_backend_aware_and_overridable() -> None:
+    assert HARNESS.fixture_startup_timeout("process", None) == 90
+    assert HARNESS.fixture_startup_timeout("podman", None) >= 300 + 2 * 60 + 90
+    assert HARNESS.fixture_startup_timeout("podman", 123) == 123
+
+
+def test_registry_peer_fixture_uses_podman_setup_budget() -> None:
+    process_fixture = HARNESS.RegistryPeerFixture(Path("."))
+    podman_fixture = HARNESS.RegistryPeerFixture(Path("."), peer_backend="podman")
+
+    assert process_fixture.timeout_seconds == 90
+    assert podman_fixture.timeout_seconds >= 300 + 2 * 60 + 90
+
+
+def test_registry_fixture_does_not_allocate_scratch_before_environment_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(HARNESS.shutil, "which", lambda _name: "uv")
+
+    def fail(_uv: str, _registry_repo: Path) -> str:
+        raise HARNESS.HarnessError("missing test interpreter")
+
+    monkeypatch.setattr(HARNESS, "registry_python_executable", fail)
+    fixture = HARNESS.RegistryPeerFixture(tmp_path)
+
+    with pytest.raises(HARNESS.HarnessError, match="test interpreter"):
+        fixture.__enter__()
+
+    assert fixture._scratch is None
+    assert list(tmp_path.glob("issue18-registry-harness-*")) == []
+
+
+def test_registry_python_executable_comes_from_locked_project(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / ".venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class Result:
+        returncode = 0
+        stdout = f"{executable}\n"
+
+    def run(command: list[str], **kwargs: object) -> Result:
+        calls.append((command, kwargs))
+        return Result()
+
+    monkeypatch.setattr(HARNESS.subprocess, "run", run)
+
+    resolved = HARNESS.registry_python_executable("uv", tmp_path)
+
+    assert resolved == str(executable)
+    assert calls[0][0][:6] == [
+        "uv",
+        "run",
+        "--locked",
+        "--project",
+        str(tmp_path.resolve()),
+        "--extra",
+    ]
+    assert calls[0][0][-4:] == [
+        "dev",
+        "python",
+        "-c",
+        "import sys; print(sys.executable)",
+    ]
+    assert calls[0][1]["cwd"] == tmp_path.resolve()
+    assert calls[0][1]["timeout"] > 0
+
+
+def test_registry_peer_fixture_reports_failed_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailedProcess:
+        returncode = 1
+
+        def poll(self) -> int:
+            return self.returncode
+
+    fixture = HARNESS.RegistryPeerFixture(Path("."), peer_backend="podman")
+    fixture.process = FailedProcess()
+    monkeypatch.setattr(fixture, "stop", lambda: None)
+
+    with pytest.raises(HARNESS.HarnessError, match="teardown failed"):
+        fixture.__exit__(None, None, None)
+
+
+def test_registry_peer_fixture_accepts_sigint_exit_after_requested_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SignalExitProcess:
+        pid = 123
+        stdout = None
+        returncode = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.returncode = 130
+            return self.returncode
+
+    fixture = HARNESS.RegistryPeerFixture(Path("."))
+    fixture.process = SignalExitProcess()
+    monkeypatch.setattr(HARNESS.os, "killpg", lambda *_args: None)
+
+    fixture.__exit__(None, None, None)
+
+    assert fixture._stop_signal_sent is True

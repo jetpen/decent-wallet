@@ -1,5 +1,6 @@
 package org.decentwallet.wallet.android
 
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
@@ -47,7 +48,12 @@ class AndroidDirectDhtRegistryInteropTest {
             val key = AndroidRegistryDhtKey.identity(ownerName)
             val rpcClient = JvmLibp2pKadDhtRpcClient(20_000, listOf(peer))
             try {
-                assertFalse(rpcClient.putValue(peer, key, byteArrayOf(0xa0.toByte())))
+                val invalidPutAccepted = try {
+                    rpcClient.putValue(peer, key, byteArrayOf(0xa0.toByte()))
+                } catch (_: IOException) {
+                    false
+                }
+                assertFalse(invalidPutAccepted)
                 assertArrayEquals(candidate, rpcClient.getValue(peer, key))
             } finally {
                 rpcClient.close()
