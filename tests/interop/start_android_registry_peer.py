@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import hashlib
+import ipaddress
 import json
 import os
 import tempfile
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import trio
 from decent_registry.dht.libp2p_dht import Libp2pKadDHT
 from decent_registry.durable_store import LMDBDatastore
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = REPO_ROOT / "tests" / "vectors" / "identity-owner-key-rotation-legacy.json"
@@ -29,9 +29,14 @@ def load_fixture() -> tuple[str, bytes]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a two-peer local Registry interop mesh")
     parser.add_argument(
+        "--listen-host",
+        default="127.0.0.1",
+        help="IPv4 interface address to bind the Registry peers to",
+    )
+    parser.add_argument(
         "--advertise-host",
         default="127.0.0.1",
-        help="address clients use to reach this host (Android emulators should normally use adb reverse)",
+        help="IPv4 address clients use to reach this host (Android emulators should normally use adb reverse)",
     )
     parser.add_argument(
         "--seed-candidate",
@@ -46,12 +51,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def peer_address(dht: Libp2pKadDHT, advertise_host: str) -> str:
+def peer_address(
+    dht: Libp2pKadDHT,
+    advertise_host: str,
+    *,
+    listen_host: str = "127.0.0.1",
+) -> str:
+    try:
+        listen_host = str(ipaddress.IPv4Address(listen_host))
+        advertise_host = str(ipaddress.IPv4Address(advertise_host))
+    except ipaddress.AddressValueError as exc:
+        raise ValueError("Registry listener and advertised hosts must be IPv4 addresses") from exc
     address = dht.get_listen_multiaddr()
-    expected_prefix = "/ip4/127.0.0.1/"
+    expected_prefix = f"/ip4/{listen_host}/"
     if not address.startswith(expected_prefix):
-        raise RuntimeError("local Registry listener did not bind to IPv4 loopback")
-    if advertise_host != "127.0.0.1":
+        raise RuntimeError("Registry listener did not bind to its configured IPv4 listener")
+    if advertise_host != listen_host:
         address = f"/ip4/{advertise_host}/" + address[len(expected_prefix) :]
     peer_id = dht.host.get_id().to_string()
     if "/p2p/" in address:
@@ -90,46 +105,57 @@ async def main() -> None:
 
     with root_context as root:
         root_path = Path(root)
-        async with Libp2pKadDHT(
-            listen="/ip4/127.0.0.1/tcp/0",
-            durable_store=LMDBDatastore(path=root_path / "writer.lmdb"),
-        ) as writer:
-            async with Libp2pKadDHT(
-                listen="/ip4/127.0.0.1/tcp/0",
+        listen_multiaddr = f"/ip4/{args.listen_host}/tcp/0"
+        async with (
+            Libp2pKadDHT(
+                listen=listen_multiaddr,
+                durable_store=LMDBDatastore(path=root_path / "writer.lmdb"),
+            ) as writer,
+            Libp2pKadDHT(
+                listen=listen_multiaddr,
                 durable_store=LMDBDatastore(path=root_path / "readback.lmdb"),
-            ) as readback:
-                writer_peer = peer_address(writer, args.advertise_host)
-                readback_peer = peer_address(readback, args.advertise_host)
-                writer_local_peer = peer_address(writer, "127.0.0.1")
-                readback_local_peer = peer_address(readback, "127.0.0.1")
-                await readback.bootstrap(writer_local_peer)
-                await writer.bootstrap(readback_local_peer)
-                await writer.put_signed_identity_record(identity_key, predecessor)
+            ) as readback,
+        ):
+            writer_peer = peer_address(
+                writer, args.advertise_host, listen_host=args.listen_host
+            )
+            readback_peer = peer_address(
+                readback, args.advertise_host, listen_host=args.listen_host
+            )
+            writer_local_peer = peer_address(
+                writer, args.listen_host, listen_host=args.listen_host
+            )
+            readback_local_peer = peer_address(
+                readback, args.listen_host, listen_host=args.listen_host
+            )
+            await readback.bootstrap(writer_local_peer)
+            await writer.bootstrap(readback_local_peer)
+            await writer.put_signed_identity_record(identity_key, predecessor)
 
-                anchor = await readback.get_signed_identity_record(identity_key)
-                if anchor is None:
-                    raise RuntimeError("readback Registry peer did not accept the legacy anchor")
+            anchor = await readback.get_signed_identity_record(identity_key)
+            if anchor is None:
+                raise RuntimeError("readback Registry peer did not accept the legacy anchor")
 
-                if args.seed_candidate:
-                    await writer.put_signed_identity_record_if_current(
-                        identity_key,
-                        candidate,
-                        expected_state_hash=predecessor_hash,
-                        expires_at=int(time.time()) + 300,
-                    )
-                    expected_sequence = int(vector["candidate_sequence"])
-                    for _attempt in range(40):
-                        observed = await readback.get_signed_identity_record(identity_key)
-                        if result_sequence(observed) == expected_sequence:
-                            break
-                        await trio.sleep(0.25)
-                    else:
-                        raise RuntimeError("readback Registry peer did not accept the rotation candidate")
+            if args.seed_candidate:
+                await writer.put_signed_identity_record_if_current(
+                    identity_key,
+                    candidate,
+                    expected_state_hash=predecessor_hash,
+                    expires_at=int(time.time()) + 300,
+                )
+                expected_sequence = int(vector["candidate_sequence"])
+                for _attempt in range(40):
+                    observed = await readback.get_signed_identity_record(identity_key)
+                    if result_sequence(observed) == expected_sequence:
+                        break
+                    await trio.sleep(0.25)
+                else:
+                    raise RuntimeError("readback Registry peer did not accept the rotation candidate")
 
-                print(f"READY_WRITE\t{writer_peer}", flush=True)
-                print(f"READY_READBACK\t{readback_peer}", flush=True)
+            print(f"READY_WRITE\t{writer_peer}", flush=True)
+            print(f"READY_READBACK\t{readback_peer}", flush=True)
 
-                await trio.sleep_forever()
+            await trio.sleep_forever()
 
 
 if __name__ == "__main__":
