@@ -9,6 +9,7 @@ plugins {
 
 val registryTestPeer = providers.environmentVariable("DECENT_REGISTRY_TEST_PEER").orElse("")
 val registryTestReadbackPeer = providers.environmentVariable("DECENT_REGISTRY_TEST_READBACK_PEER").orElse("")
+val issue18AndroidTestClass = providers.gradleProperty("issue18AndroidTestClass").orElse("")
 
 android {
     namespace = "org.decentwallet.wallet.android"
@@ -20,6 +21,9 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testInstrumentationRunnerArguments["decentRegistryTestPeer"] = registryTestPeer.get()
         testInstrumentationRunnerArguments["decentRegistryTestReadbackPeer"] = registryTestReadbackPeer.get()
+        issue18AndroidTestClass.orNull?.takeIf(String::isNotBlank)?.let {
+            testInstrumentationRunnerArguments["class"] = it
+        }
     }
 
     sourceSets {
@@ -71,6 +75,7 @@ tasks.withType<Test>().configureEach {
 tasks.matching { it.name == "connectedDebugAndroidTest" }.configureEach {
     inputs.property("decentRegistryTestPeer", registryTestPeer)
     inputs.property("decentRegistryTestReadbackPeer", registryTestReadbackPeer)
+    inputs.property("issue18AndroidTestClass", issue18AndroidTestClass)
 }
 
 dependencies {

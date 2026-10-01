@@ -685,6 +685,201 @@ class AndroidWalletTest {
     }
 
     @Test
+    fun publicImportSyncFailureRemovesDestinationAndAllowsRecovery() {
+        exercisePublicImportSyncFailure(cleanupSyncFails = false)
+    }
+
+    @Test
+    fun publicImportUnknownCleanupReturnsNoSession() {
+        exercisePublicImportSyncFailure(cleanupSyncFails = true)
+    }
+
+    private fun exercisePublicImportSyncFailure(cleanupSyncFails: Boolean) {
+        val directory = Files.createTempDirectory("wallet-public-import-sync-")
+        val path = directory.resolve("wallet.dw")
+        val vector = resource("/wallet-container-v2.json")
+        val imported = decodeHex(jsonHexField(String(vector, Charsets.UTF_8), "container_json_utf8_hex"))
+        val password = "public-test-only: wallet-v2-vector"
+        var syncCalls = 0
+        var sessionReturned = false
+        try {
+            val failureType = if (cleanupSyncFails) WalletStorageOutcomeUnknownException::class.java else WalletStorageException::class.java
+            val failure = org.junit.Assert.assertThrows(failureType) {
+                AtomicWalletFiles.withDirectorySyncForTest(directory, { parent ->
+                    syncCalls++
+                    if (syncCalls == 1) {
+                        val visible = Files.readAllBytes(path)
+                        try { assertArrayEquals(imported, visible) } finally { visible.fill(0) }
+                    } else {
+                        assertFalse(Files.exists(path))
+                    }
+                    if (syncCalls == 1 || cleanupSyncFails) throw java.io.IOException()
+                    java.nio.channels.FileChannel.open(parent, java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+                }) {
+                    AndroidWallet.importContainer(path, imported, password).use { sessionReturned = true }
+                }
+            }
+            assertEquals(failureType, failure.javaClass)
+            assertEquals(if (cleanupSyncFails) "wallet storage outcome is unknown" else "wallet storage operation failed", failure.message)
+            assertFalse(sessionReturned)
+            assertEquals(2, syncCalls)
+            assertFalse(Files.exists(path))
+            Files.list(directory).use { paths -> assertEquals(0L, paths.count()) }
+            if (!cleanupSyncFails) {
+                AndroidWallet.importContainer(path, imported, password).use { recovered -> assertArrayEquals(imported, recovered.exportContainer()) }
+                AndroidWallet.open(path, password).use { reopened -> assertArrayEquals(imported, reopened.exportContainer()) }
+            } else {
+                // Absence is only a fixture observation; do not re-import/reopen an unknown destination.
+                val probe = directory.resolve("scope-probe.dw")
+                AndroidWallet.create(probe, password, password, mapOf("purpose" to "scope-check")).use { }
+                Files.delete(probe)
+            }
+            assertEquals(2, syncCalls)
+        } finally {
+            vector.fill(0)
+            imported.fill(0)
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    @Test
+    fun publicMigrationUnknownRollbackPropagatesWithoutReturningSession() {
+        val directory = Files.createTempDirectory("wallet-public-migration-unknown-")
+        val path = directory.resolve("wallet.dw")
+        val original = resource("/wallet-v1-pending-rotation.dw")
+        val password = "correct horse battery staple"
+        var syncCalls = 0
+        var sessionReturned = false
+        try {
+            Files.write(path, original)
+            val failure = org.junit.Assert.assertThrows(WalletStorageOutcomeUnknownException::class.java) {
+                AtomicWalletFiles.withDirectorySyncForTest(directory, { _ ->
+                    syncCalls++
+                    val visible = Files.readAllBytes(path)
+                    try {
+                        if (syncCalls == 1) {
+                            val envelope = WalletJson.parse(visible, ContainerCrypto.MAX_CONTAINER_BYTES) as Map<*, *>
+                            assertEquals(BigInteger.valueOf(2), envelope["version"])
+                            assertFalse(original.contentEquals(visible))
+                        } else {
+                            assertArrayEquals(original, visible)
+                        }
+                    } finally {
+                        visible.fill(0)
+                    }
+                    throw java.io.IOException()
+                }) {
+                    AndroidWallet.migrateContainer(path, password).use { sessionReturned = true }
+                }
+            }
+            assertEquals(WalletStorageOutcomeUnknownException::class.java, failure.javaClass)
+            assertEquals("wallet storage outcome is unknown", failure.message)
+            assertFalse(sessionReturned)
+            assertEquals(2, syncCalls)
+            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            // Visible restored bytes are not a durable-state assertion. Do not reopen/retry this wallet.
+            assertArrayEquals(original, Files.readAllBytes(path))
+            val probe = directory.resolve("scope-probe.dw")
+            AndroidWallet.create(probe, password, password, mapOf("purpose" to "scope-check")).use { }
+            assertEquals(2, syncCalls)
+            Files.delete(probe)
+        } finally {
+            original.fill(0)
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    @Test
+    fun directorySyncTestScopeIsThreadAndDirectoryLocalAndRestoresNestedScope() {
+        val directory = Files.createTempDirectory("wallet-sync-scope-")
+        val unrelated = Files.createTempDirectory("wallet-sync-unrelated-")
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        var outerCalls = 0
+        var innerCalls = 0
+        try {
+            AtomicWalletFiles.withDirectorySyncForTest(directory, { parent ->
+                outerCalls++
+                java.nio.channels.FileChannel.open(parent, java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+            }) {
+                AtomicWalletFiles.createNew(unrelated.resolve("other.dw"), byteArrayOf(1))
+                executor.submit {
+                    AtomicWalletFiles.createNew(directory.resolve("thread.dw"), byteArrayOf(2))
+                }.get(30, java.util.concurrent.TimeUnit.SECONDS)
+                assertEquals(0, outerCalls)
+                AtomicWalletFiles.createNew(directory.resolve("outer.dw"), byteArrayOf(3))
+                org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+                    AtomicWalletFiles.withDirectorySyncForTest(directory, { parent ->
+                        innerCalls++
+                        java.nio.channels.FileChannel.open(parent, java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+                    }) {
+                        AtomicWalletFiles.createNew(directory.resolve("inner.dw"), byteArrayOf(4))
+                        throw IllegalStateException()
+                    }
+                }
+                AtomicWalletFiles.createNew(directory.resolve("restored.dw"), byteArrayOf(5))
+            }
+            AtomicWalletFiles.createNew(directory.resolve("outside.dw"), byteArrayOf(6))
+            assertEquals(2, outerCalls)
+            assertEquals(1, innerCalls)
+        } finally {
+            executor.shutdownNow()
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+            Files.walk(unrelated).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    @Test
+    fun publicMigrationDirectorySyncFailureRestoresV1() {
+        val directory = Files.createTempDirectory("wallet-public-migration-sync-")
+        val path = directory.resolve("wallet.dw")
+        val original = resource("/wallet-v1-pending-rotation.dw")
+        val password = "correct horse battery staple"
+        var syncCalls = 0
+        try {
+            Files.write(path, original)
+            val failure = org.junit.Assert.assertThrows(WalletStorageException::class.java) {
+                AtomicWalletFiles.withDirectorySyncForTest(directory, { parent ->
+                    syncCalls++
+                    val visible = Files.readAllBytes(path)
+                    try {
+                        if (syncCalls == 1) {
+                            assertFalse(original.contentEquals(visible))
+                            val envelope = WalletJson.parse(visible, ContainerCrypto.MAX_CONTAINER_BYTES) as Map<*, *>
+                            assertEquals(BigInteger.valueOf(2), envelope["version"])
+                        } else {
+                            assertArrayEquals(original, visible)
+                        }
+                    } finally {
+                        visible.fill(0)
+                    }
+                    if (syncCalls == 1) throw java.io.IOException()
+                    java.nio.channels.FileChannel.open(parent, java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+                }) {
+                    AndroidWallet.migrateContainer(path, password).use { }
+                }
+            }
+            assertEquals(WalletStorageException::class.java, failure.javaClass)
+            assertEquals("wallet storage operation failed", failure.message)
+            assertEquals(2, syncCalls)
+            assertArrayEquals(original, Files.readAllBytes(path))
+            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            // Exception unwinding must remove the scoped callback before healthy public recovery.
+            AndroidWallet.migrateContainer(path, password).use { recovered ->
+                assertEquals(32, recovered.ownerPublicKey.size)
+                assertEquals(32, checkNotNull(recovered.pendingOwnerPublicKey).size)
+            }
+            AndroidWallet.open(path, password).use { reopened ->
+                assertEquals(32, reopened.ownerPublicKey.size)
+                assertEquals(32, checkNotNull(reopened.pendingOwnerPublicKey).size)
+            }
+            assertEquals(2, syncCalls)
+        } finally {
+            original.fill(0)
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    @Test
     fun explicitMigrationAuthenticatesV1AndWritesV2WithoutChangingPayload() {
         val directory = Files.createTempDirectory("wallet-android-migrate-")
         val path = directory.resolve("wallet.dw")

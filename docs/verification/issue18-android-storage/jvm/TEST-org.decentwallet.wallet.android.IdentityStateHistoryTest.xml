@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.decentwallet.wallet.android.IdentityStateHistoryTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-10-01T18:17:49.183Z" hostname="benx1" time="0.448">
+  <properties/>
+  <testcase name="acceptsSkippedOperationThreeGenerationLikePythonCore" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.005"/>
+  <testcase name="rejectsMoreThanThreeProofsBeforeFetchingHistory" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.003"/>
+  <testcase name="rejectsAggregateHistoryBeyondByteBudgetBeforeFetchingAllPredecessors" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.115"/>
+  <testcase name="rejectsTamperedOperationFiveProofDespiteMatchingHistory" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.005"/>
+  <testcase name="rejectsTamperedIntermediatePredecessorSignature" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.005"/>
+  <testcase name="rejectsHistoryReturnedForTheWrongOwnerName" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.002"/>
+  <testcase name="rejectsHistoryBeyondMaximumPredecessorDepth" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.287"/>
+  <testcase name="rejectsOversizedProofSignerIdBeforeFetchingHistory" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.005"/>
+  <testcase name="rejectsMissingVersionedPredecessorHistory" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.004"/>
+  <testcase name="resolvesVersionedOperationFiveAcrossACompleteNonGenesisHistory" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.008"/>
+  <testcase name="rejectsHistoryReturnedForTheWrongStateHash" classname="org.decentwallet.wallet.android.IdentityStateHistoryTest" time="0.006"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

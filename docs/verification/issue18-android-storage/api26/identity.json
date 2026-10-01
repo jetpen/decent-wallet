@@ -1,0 +1,8 @@
+{
+  "ro.build.version.sdk": "26",
+  "ro.product.cpu.abi": "x86",
+  "ro.build.fingerprint": "google/sdk_gphone_x86/generic_x86:8.0.0/OSR1.170901.043/4456315:user/release-keys",
+  "avd": "Medium_Phone",
+  "serial": "emulator-5554",
+  "runtime_page_size": null
+}

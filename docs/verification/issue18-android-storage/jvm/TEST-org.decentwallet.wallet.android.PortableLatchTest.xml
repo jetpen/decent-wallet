@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.decentwallet.wallet.android.PortableLatchTest" tests="16" skipped="0" failures="0" errors="0" timestamp="2026-10-01T18:17:49.654Z" hostname="benx1" time="33.921">
+  <properties/>
+  <testcase name="environmentChangeDuringDispatchReadCannotPublish" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.56"/>
+  <testcase name="eagerPublicOpenAndImportRejectBrokenKeyBindings" classname="org.decentwallet.wallet.android.PortableLatchTest" time="23.735"/>
+  <testcase name="changedSessionDuringLegacyBindingConsentDoesNotWrite" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.36"/>
+  <testcase name="environmentValidationUsesExactUnicodeAndUtf16Contract" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.0"/>
+  <testcase name="environmentChangeDuringErrorPreflightMakesNoRemoteCall" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.192"/>
+  <testcase name="environmentChangeDuringPreparationReadCannotPrepare" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.187"/>
+  <testcase name="publicImportRejectsMalformedLatchBeforeCreatingDestination" classname="org.decentwallet.wallet.android.PortableLatchTest" time="1.88"/>
+  <testcase name="actualKotlinPublicAuthoringExportsBoundAndLegacyCiphertext" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.774"/>
+  <testcase name="environmentChangeDuringConfirmationCannotMintAuthority" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.186"/>
+  <testcase name="environmentChangeDuringConsentCannotPrepare" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.203"/>
+  <testcase name="largePositiveIntegerRealEncryptedPublicReadersAndWriter" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.995"/>
+  <testcase name="bindingStorageFailuresPreserveOrLockWithoutDispatchAuthority" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.379"/>
+  <testcase name="expiredDispatchRealmChangeDuringRemoteReadRetainsLatch" classname="org.decentwallet.wallet.android.PortableLatchTest" time="2.917"/>
+  <testcase name="environmentChangeDuringStalePreflightMakesNoRemoteCall" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.207"/>
+  <testcase name="pythonCiphertextPublicImportExactTransferAndReadonlyPromotion" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.758"/>
+  <testcase name="legacySixFieldsStayUnboundAcrossExactImport" classname="org.decentwallet.wallet.android.PortableLatchTest" time="0.583"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

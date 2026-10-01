@@ -1,0 +1,24 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<testsuites tests="14" failures="0" errors="0" skipped="0" time="61.752" timestamp="2026-10-01T18:11:44" hostname="localhost">
+  <testsuite name="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" tests="14" failures="0" errors="0" skipped="0" time="60.938" timestamp="2026-10-01T18:11:44" hostname="localhost">
+    <properties>
+      <property name="device" value="Medium_Phone(AVD) - 8.0.0" />
+      <property name="flavor" value="" />
+      <property name="project" value=":platforms:android-wallet" />
+    </properties>
+    <testcase name="publicMigrationUnknownRollbackReturnsNoSessionOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="7.423" />
+    <testcase name="importRefusesToOverwriteInitializedWalletOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="3.643" />
+    <testcase name="failedRollbackSyncReportsUnknownOutcomeOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="2.488" />
+    <testcase name="publicMigrationSyncFailureRestoresV1AndAllowsRecoveryOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="10.621" />
+    <testcase name="runsOnlyOnTheApprovedApiAndAbiTargets" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="0.001" />
+    <testcase name="recoverableReplacementSyncFailureRestoresV1BytesOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="4.823" />
+    <testcase name="publicImportStagingDenialLeavesDestinationAbsentOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="3.616" />
+    <testcase name="recoverableCancellationRollbackKeepsSessionUsableOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="4.67" />
+    <testcase name="publicImportUnknownCleanupReturnsNoSessionOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="3.943" />
+    <testcase name="publicMigrationStagingDenialPreservesV1OnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="5.299" />
+    <testcase name="unknownCancellationRollbackLocksAndClearsSessionOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="2.336" />
+    <testcase name="publicImportSyncFailureRemovesDestinationAndAllowsRecoveryOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="5.072" />
+    <testcase name="productionLifecycleMatchesVectorAndPreservesEncryptedBytes" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="5.822" />
+    <testcase name="wrongPasswordMigrationPreservesOriginalV1BytesOnAndroid" classname="org.decentwallet.wallet.android.AndroidWalletRuntimeTest" time="1.181" />
+  </testsuite>
+</testsuites>

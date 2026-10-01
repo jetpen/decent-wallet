@@ -16,6 +16,23 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 internal object AtomicWalletFiles {
+    private val testDirectorySync = ThreadLocal<Pair<Path, (Path) -> Unit>>()
+
+    /** Scoped internal test seam; never a public API or process-wide fault switch. */
+    internal fun <T> withDirectorySyncForTest(
+        directory: Path,
+        directorySync: (Path) -> Unit,
+        action: () -> T,
+    ): T {
+        val prior = testDirectorySync.get()
+        testDirectorySync.set(directory.toAbsolutePath().normalize() to directorySync)
+        return try {
+            action()
+        } finally {
+            if (prior == null) testDirectorySync.remove() else testDirectorySync.set(prior)
+        }
+    }
+
     fun read(path: Path): ByteArray = withPathLock(path) { readLocked(path) }
 
     private fun readLocked(path: Path): ByteArray {
@@ -196,6 +213,11 @@ internal object AtomicWalletFiles {
     }
 
     private fun fsyncDirectory(directory: Path) {
+        val scoped = testDirectorySync.get()
+        if (scoped != null && scoped.first == directory.toAbsolutePath().normalize()) {
+            scoped.second(directory)
+            return
+        }
         FileChannel.open(directory, READ).use { it.force(true) }
     }
 
