@@ -128,13 +128,20 @@ class OwnerKeyRotationConsentTranscript internal constructor(
     }
 }
 
+internal fun validRegistryEnvironment(value: String?): Boolean {
+    if (value == null || value.length !in 1..256) return false
+    val whitespace = "\t\n\u000b\u000c\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    if (value.all { it in whitespace }) return false
+    return try { WalletJson.requireUnicodeScalars(value); true } catch (_: Exception) { false }
+}
+
 class OwnerKeyRotationDispatchIntent internal constructor(
     ownerNameBytes: ByteArray,
     predecessorOwnerPublicKey: ByteArray,
     successorOwnerPublicKey: ByteArray,
     predecessorStateHash: ByteArray,
     val sequence: BigInteger,
-    val environment: String,
+    val environment: String?,
     envelopeHash: ByteArray,
 ) {
     private val ownerName = ownerNameBytes.copyOf()
@@ -149,7 +156,7 @@ class OwnerKeyRotationDispatchIntent internal constructor(
             successorPublic.size != AndroidIdentityCrypto.KEY_BYTES ||
             predecessorHash.size != AndroidIdentityCrypto.KEY_BYTES ||
             candidateHash.size != AndroidIdentityCrypto.KEY_BYTES || sequence.signum() <= 0 ||
-            environment.isBlank() || environment.length > 256
+            (environment != null && !validRegistryEnvironment(environment))
         ) {
             throw WalletInvalidIdentityStateException()
         }
@@ -175,7 +182,7 @@ class OwnerKeyRotationDispatchIntent internal constructor(
         "sequence" to sequence,
         "environment" to environment,
         "envelope_hash" to candidateHash.copyOf(),
-    )
+    ).filterKeys { it != "environment" || environment != null }
 
     override fun equals(other: Any?): Boolean = other is OwnerKeyRotationDispatchIntent &&
         ownerName.contentEquals(other.ownerName) &&
@@ -191,7 +198,7 @@ class OwnerKeyRotationDispatchIntent internal constructor(
         result = 31 * result + successorPublic.contentHashCode()
         result = 31 * result + predecessorHash.contentHashCode()
         result = 31 * result + sequence.hashCode()
-        result = 31 * result + environment.hashCode()
+        result = 31 * result + (environment?.hashCode() ?: 0)
         result = 31 * result + candidateHash.contentHashCode()
         return result
     }
@@ -211,7 +218,12 @@ class OwnerKeyRotationDispatchIntent internal constructor(
 
         fun fromPayload(value: Any?): OwnerKeyRotationDispatchIntent {
             val map = value as? Map<*, *> ?: throw WalletInvalidContainerException()
-            if (map.keys != EXPECTED_KEYS) throw WalletInvalidContainerException()
+            if (map.keys != EXPECTED_KEYS && map.keys != EXPECTED_KEYS - "environment") {
+                throw WalletInvalidContainerException()
+            }
+            if (map.containsKey("environment") && !validRegistryEnvironment(map["environment"] as? String)) {
+                throw WalletInvalidContainerException()
+            }
             val sequence = map["sequence"] as? BigInteger ?: throw WalletInvalidContainerException()
             return try {
                 OwnerKeyRotationDispatchIntent(
@@ -223,7 +235,7 @@ class OwnerKeyRotationDispatchIntent internal constructor(
                     predecessorStateHash = map["predecessor_state_hash"] as? ByteArray
                         ?: throw WalletInvalidContainerException(),
                     sequence = sequence,
-                    environment = map["environment"] as? String ?: throw WalletInvalidContainerException(),
+                    environment = map["environment"] as? String,
                     envelopeHash = map["envelope_hash"] as? ByteArray ?: throw WalletInvalidContainerException(),
                 )
             } catch (failure: WalletContainerException) {
@@ -424,6 +436,7 @@ class AndroidIdentityAdapter(
 
             previous = readCurrent(ownerName)
                 ?: throw WalletIdentityStateChangedException()
+            if (!transportMatchesEnvironment(environment)) throw WalletIdentityEnvironmentMismatchException()
             verifiedCandidate = verifyCandidateAgainstCurrent(ownerName, previous, envelope, intent)
 
             val nonceDigest = replayNonceDigest(ownerName, authenticatedOrigin, environment, nonceSnapshot)
@@ -458,8 +471,10 @@ class AndroidIdentityAdapter(
             if (!approved) throw WalletRotationConsentRejectedException()
             if (expiresAt <= nowSeconds()) throw WalletRotationConsentExpiredException()
 
+            if (!transportMatchesEnvironment(environment)) throw WalletIdentityEnvironmentMismatchException()
             afterConsent = readCurrent(ownerName)
                 ?: throw WalletIdentityStateChangedException()
+            if (!transportMatchesEnvironment(environment)) throw WalletIdentityEnvironmentMismatchException()
             val revalidatedCandidate = try {
                 verifyCandidateAgainstCurrent(ownerName, afterConsent, envelope, intent)
             } catch (_: Exception) {
@@ -553,6 +568,9 @@ class AndroidIdentityAdapter(
                 )
             }
 
+            if (!transportMatchesEnvironment(intent.environment)) {
+                return prewriteFailure(publication, permit, OwnerKeyRotationDispatchStatus.FAILED)
+            }
             val writeOwnerName = ownerName.copyOf()
             val writeEnvelope = envelope.copyOf()
             val writeExpectedHash = expectedHash.copyOf()
@@ -612,7 +630,8 @@ class AndroidIdentityAdapter(
             return null
         }
         return try {
-            confirmObservedCandidate(intent, ownerName, remote)
+            if (!transportMatchesEnvironment(intent.environment)) null
+            else confirmObservedCandidate(intent, ownerName, remote)
         } finally {
             ownerName.fill(0)
             remote.fill(0)
@@ -627,6 +646,7 @@ class AndroidIdentityAdapter(
         if (!envelopeMatchesIntent(remote, intent)) return null
         val state = try {
             IdentityStateHistoryVerifier.resolve(ownerName, remote) { predecessorHash ->
+                if (!transportMatchesEnvironment(intent.environment)) throw WalletIdentityEnvironmentMismatchException()
                 readByHash(ownerName, predecessorHash)
             }
         } catch (_: Exception) {
@@ -652,6 +672,7 @@ class AndroidIdentityAdapter(
             ) {
                 return null
             }
+            if (!transportMatchesEnvironment(intent.environment)) return null
             return OwnerKeyRotationTokenAuthority.confirmation(intent, observedStateHash)
         } finally {
             expectedOwnerName.fill(0)
@@ -760,6 +781,9 @@ class AndroidIdentityAdapter(
             return OwnerKeyRotationDispatchResult(OwnerKeyRotationDispatchStatus.UNKNOWN)
         }
         try {
+            if (!transportMatchesEnvironment(intent.environment)) {
+                return OwnerKeyRotationDispatchResult(OwnerKeyRotationDispatchStatus.UNKNOWN)
+            }
             if (candidateObservedLocally || envelopeMatchesIntent(remote, intent)) {
                 val confirmation = confirmObservedCandidate(intent, ownerName, remote)
                 return if (confirmation != null) {
@@ -771,7 +795,7 @@ class AndroidIdentityAdapter(
                     OwnerKeyRotationDispatchResult(OwnerKeyRotationDispatchStatus.UNKNOWN)
                 }
             }
-            if (!clearableRejection) {
+            if (!clearableRejection || !transportMatchesEnvironment(intent.environment)) {
                 return OwnerKeyRotationDispatchResult(OwnerKeyRotationDispatchStatus.UNKNOWN)
             }
             return OwnerKeyRotationDispatchResult(
@@ -824,8 +848,8 @@ class AndroidIdentityAdapter(
         false
     }
 
-    private fun transportMatchesEnvironment(environment: String): Boolean = try {
-        transport.registryEnvironment == environment
+    private fun transportMatchesEnvironment(environment: String?): Boolean = try {
+        environment != null && transport.registryEnvironment == environment
     } catch (_: Exception) {
         false
     }
@@ -839,7 +863,7 @@ class AndroidIdentityAdapter(
         replayNonce: ByteArray,
     ) {
         if (authenticatedOrigin.isBlank() || authenticatedOrigin.length > 2048 ||
-            environment.isBlank() || environment.length > 256 ||
+            !validRegistryEnvironment(environment) ||
             purpose.isBlank() || purpose.length > 1024 ||
             capability != "identity.rotate-owner-key" ||
             expiresAt <= nowSeconds() || replayNonce.size !in 16..256

@@ -231,6 +231,14 @@ Only one active wallet copy is supported. An imported copy is an explicit snapsh
 
 Transfer occurs through an external user-controlled channel. The wallet does not provide cloud synchronization, automatic upload, device discovery, QR, Bluetooth, Wi-Fi Direct, clipboard, or temporary-file transfer in the MVP.
 
+### 11.1 Portable rotation-latch compatibility
+
+[ADR-0007](../adr/0007-portable-environment-bound-rotation-latch.md) defines the owner-approved amendment: within authenticated container v2, readers accept exactly legacy six-field unbound latches and current seven-field latches with a valid non-null `environment`. New publication preparation always binds that explicit trusted caller realm; missing or different configuration fails closed before confirmation RPC. Outer v2 and version-bound AAD do not change, and old strict readers are not forward-compatible with the other shape. Both public open/import paths validate the latch against actual seed-derived active and pending keys before returning/installing.
+
+Legacy ciphertext remains exactly inspectable/exportable/importable with both keys and mutation blocks retained. No realm is inferred and no remote confirmation/finalization is permitted while unbound. Explicit caller-consented atomic local six-to-seven binding preserves all original fields/keys/metadata, invokes no Registry operation and creates no dispatch authority. Python exposes `bind_legacy_rotation_dispatch_environment(environment, *, consent)`; Android exposes `bindLegacyRotationDispatchEnvironment(environment, consent)`. The callback reviews the intent and exact requested realm. Already-bound intents reject even same-realm repeats. Typed recoverable storage failures preserve legacy state; unknown outcomes lock/clear the session. Only subsequent matching-realm exact authenticated envelope/history read-back may authorize durable promotion. Exact import/export never performs this binding implicitly. Environment validation and trusted transport/adapter configuration are specified in ADR-0007; labels are not network authentication or public-DHT guarantees.
+
+Prior device and packaged acceptance records predate this production amendment and remain historical; they are not fresh verification of the amended portable latch.
+
 ## 12. Security acceptance matrix
 
 The following are mandatory release gates:

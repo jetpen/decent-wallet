@@ -354,6 +354,30 @@ class WalletSession internal constructor(
         }
     }
 
+    /** Explicit caller-consented local recovery only; no publication or dispatch capability. */
+    @Synchronized
+    fun bindLegacyRotationDispatchEnvironment(
+        environment: String,
+        consent: (OwnerKeyRotationDispatchIntent, String) -> Boolean,
+    ): OwnerKeyRotationDispatchIntent {
+        ensureUnlocked()
+        val intent = ownerKeyRotationDispatchIntent ?: throw WalletInvalidIdentityStateException()
+        if (intent.environment != null || !validRegistryEnvironment(environment)) {
+            throw WalletInvalidIdentityStateException()
+        }
+        val approved = try { consent(intent, environment) } catch (_: Exception) {
+            throw WalletInvalidIdentityStateException()
+        }
+        ensureUnlocked()
+        if (!approved || ownerKeyRotationDispatchIntent != intent) throw WalletInvalidIdentityStateException()
+        val bound = OwnerKeyRotationDispatchIntent.fromPayload(intent.toPayload() + ("environment" to environment))
+        @Suppress("UNCHECKED_CAST")
+        val candidate = WalletJson.copyPayload(checkNotNull(walletPayload)) as MutableMap<String, Any?>
+        candidate["rotation_dispatch_intent"] = bound.toPayload()
+        persistPayloadCandidate(candidate)
+        return bound
+    }
+
     @Synchronized
     fun latchOwnerKeyRotationDispatchIntent(
         publication: OwnerKeyRotationPublication,
