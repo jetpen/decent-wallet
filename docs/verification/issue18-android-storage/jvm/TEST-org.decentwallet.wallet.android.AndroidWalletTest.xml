@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.decentwallet.wallet.android.AndroidWalletTest" tests="36" skipped="0" failures="0" errors="0" timestamp="2026-10-01T18:17:31.383Z" hostname="benx1" time="17.756">
+  <properties/>
+  <testcase name="duplicateJsonMembersAreRejectedBeforeImportWrite" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.009"/>
+  <testcase name="failedMigrationAuthenticationPreservesOriginalV1Bytes" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.39"/>
+  <testcase name="createDoesNotReplaceAnInitializedWallet" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.795"/>
+  <testcase name="verifiedLegacyOperation5VectorProducesExactUpdateAndEnvelope" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.257"/>
+  <testcase name="legacyRotationDraftRejectsDuplicateSignerIds" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.262"/>
+  <testcase name="generatedSigningWalletPersistsOnePendingSuccessorAcrossReopen" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.849"/>
+  <testcase name="opensSharedVectorAndLocksItsSession" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.281"/>
+  <testcase name="malformedUtf8IsRejectedAsInvalidContainer" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.003"/>
+  <testcase name="importCopiesExactEncryptedBytesAndNeverOverwrites" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="1.502"/>
+  <testcase name="explicitMigrationAuthenticatesV1AndWritesV2WithoutChangingPayload" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.735"/>
+  <testcase name="backgroundLocksSessionAndPreventsPayloadAccess" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.37"/>
+  <testcase name="failedCancellationRollsBackAndKeepsPendingKeyUsable" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.885"/>
+  <testcase name="publicMigrationDirectorySyncFailureRestoresV1" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="1.655"/>
+  <testcase name="legacyRotationDraftRejectsVersionOnePredecessorWithoutFullHistory" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.255"/>
+  <testcase name="recoverableMigrationStorageFailureRestoresPriorV1Bytes" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.251"/>
+  <testcase name="directorySyncTestScopeIsThreadAndDirectoryLocalAndRestoresNestedScope" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.011"/>
+  <testcase name="migrationIsOneWayAndDoesNotRewriteAnAlreadyCurrentContainer" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.526"/>
+  <testcase name="pendingKeyCsrngFailureLeavesContainerUnchanged" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.262"/>
+  <testcase name="legacyRotationDraftRejectsNonCanonicalPredecessorEncoding" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.259"/>
+  <testcase name="publicImportUnknownCleanupReturnsNoSession" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.571"/>
+  <testcase name="legacyRotationDraftRejectsDifferentOwnerNameBytes" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.38"/>
+  <testcase name="generatedWalletRejectsCsrngFailureWithoutCreatingFile" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.005"/>
+  <testcase name="legacyRotationDraftRequiresTheActiveKeyToAuthorizePredecessor" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.384"/>
+  <testcase name="cancellationPersistsAndKeepsTheActiveKeyAcrossReopen" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.747"/>
+  <testcase name="generatedWalletRequestsExactlyOneEd25519SeedFromCsrng" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.297"/>
+  <testcase name="unknownCancellationOutcomeLocksAndClearsTheSession" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.489"/>
+  <testcase name="publicMigrationUnknownRollbackPropagatesWithoutReturningSession" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.771"/>
+  <testcase name="unverifiableMigrationRollbackReturnsValueFreeUnknownOutcome" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.229"/>
+  <testcase name="publicImportSyncFailureRemovesDestinationAndAllowsRecovery" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.846"/>
+  <testcase name="createsAndReopensRandomizedV2Container" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.982"/>
+  <testcase name="wrongPasswordTamperingAndUnknownVersionFailBeforeImportWrite" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="1.215"/>
+  <testcase name="importRejectsLegacyV1WithoutCreatingDestination" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.003"/>
+  <testcase name="unresolvedDispatchIntentBlocksPreparingAnotherSuccessor" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.357"/>
+  <testcase name="legacyRotationDraftRequiresThePersistedPendingKey" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.29"/>
+  <testcase name="openAndImportRejectIllFormedPasswordUtf16BeforeKdf" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.293"/>
+  <testcase name="legacyRotationDraftRejectsInvalidPredecessorSignature" classname="org.decentwallet.wallet.android.AndroidWalletTest" time="0.331"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

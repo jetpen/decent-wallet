@@ -1,0 +1,174 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.5.0/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build
+
+> Configure project :interop:android-runtime
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+Add android.sync.suppressAgpWarnings=UNSUPPORTED_PROJECT_OPTION_USE to the gradle.properties file to suppress this warning.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+Add android.sync.suppressAgpWarnings=UNSUPPORTED_PROJECT_OPTION_USE to the gradle.properties file to suppress this warning.
+WARNING: API 'libraryVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling libraryVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+Add android.sync.suppressAgpWarnings=DEPRECATED_DSL to the gradle.properties file to suppress this warning.
+WARNING: API 'testVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling testVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+Add android.sync.suppressAgpWarnings=DEPRECATED_DSL to the gradle.properties file to suppress this warning.
+WARNING: API 'unitTestVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling unitTestVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+Add android.sync.suppressAgpWarnings=DEPRECATED_DSL to the gradle.properties file to suppress this warning.
+w: [33m[1m⚠️ Deprecated 'org.jetbrains.kotlin.android' plugin usage[0m[0m
+The 'org.jetbrains.kotlin.android' plugin in project ':interop:android-runtime' is no longer required for Kotlin support since AGP 9.0.
+[32m[1mSolution:[0m[0m
+[32m[3mRemove both `android.builtInKotlin=true` and `android.newDsl=false` from `gradle.properties`, then migrate to built-in Kotlin.[0m[0m
+[36mSee [0m[34mhttps://kotl.in/gradle/agp-built-in-kotlin[0m[36m for more details.[0m
+
+
+> Configure project :platforms:android-wallet
+w: [33m[1m⚠️ Deprecated 'org.jetbrains.kotlin.android' plugin usage[0m[0m
+The 'org.jetbrains.kotlin.android' plugin in project ':platforms:android-wallet' is no longer required for Kotlin support since AGP 9.0.
+[32m[1mSolution:[0m[0m
+[32m[3mRemove both `android.builtInKotlin=true` and `android.newDsl=false` from `gradle.properties`, then migrate to built-in Kotlin.[0m[0m
+[36mSee [0m[34mhttps://kotl.in/gradle/agp-built-in-kotlin[0m[36m for more details.[0m
+
+
+> Task :platforms:android-wallet:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :platforms:android-wallet:preBuild UP-TO-DATE
+> Task :platforms:android-wallet:preDebugBuild UP-TO-DATE
+> Task :platforms:android-wallet:generateDebugResources
+> Task :platforms:android-wallet:packageDebugResources
+> Task :platforms:android-wallet:processDebugNavigationResources
+> Task :platforms:android-wallet:javaPreCompileDebug
+> Task :platforms:android-wallet:preDebugUnitTestBuild UP-TO-DATE
+> Task :platforms:android-wallet:javaPreCompileDebugUnitTest
+> Task :platforms:android-wallet:parseDebugLocalResources
+> Task :platforms:android-wallet:checkDebugAarMetadata
+> Task :platforms:android-wallet:extractDeepLinksForAarDebug
+> Task :platforms:android-wallet:generateDebugAssets UP-TO-DATE
+> Task :platforms:android-wallet:mergeDebugAssets
+> Task :platforms:android-wallet:generateDebugRFile
+> Task :platforms:android-wallet:prepareDebugArtProfile
+> Task :platforms:android-wallet:generateDebugUnitTestStubRFile
+> Task :platforms:android-wallet:prepareLintJarForPublish
+> Task :platforms:android-wallet:processDebugManifest
+> Task :platforms:android-wallet:writeDebugAarMetadata
+> Task :platforms:android-wallet:preDebugAndroidTestBuild UP-TO-DATE
+> Task :platforms:android-wallet:writeDebugLintModelMetadata
+> Task :platforms:android-wallet:extractProguardFiles
+> Task :platforms:android-wallet:generateDebugAndroidTestResources
+> Task :platforms:android-wallet:packageDebugAndroidTestResources
+> Task :platforms:android-wallet:processDebugAndroidTestNavigationResources
+> Task :platforms:android-wallet:parseDebugAndroidTestLocalResources
+> Task :platforms:android-wallet:generateDebugAndroidTestRFile
+> Task :platforms:android-wallet:javaPreCompileDebugAndroidTest
+> Task :platforms:android-wallet:generateDebugAndroidTestAssets UP-TO-DATE
+> Task :platforms:android-wallet:mergeDebugAndroidTestAssets
+> Task :platforms:android-wallet:compressDebugAndroidTestAssets
+> Task :platforms:android-wallet:generateDebugAndroidTestGlobalSynthetics
+> Task :platforms:android-wallet:checkDebugAndroidTestDuplicateClasses
+> Task :platforms:android-wallet:desugarDebugAndroidTestFileDependencies
+> Task :platforms:android-wallet:mergeExtDexDebugAndroidTest
+> Task :platforms:android-wallet:checkDebugAndroidTestAarMetadata
+> Task :platforms:android-wallet:mapDebugAndroidTestSourceSetPaths
+> Task :platforms:android-wallet:compileDebugAndroidTestNavigationResources
+> Task :platforms:android-wallet:mapDebugSourceSetPaths
+> Task :platforms:android-wallet:compileDebugLibraryResources
+> Task :platforms:android-wallet:mergeDebugAndroidTestResources
+> Task :platforms:android-wallet:extractDeepLinksDebug
+> Task :platforms:android-wallet:mergeDebugAndroidTestManifest
+> Task :platforms:android-wallet:processDebugAndroidTestManifest
+> Task :platforms:android-wallet:processDebugAndroidTestResources
+> Task :platforms:android-wallet:mergeDebugJniLibFolders
+> Task :platforms:android-wallet:mergeDebugNativeLibs NO-SOURCE
+> Task :platforms:android-wallet:copyDebugJniLibsProjectOnly
+> Task :platforms:android-wallet:mergeDebugAndroidTestJniLibFolders
+> Task :platforms:android-wallet:mergeDebugAndroidTestNativeLibs NO-SOURCE
+> Task :platforms:android-wallet:stripDebugAndroidTestDebugSymbols NO-SOURCE
+> Task :platforms:android-wallet:validateSigningDebugAndroidTest
+> Task :platforms:android-wallet:writeDebugAndroidTestSigningConfigVersions
+> Task :platforms:android-wallet:compileDebugKotlin
+
+> Task :platforms:android-wallet:compileDebugJavaWithJavac
+Java compiler version 27 has deprecated support for compiling with source/target version 8.
+Try one of the following options:
+    1. [Recommended] Use Java toolchain with a lower language version
+    2. Set a higher source/target version
+    3. Use a lower version of the JDK running the build (if you're not using Java toolchain)
+For more details on how to configure these settings, see https://developer.android.com/build/jdks.
+To suppress this warning, set android.javaCompile.suppressSourceTargetDeprecationWarning=true in gradle.properties.
+Add android.sync.suppressAgpWarnings=JAVA_COMPILE_DEPRECATED_SOURCE_TARGET to the gradle.properties file to suppress this warning.
+warning: [options] source value 8 is obsolete and will be removed in a future release
+warning: [options] target value 8 is obsolete and will be removed in a future release
+warning: [options] To suppress warnings about obsolete options, use -Xlint:-options.
+3 warnings
+
+> Task :platforms:android-wallet:bundleLibRuntimeToJarDebug
+> Task :platforms:android-wallet:bundleLibCompileToJarDebug
+> Task :platforms:android-wallet:processDebugJavaRes
+> Task :platforms:android-wallet:extractDebugAnnotations
+> Task :platforms:android-wallet:mergeDebugGeneratedProguardFiles
+> Task :platforms:android-wallet:mergeDebugConsumerProguardFiles
+> Task :platforms:android-wallet:mergeDebugJavaResource
+> Task :platforms:android-wallet:syncDebugLibJars
+> Task :platforms:android-wallet:bundleDebugLocalLintAar
+> Task :platforms:android-wallet:createFullJarDebug
+> Task :platforms:android-wallet:generateDebugAndroidTestLintModel
+> Task :platforms:android-wallet:generateDebugLintReportModel
+> Task :platforms:android-wallet:generateDebugUnitTestLintModel
+
+> Task :platforms:android-wallet:compileDebugUnitTestKotlin
+w: file:///home/ben/projects/decent-wallet-issue18-next/platforms/android-wallet/src/test/kotlin/org/decentwallet/wallet/android/PortableLatchTest.kt:303:68 Unchecked cast of 'Any?' to 'MutableMap<String, Any?>'.
+
+> Task :platforms:android-wallet:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :platforms:android-wallet:processDebugUnitTestJavaRes
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::arrayBaseOffset has been called by com.google.protobuf.UnsafeUtil$MemoryAccessor (file:/home/ben/.gradle/caches/modules-2/files-2.1/com.google.protobuf/protobuf-java/3.25.5/5ae5c9ec39930ae9b5a61b32b93288818ec05ec1/protobuf-java-3.25.5.jar)
+WARNING: Please consider reporting this to the maintainers of class com.google.protobuf.UnsafeUtil$MemoryAccessor
+WARNING: sun.misc.Unsafe::arrayBaseOffset will be removed in a future release
+> Task :platforms:android-wallet:lintAnalyzeDebug
+> Task :platforms:android-wallet:testDebugUnitTest
+> Task :platforms:android-wallet:lintAnalyzeDebugAndroidTest
+> Task :platforms:android-wallet:compileDebugAndroidTestKotlin
+> Task :platforms:android-wallet:compileDebugAndroidTestJavaWithJavac NO-SOURCE
+> Task :platforms:android-wallet:processDebugAndroidTestJavaRes
+> Task :platforms:android-wallet:mergeDebugAndroidTestJavaResource
+> Task :platforms:android-wallet:bundleLibRuntimeToDirDebug
+> Task :platforms:android-wallet:mergeLibDexDebugAndroidTest
+> Task :platforms:android-wallet:lintAnalyzeDebugUnitTest
+> Task :platforms:android-wallet:dexBuilderDebugAndroidTest
+> Task :platforms:android-wallet:mergeProjectDexDebugAndroidTest
+
+> Task :platforms:android-wallet:lintReportDebug
+Wrote HTML report to file:///home/ben/projects/decent-wallet-issue18-next/platforms/android-wallet/build/reports/lint-results-debug.html
+Wrote SARIF report to file:///home/ben/projects/decent-wallet-issue18-next/platforms/android-wallet/build/reports/lint-results-debug.sarif
+
+> Task :platforms:android-wallet:lintDebug
+> Task :platforms:android-wallet:packageDebugAndroidTest
+> Task :platforms:android-wallet:createDebugAndroidTestApkListingFileRedirect
+> Task :platforms:android-wallet:assembleDebugAndroidTest
+
+[Incubating] Problems report is available at: file:///home/ben/projects/decent-wallet-issue18-next/build/reports/problems/problems-report.html
+
+BUILD SUCCESSFUL in 2m 6s
+76 actionable tasks: 76 executed
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.5.0/userguide/configuration_cache_enabling.html

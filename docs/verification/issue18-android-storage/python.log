@@ -1,0 +1,32 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/ben/projects/decent-wallet-issue18-next
+configfile: pyproject.toml
+plugins: anyio-4.15.1, trio-0.8.0
+collected 315 items / 10 deselected / 305 selected
+
+tests/test_android_registry_peer.py ...........                          [  3%]
+tests/test_container.py ....................................             [ 15%]
+tests/test_container_vectors.py ...                                      [ 16%]
+tests/test_desktop_cli.py ........                                       [ 19%]
+tests/test_identity.py ...........                                       [ 22%]
+tests/test_identity_rotation_vector.py ..                                [ 23%]
+tests/test_issue18_podman_registry_deployment.py s                       [ 23%]
+tests/test_issue18_registry_acceptance_harness.py ...................... [ 30%]
+......................                                                   [ 38%]
+tests/test_issue18_remote_registry_harness.py ......................     [ 45%]
+tests/test_multisig.py ....................................              [ 57%]
+tests/test_podman_registry_peers.py ..........................           [ 65%]
+tests/test_portable_latch.py ..........................ss............... [ 79%]
+.......................................s........                         [ 95%]
+tests/test_registry_transport_integration.py .                           [ 95%]
+tests/test_registry_transport_public_api.py .                            [ 96%]
+tests/test_run_issue18_remote_registry_acceptance.py ..                  [ 96%]
+tests/test_signer.py ..........                                          [100%]
+
+- generated xml file: /home/ben/.hermes/cache/scratch/issue18-storage-pr-verification/python.xml -
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_issue18_podman_registry_deployment.py:26: the managed Podman Registry deployment is not configured
+SKIPPED [2] tests/test_portable_latch.py:543: opt-in host-JVM authored ciphertext consumer
+SKIPPED [1] tests/test_portable_latch.py:742: opt-in host-JVM authored ciphertext consumer
+=========== 301 passed, 4 skipped, 10 deselected in 84.08s (0:01:24) ===========

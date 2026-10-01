@@ -1,0 +1,29 @@
+{
+  "returncode": 0,
+  "tests": [
+    "failedRollbackSyncReportsUnknownOutcomeOnAndroid",
+    "importRefusesToOverwriteInitializedWalletOnAndroid",
+    "productionLifecycleMatchesVectorAndPreservesEncryptedBytes",
+    "publicImportStagingDenialLeavesDestinationAbsentOnAndroid",
+    "publicImportSyncFailureRemovesDestinationAndAllowsRecoveryOnAndroid",
+    "publicImportUnknownCleanupReturnsNoSessionOnAndroid",
+    "publicMigrationStagingDenialPreservesV1OnAndroid",
+    "publicMigrationSyncFailureRestoresV1AndAllowsRecoveryOnAndroid",
+    "publicMigrationUnknownRollbackReturnsNoSessionOnAndroid",
+    "recoverableCancellationRollbackKeepsSessionUsableOnAndroid",
+    "recoverableReplacementSyncFailureRestoresV1BytesOnAndroid",
+    "runsOnlyOnTheApprovedApiAndAbiTargets",
+    "unknownCancellationRollbackLocksAndClearsSessionOnAndroid",
+    "wrongPasswordMigrationPreservesOriginalV1BytesOnAndroid"
+  ],
+  "result": {
+    "tests": "14",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "72.37",
+    "timestamp": "2026-10-01T18:15:11",
+    "hostname": "localhost"
+  },
+  "patch_sha256": "eb8f80c7d9f0a7105e8ab9474d246f4e1dba21be881b84f8479002eed359aaee"
+}

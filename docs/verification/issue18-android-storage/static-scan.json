@@ -1,0 +1,17 @@
+{
+  "secret": [
+    "+        val password = \"public-test-only: wallet-v2-vector\"",
+    "+        val password = \"correct horse battery staple\"",
+    "+        val password = \"correct horse battery staple\"",
+    "+        val password = \"public-test-only: wallet-v2-vector\"",
+    "+        val password = \"correct horse battery staple\"",
+    "+        val password = \"synthetic device cancellation password\"",
+    "+        val password = \"public-test-only: wallet-v2-vector\"",
+    "+        val password = \"public-test-only: wallet-v2-vector\"",
+    "+        val password = \"correct horse battery staple\"",
+    "+        val password = \"correct horse battery staple\""
+  ],
+  "shell": [],
+  "eval": [],
+  "pickle": []
+}

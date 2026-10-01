@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" tests="23" skipped="0" failures="0" errors="0" timestamp="2026-10-01T18:17:20.710Z" hostname="benx1" time="10.654">
+  <properties/>
+  <testcase name="rejectsDuplicateThresholdSignerProofForVersionedRotation" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.435"/>
+  <testcase name="rejectsOutsiderProofForVersionedRotation" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.335"/>
+  <testcase name="ambiguousDispatchRemainsLatchedAndReopenUsesOnlyFreshReadback" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.688"/>
+  <testcase name="transientEnvironmentChangeDoesNotMintClearableRejection" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.279"/>
+  <testcase name="conditionalPreconditionReadbackOfExactCandidateConfirmsWithoutRetry" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.286"/>
+  <testcase name="latchPersistenceFailureDoesNotAllowNetworkWriteOrLeaveIntent" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="1.082"/>
+  <testcase name="candidateWithoutPredecessorHistoryRemainsUnknownAfterConditionalPrecondition" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.391"/>
+  <testcase name="rejectsInvalidThresholdSignatureForVersionedRotation" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.372"/>
+  <testcase name="lostPrewriteRejectionAfterReopenRemainsFailClosed" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.765"/>
+  <testcase name="latchedIntentCannotDispatchOrConfirmOnDifferentEnvironment" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.333"/>
+  <testcase name="conditionalPreconditionWithoutCandidateReadbackRemainsLatched" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.302"/>
+  <testcase name="transientCapabilityChangeDoesNotMintClearableRejection" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.316"/>
+  <testcase name="ambiguousVersionedDispatchReopensAndConfirmsWithoutRetry" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.66"/>
+  <testcase name="consentLatchConditionalDispatchAndFreshReadbackPromoteSuccessor" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.361"/>
+  <testcase name="alreadyAcceptedCandidateFromAnotherCopyConfirmsInsteadOfIssuingClearableRejection" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.344"/>
+  <testcase name="staleVersionedHeadIsRejectedBeforeConsent" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.351"/>
+  <testcase name="rejectsUnderThresholdProofSetForVersionedRotation" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.396"/>
+  <testcase name="prewriteExpiryRejectionClearsOnlyItsPermitAndRequiresNewConsent" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.442"/>
+  <testcase name="versionedPredecessorUsesExternalThresholdProofsForOperationFivePromotion" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.387"/>
+  <testcase name="promotionStorageFailurePreservesBothKeysAndLatchedIntent" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="1.082"/>
+  <testcase name="unsupportedTransportAndTamperedCandidateFailBeforeConsent" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.337"/>
+  <testcase name="stateChangeDuringConsentPreventsPublicationAndDeniedNonceCannotBeReplayed" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.308"/>
+  <testcase name="samePredecessorStateWithDifferentProofEnvelopeRemainsCurrentDuringConsent" classname="org.decentwallet.wallet.android.AndroidIdentityAdapterTest" time="0.398"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
