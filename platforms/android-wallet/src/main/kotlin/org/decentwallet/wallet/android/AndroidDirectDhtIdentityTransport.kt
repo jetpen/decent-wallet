@@ -35,7 +35,7 @@ class AndroidRegistryDhtConfig(
     }
 
     init {
-        require(registryEnvironment.isNotBlank() && registryEnvironment.length <= 256) {
+        require(validRegistryEnvironment(registryEnvironment)) {
             "Registry environment must be a stable non-empty identifier"
         }
         require(registryPeers.isNotEmpty() && registryPeers.size <= MAX_REGISTRY_PEERS) {

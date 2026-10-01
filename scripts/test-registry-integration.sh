@@ -13,4 +13,6 @@ fi
 
 uv run --locked --extra test \
     --with-editable "$registry_path" \
-    pytest -m registry_integration tests/test_registry_transport_integration.py
+    pytest -m registry_integration \
+        tests/test_registry_transport_integration.py \
+        tests/test_portable_latch_registry_integration.py

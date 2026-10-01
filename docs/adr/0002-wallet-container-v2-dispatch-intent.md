@@ -20,6 +20,10 @@ At decision time, Registry main did not support operation 5. Registry operation-
 - After latching, the wallet blocks signer creation, successor preparation, proof-of-possession, cancellation, and another latch. The adapter also gates ordinary signing and publication for that owner while its instance knows the latch; per-owner locking serializes this gate with writes. Generic wallet metadata updates preserve the intent. Conditional dispatch requires the ephemeral permit; remote confirmation requires a fresh uncached read. After reopen, the application must call read-only confirmation with the persisted intent before any other mutating adapter operation, installing the new instance's gate. Only a typed expiry rejection can clear the gate, and only after independent read-back does not show the exact candidate; stale-state or conditional-precondition conflicts remain latched unless exact candidate confirmation succeeds. Confirmed finalization clears the gate only after the local durable write.
 - The original decision covered local persistence only. The Python core now implements dispatch, confirmation, expiry-only pre-write rejection resolution, and successor promotion; stale-state and conditional-precondition conflicts remain latched unless exact candidate confirmation succeeds. Concrete production transport integration and target deployment remain unverified.
 
+## Portable latch amendment
+
+[ADR-0007](0007-portable-environment-bound-rotation-latch.md) amends the six-field payload with an exact environment-bound seven-field shape and explicitly consented local recovery for legacy unbound six-field intents. It leaves outer v2 and AAD unchanged, does not claim old readers accept the new shape, and preserves all dispatch/confirmation/key-retention safeguards.
+
 ## Consequences
 
 - Version-1 files remain unchanged on disk unless the caller explicitly invokes the migration in ADR-0003; direct open/import remain v2-only.

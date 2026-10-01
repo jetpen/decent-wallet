@@ -285,6 +285,7 @@ async def test_operation_five_desktop_api_handles_dispatch_outcomes(
             bootstrap_peers=[seed_peer],
             store_path=tmp_path / "rotation-client.lmdb",
             supports_owner_key_rotation=True,
+            registry_environment="local-registry-test",
         )
         seed_service = RegistryService(seed)
 
@@ -383,7 +384,8 @@ async def test_operation_five_desktop_api_handles_dispatch_outcomes(
                     raise TimeoutError("simulated lost acknowledgement after dispatch")
 
         dispatch_transport = DispatchOutcomeTransport(transport, outcome)
-        adapter = RegistryAdapter(dispatch_transport)
+        dispatch_transport.registry_environment = transport.registry_environment
+        adapter = RegistryAdapter(dispatch_transport, registry_environment="local-registry-test")
 
         def prepare_rotation():
             predecessor = adapter.read_state(owner_name=OWNER_NAME)

@@ -75,6 +75,12 @@ internal object ContainerCrypto {
                 WalletJson.decodeBase64(payloadEnvelope["tag"], TAG_BYTES),
             )
             val payload = WalletJson.decodePayload(plaintext)
+            try {
+                validateDispatchPayload(payload, version)
+            } catch (_: Exception) {
+                WalletJson.clearByteArrays(payload)
+                throw WalletInvalidContainerException()
+            }
             return OpenedContainer(dek, payload).also { dek = null }
         } catch (failure: WalletContainerException) {
             throw failure
@@ -85,6 +91,24 @@ internal object ContainerCrypto {
             dek?.fill(0)
             plaintext?.fill(0)
         }
+    }
+
+    private fun validateDispatchPayload(payload: Map<String, Any?>, version: Int) {
+        if (!payload.containsKey("rotation_dispatch_intent")) return
+        if (version != CURRENT_VERSION) invalidContainer()
+        val intent = OwnerKeyRotationDispatchIntent.fromPayload(payload["rotation_dispatch_intent"])
+        fun keyPair(seedField: String, publicField: String): ByteArray {
+            val seed = payload[seedField] as? ByteArray ?: invalidContainer()
+            val public = payload[publicField] as? ByteArray ?: invalidContainer()
+            if (seed.size != KEY_BYTES || public.size != KEY_BYTES) invalidContainer()
+            val derived = AndroidIdentityCrypto.publicKeyFromSeed(seed)
+            try { if (!derived.contentEquals(public)) invalidContainer() } finally { derived.fill(0) }
+            return public
+        }
+        val active = keyPair("private_seed", "public_key")
+        val pending = keyPair("pending_private_seed", "pending_public_key")
+        if (active.contentEquals(pending) || !active.contentEquals(intent.predecessorOwnerPublicKey) ||
+            !pending.contentEquals(intent.successorOwnerPublicKey)) invalidContainer()
     }
 
     fun create(password: String, confirmation: String, payload: Map<String, Any?>): CreatedContainer {

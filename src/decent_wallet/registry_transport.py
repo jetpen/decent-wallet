@@ -33,6 +33,9 @@ class RegistryTransport:
     ``supports_owner_key_rotation`` is a trusted operator assertion, not a
     network handshake, and defaults to false. Enable it only when every
     configured Registry peer is pinned to a compatible operation-5 validator.
+    ``registry_environment`` is an explicit trusted caller realm label, not network
+    authentication. Rotation adapters must explicitly configure the same label;
+    omission disables their rotation preparation/confirmation.
     ``readback_peer`` optionally pins a separate Registry peer for fresh
     confirmation reads; it must have a different peer ID from every bootstrap
     peer. If omitted, confirmation uses the configured bootstrap peers.
@@ -45,7 +48,12 @@ class RegistryTransport:
         store_path: str | Path,
         readback_peer: str | None = None,
         supports_owner_key_rotation: bool = False,
+        registry_environment: str | None = None,
     ) -> None:
+        from .container import valid_registry_environment
+        if registry_environment is not None and not valid_registry_environment(registry_environment):
+            raise ValueError("Registry environment must be a valid public realm identifier")
+        self._registry_environment = registry_environment
         if type(supports_owner_key_rotation) is not bool:
             raise TypeError("supports_owner_key_rotation must be a bool")
         if isinstance(bootstrap_peers, (str, bytes)):
@@ -101,6 +109,11 @@ class RegistryTransport:
         self._registry_service_type = RegistryService
         self._precondition_failed_type = IdentityStatePreconditionFailed
         self._publication_expired_type = IdentityPublicationExpired
+
+    @property
+    def registry_environment(self) -> str | None:
+        """Trusted caller realm label; not a network-authenticated identity."""
+        return self._registry_environment
 
     async def _execute(
         self,

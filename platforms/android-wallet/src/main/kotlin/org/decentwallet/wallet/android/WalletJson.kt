@@ -275,7 +275,7 @@ internal object WalletJson {
         return result
     }
 
-    private fun requireUnicodeScalars(value: String) {
+    internal fun requireUnicodeScalars(value: String) {
         var index = 0
         while (index < value.length) {
             val current = value[index]

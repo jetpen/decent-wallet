@@ -44,6 +44,7 @@ EXPIRY = 2_000_000_000
 
 class MemoryTransport:
     supports_owner_key_rotation = True
+    registry_environment = "testnet"  # Explicit synthetic test realm; never a production default.
 
     def __init__(self) -> None:
         self.envelope: bytes | None = None
@@ -1071,7 +1072,7 @@ def test_versioned_owner_key_rotation_preserves_signer_governance_and_stays_loca
     tmp_path,
 ):
     transport = MemoryTransport()
-    adapter = RegistryAdapter(transport)
+    adapter = RegistryAdapter(transport, registry_environment="testnet")
     wallets = make_wallets(tmp_path)
     alice = wallets["alice"]
 
@@ -1321,7 +1322,7 @@ def test_operation3_generation_skip_vector_matches_python_core():
 def make_legacy_rotation_bundle(tmp_path):
     wallets = make_wallets(tmp_path, names=("alice", "bob", "carol"))
     transport = MemoryTransport()
-    adapter = RegistryAdapter(transport)
+    adapter = RegistryAdapter(transport, registry_environment="testnet")
     owner = wallets["alice"]
     active_public_key = owner.public_key
     successor_public_key = owner.prepare_signing_key_rotation()
@@ -1810,7 +1811,7 @@ def test_ambiguous_rotation_stays_latched_until_fresh_remote_confirmation_after_
 
     owner.lock()
     reopened = Wallet.open(tmp_path / "alice.dw", PASSWORD)
-    reopened_adapter = RegistryAdapter(transport)
+    reopened_adapter = RegistryAdapter(transport, registry_environment="testnet")
     recovered_intent = reopened.signing_key_rotation_dispatch_intent
     assert recovered_intent is not None
     assert recovered_intent == intent

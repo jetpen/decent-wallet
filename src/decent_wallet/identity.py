@@ -646,6 +646,7 @@ class IdentityBundle:
 
 @dataclass(frozen=True, slots=True)
 class _RotationBinding:
+    environment: str | None
     owner_name: bytes
     predecessor_owner_public_key: bytes
     successor_owner_public_key: bytes
@@ -679,6 +680,7 @@ def _rotation_binding(value: Any) -> _RotationBinding | None:
     ):
         return None
     return _RotationBinding(
+        environment=getattr(value, "environment", None),
         owner_name=owner_name,
         predecessor_owner_public_key=predecessor_owner_public_key,
         successor_owner_public_key=successor_owner_public_key,
@@ -732,7 +734,13 @@ class _RotationLatchRegistry:
             with self._guard:
                 current = self._bindings.get(binding.owner_name)
                 if current is not None and current[0] != binding:
-                    return False
+                    from dataclasses import replace
+                    # Read-only registration may follow explicit local legacy binding.
+                    # Preserve the gate and never grant a dispatch-ready permit here.
+                    if (dispatch_ready or current[1] or current[0].environment is not None
+                        or binding.environment is None
+                        or replace(current[0], environment=binding.environment) != binding):
+                        return False
                 ready = dispatch_ready or (current is not None and current[1])
                 self._bindings[binding.owner_name] = (binding, ready)
                 return True
@@ -757,6 +765,7 @@ _ROTATION_CAPABILITY_SEAL = object()
 class RotationPublication:
     """One-use public capability prepared after rotation consent and state checks."""
 
+    environment: str
     _bundle: IdentityBundle
     _envelope_bytes: bytes
     _previous_state: IdentityState
@@ -771,6 +780,7 @@ class RotationPublication:
         *,
         seal: object,
         bundle: IdentityBundle,
+        environment: str,
         envelope_bytes: bytes,
         previous_state: IdentityState,
         expires_at: int,
@@ -779,6 +789,7 @@ class RotationPublication:
     ) -> None:
         if seal is not _ROTATION_CAPABILITY_SEAL:
             raise InvalidIdentityRequest()
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "_bundle", bundle)
         object.__setattr__(self, "_envelope_bytes", envelope_bytes)
         object.__setattr__(self, "_previous_state", previous_state)
@@ -869,6 +880,7 @@ class RotationPublication:
 
 @dataclass(frozen=True, slots=True, init=False)
 class RotationConfirmation:
+    environment: str
     owner_name: bytes
     predecessor_owner_public_key: bytes
     successor_owner_public_key: bytes
@@ -890,6 +902,7 @@ class RotationConfirmation:
         sequence: int,
         envelope_hash: bytes,
         state_hash: bytes,
+        environment: str,
         latch_registry: _RotationLatchRegistry,
     ) -> None:
         if seal is not _ROTATION_CAPABILITY_SEAL:
@@ -903,6 +916,7 @@ class RotationConfirmation:
             ("state_hash", state_hash),
         ):
             object.__setattr__(self, name, value)
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "sequence", sequence)
         object.__setattr__(self, "_seal", seal)
         object.__setattr__(self, "_latch_registry", latch_registry)
@@ -930,6 +944,7 @@ class RotationConfirmation:
 
 @dataclass(frozen=True, slots=True, init=False)
 class RotationDispatchRejection:
+    environment: str
     status: PublishStatus
     owner_name: bytes
     predecessor_owner_public_key: bytes
@@ -953,6 +968,7 @@ class RotationDispatchRejection:
             raise InvalidIdentityRequest()
         object.__setattr__(self, "status", status)
         for name in (
+            "environment",
             "owner_name",
             "predecessor_owner_public_key",
             "successor_owner_public_key",
@@ -1566,18 +1582,35 @@ class RegistryAdapter:
 
     The transport receives only owner-name hex, canonical public envelopes, and
     no wallet object or private material. It must implement independent readback
-    for confirmation after publication.
+    for confirmation after publication. ``registry_environment`` is explicit
+    trusted caller configuration, never network-authenticated or inferred.
+    Omission leaves non-rotation APIs available but disables rotation preparation
+    and confirmation. Concrete transport configuration must match it.
     """
 
     def __init__(
         self,
         transport: IdentityTransport,
         replay_store: ReplayNonceStore | None = None,
+        *,
+        registry_environment: str | None = None,
     ) -> None:
+        from .container import valid_registry_environment
+        if registry_environment is not None and not valid_registry_environment(registry_environment):
+            raise InvalidIdentityRequest()
+        self._registry_environment = registry_environment
         self._transport = transport
         self._replay_store = replay_store or InMemoryReplayNonceStore()
         self._rotation_token = object()
         self._rotation_latches = _RotationLatchRegistry()
+
+    def _rotation_environment_matches(self, environment: str | None) -> bool:
+        # Trusted caller configuration, not realm authentication by the network.
+        try:
+            return (environment is not None and environment == self._registry_environment
+                    and getattr(self._transport, "registry_environment", environment) == environment)
+        except Exception:
+            return False
 
     @staticmethod
     def _rotation_transport_available(transport: IdentityTransport) -> bool:
@@ -1606,6 +1639,7 @@ class RegistryAdapter:
         *,
         owner_name: bytes,
         envelope: bytes,
+        rotation_environment: str | None = None,
     ) -> IdentityState:
         chain: list[bytes] = []
         current_envelope = envelope
@@ -1626,6 +1660,8 @@ class RegistryAdapter:
                 )
                 break
             if len(chain) >= _MAX_PREDECESSOR_DEPTH:
+                raise InvalidIdentityState()
+            if rotation_environment is not None and not self._rotation_environment_matches(rotation_environment):
                 raise InvalidIdentityState()
             try:
                 predecessor_envelope = self._transport.get_identity_envelope_by_hash(
@@ -1941,11 +1977,17 @@ class RegistryAdapter:
                 status=PublishStatus.FAILED,
                 reason="rotation transport capability unavailable",
             )
+        from .container import valid_registry_environment
+        if (not valid_registry_environment(environment)
+            or not self._rotation_environment_matches(environment)):
+            return PublicationResult(status=PublishStatus.FAILED, reason="rotation environment mismatch")
         envelope = bundle.finalize()
         previous_state = _draft_previous_state(bundle.draft)
         if previous_state is None:
             raise InvalidIdentityRequest()
         current = self.read_state(owner_name=bundle.draft.owner_name)
+        if not self._rotation_environment_matches(environment):
+            return PublicationResult(status=PublishStatus.FAILED, reason="rotation environment mismatch")
         if not _same_state(previous_state, current):
             return PublicationResult(
                 status=PublishStatus.STALE,
@@ -1979,7 +2021,11 @@ class RegistryAdapter:
                 reason=reason,
             )
 
+        if not self._rotation_environment_matches(environment):
+            return PublicationResult(status=PublishStatus.FAILED, reason="rotation environment mismatch")
         current = self.read_state(owner_name=bundle.draft.owner_name)
+        if not self._rotation_environment_matches(environment):
+            return PublicationResult(status=PublishStatus.FAILED, reason="rotation environment mismatch")
         if not _same_state(previous_state, current):
             return PublicationResult(
                 status=PublishStatus.STALE,
@@ -1995,6 +2041,7 @@ class RegistryAdapter:
         publication = RotationPublication(
             seal=_ROTATION_CAPABILITY_SEAL,
             bundle=bundle,
+            environment=environment,
             envelope_bytes=envelope,
             previous_state=previous_state,
             expires_at=expires_at,
@@ -2025,6 +2072,8 @@ class RegistryAdapter:
         ):
             raise InvalidIdentityRequest()
         intent = permit.intent
+        if not self._rotation_environment_matches(intent.environment):
+            return RotationDispatchResult(status=PublishStatus.UNKNOWN, reason="rotation environment mismatch")
 
         def make_rejection(status: PublishStatus) -> RotationDispatchRejection:
             return RotationDispatchRejection(
@@ -2040,6 +2089,8 @@ class RegistryAdapter:
             candidate_observed_locally: bool = False,
             clearable_rejection: bool = False,
         ) -> RotationDispatchResult:
+            if not self._rotation_environment_matches(intent.environment):
+                return RotationDispatchResult(status=PublishStatus.UNKNOWN, reason="rotation environment mismatch")
             try:
                 remote_envelope = self._transport.get_remote_identity_envelope(
                     owner_name_hex=intent.owner_name.hex()
@@ -2049,6 +2100,8 @@ class RegistryAdapter:
                     status=PublishStatus.UNKNOWN,
                     reason="independent readback unavailable after pre-write rejection",
                 )
+            if not self._rotation_environment_matches(intent.environment):
+                return RotationDispatchResult(status=PublishStatus.UNKNOWN, reason="rotation environment mismatch")
             if type(remote_envelope) is not bytes:
                 return RotationDispatchResult(
                     status=PublishStatus.UNKNOWN,
@@ -2073,6 +2126,8 @@ class RegistryAdapter:
                     status=PublishStatus.UNKNOWN,
                     reason="pre-write outcome cannot safely clear the durable intent",
                 )
+            if not self._rotation_environment_matches(intent.environment):
+                return RotationDispatchResult(status=PublishStatus.UNKNOWN, reason="rotation environment mismatch")
             return RotationDispatchResult(
                 status=status,
                 rejection=make_rejection(status),
@@ -2115,6 +2170,8 @@ class RegistryAdapter:
                     clearable_rejection=True,
                 )
 
+            if not self._rotation_environment_matches(intent.environment):
+                return RotationDispatchResult(status=PublishStatus.UNKNOWN, reason="rotation environment mismatch")
             try:
                 self._transport.put_identity_envelope(
                     owner_name_hex=publication.owner_name.hex(),
@@ -2168,11 +2225,16 @@ class RegistryAdapter:
             or not self._rotation_latches.register(intent)
         ):
             raise InvalidIdentityRequest()
+        if (intent.environment is None or not self._rotation_environment_matches(intent.environment)
+            or not self._rotation_transport_available(self._transport)):
+            return None
         try:
             remote_envelope = self._transport.get_remote_identity_envelope(
                 owner_name_hex=intent.owner_name.hex()
             )
         except Exception:
+            return None
+        if not self._rotation_environment_matches(intent.environment):
             return None
         if type(remote_envelope) is not bytes:
             return None
@@ -2183,6 +2245,7 @@ class RegistryAdapter:
             state = self._parse_state_with_history(
                 owner_name=intent.owner_name,
                 envelope=remote_envelope,
+                rotation_environment=intent.environment,
             )
             _record, _payload, sequence, authorization = _decode_signed_update(
                 state.signed_update_bytes
@@ -2196,6 +2259,8 @@ class RegistryAdapter:
                 or sequence != intent.sequence
             ):
                 return None
+            if not self._rotation_environment_matches(intent.environment):
+                return None
             predecessor_envelope = self._transport.get_identity_envelope_by_hash(
                 owner_name_hex=intent.owner_name.hex(),
                 state_hash=intent.predecessor_state_hash,
@@ -2205,6 +2270,7 @@ class RegistryAdapter:
             predecessor = self._parse_state_with_history(
                 owner_name=intent.owner_name,
                 envelope=predecessor_envelope,
+                rotation_environment=intent.environment,
             )
             if (
                 predecessor.owner_public_key != intent.predecessor_owner_public_key
@@ -2213,6 +2279,8 @@ class RegistryAdapter:
             ):
                 return None
         except Exception:
+            return None
+        if not self._rotation_environment_matches(intent.environment):
             return None
         return RotationConfirmation(
             seal=_ROTATION_CAPABILITY_SEAL,
@@ -2223,6 +2291,7 @@ class RegistryAdapter:
             sequence=intent.sequence,
             envelope_hash=intent.envelope_hash,
             state_hash=state.state_hash,
+            environment=intent.environment,
             latch_registry=self._rotation_latches,
         )
 

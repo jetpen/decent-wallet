@@ -165,7 +165,15 @@ class AndroidWalletTest {
             mapOf(
                 "private_seed" to seed,
                 "public_key" to publicKey,
-                "rotation_dispatch_intent" to emptyMap<String, Any?>(),
+                "pending_private_seed" to ByteArray(32) { (it + 32).toByte() },
+                "pending_public_key" to AndroidIdentityCrypto.publicKeyFromSeed(ByteArray(32) { (it + 32).toByte() }),
+                "rotation_dispatch_intent" to OwnerKeyRotationDispatchIntent(
+                    ownerNameBytes = "synthetic-owner".toByteArray(),
+                    predecessorOwnerPublicKey = publicKey,
+                    successorOwnerPublicKey = AndroidIdentityCrypto.publicKeyFromSeed(ByteArray(32) { (it + 32).toByte() }),
+                    predecessorStateHash = ByteArray(32) { 3 }, sequence = java.math.BigInteger.ONE,
+                    environment = "testnet", envelopeHash = ByteArray(32) { 4 },
+                ).toPayload(),
             ),
         )
         try {
@@ -176,7 +184,7 @@ class AndroidWalletTest {
                 wallet.cancelSigningKeyRotation()
             }
             assertArrayEquals(publicKey, wallet.ownerPublicKey)
-            assertEquals(null, wallet.pendingOwnerPublicKey)
+            assertArrayEquals(AndroidIdentityCrypto.publicKeyFromSeed(ByteArray(32) { (it + 32).toByte() }), wallet.pendingOwnerPublicKey)
         } finally {
             wallet.close()
             seed.fill(0)

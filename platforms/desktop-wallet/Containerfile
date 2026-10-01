@@ -44,7 +44,7 @@ COPY pyproject.toml /tests/pyproject.toml
 ENV HOME=/tmp
 WORKDIR /tmp
 ENTRYPOINT ["/opt/venv/bin/python"]
-CMD ["-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "addopts=", "-m", "registry_integration", "/tests/test_registry_transport_integration.py"]
+CMD ["-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "addopts=", "-m", "registry_integration", "/tests/test_registry_transport_integration.py", "/tests/test_portable_latch_registry_integration.py"]
 
 FROM runtime AS registry-peer
 COPY tests/interop/podman_registry_node.py /opt/registry_peer_node.py

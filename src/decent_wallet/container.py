@@ -17,7 +17,7 @@ import secrets
 import tempfile
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from threading import Lock, RLock
 from pathlib import Path
@@ -119,6 +119,18 @@ class RotationInProgress(WalletError):
     message = "signing-key rotation dispatch is unresolved"
 
 
+def valid_registry_environment(value: Any) -> bool:
+    """Exact public realm ID: valid Unicode, 1..256 UTF-16 units, not White_Space-only."""
+    if type(value) is not str:
+        return False
+    try:
+        length = len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError:
+        return False
+    whitespace = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    return 1 <= length <= 256 and any(c not in whitespace for c in value)
+
+
 @dataclass(frozen=True, slots=True)
 class RotationDispatchIntent:
     """Public, non-secret binding for a possibly dispatched owner-key rotation."""
@@ -129,9 +141,12 @@ class RotationDispatchIntent:
     predecessor_state_hash: bytes
     sequence: int
     envelope_hash: bytes
+    environment: str | None = None
 
     def __post_init__(self) -> None:
-        if type(self.owner_name) is not bytes or not self.owner_name:
+        if self.environment is not None and not valid_registry_environment(self.environment):
+            raise InvalidContainer()
+        if type(self.owner_name) is not bytes or not 1 <= len(self.owner_name) <= 1024 * 1024:
             raise InvalidContainer()
         try:
             self.owner_name.decode("utf-8")
@@ -149,7 +164,7 @@ class RotationDispatchIntent:
             raise InvalidContainer()
 
     def _to_payload(self) -> dict[str, Any]:
-        return {
+        value = {
             "owner_name": self.owner_name,
             "predecessor_owner_public_key": self.predecessor_owner_public_key,
             "successor_owner_public_key": self.successor_owner_public_key,
@@ -157,17 +172,23 @@ class RotationDispatchIntent:
             "sequence": self.sequence,
             "envelope_hash": self.envelope_hash,
         }
+        if self.environment is not None:
+            value["environment"] = self.environment
+        return value
 
     @classmethod
     def _from_payload(cls, value: Any) -> "RotationDispatchIntent":
-        if not isinstance(value, dict) or set(value) != {
+        keys = {
             "owner_name",
             "predecessor_owner_public_key",
             "successor_owner_public_key",
             "predecessor_state_hash",
             "sequence",
             "envelope_hash",
-        }:
+        }
+        if not isinstance(value, dict) or set(value) not in (keys, keys | {"environment"}):
+            raise InvalidContainer()
+        if "environment" in value and not valid_registry_environment(value["environment"]):
             raise InvalidContainer()
         try:
             return cls(**value)
@@ -1213,6 +1234,7 @@ class Wallet:
                 predecessor_state_hash=authorization[7],
                 sequence=draft.sequence,
                 envelope_hash=hashlib.sha256(finalized_envelope).digest(),
+                environment=publication.environment,
             )
 
             with publication._owner_lock(intent):
@@ -1231,6 +1253,37 @@ class Wallet:
                     intent=intent,
                     seal=_ROTATION_PERMIT_SEAL,
                 )
+
+    def bind_legacy_rotation_dispatch_environment(
+        self, environment: str, *, consent: Callable[[RotationDispatchIntent, str], bool]
+    ) -> RotationDispatchIntent:
+        """Explicit local-only six-to-seven field recovery; never creates dispatch authority."""
+        from dataclasses import replace
+
+        from .identity import InvalidIdentityRequest
+
+        with self._rotation_lock:
+            self._touch()
+            intent = self.signing_key_rotation_dispatch_intent
+            if (intent is None or intent.environment is not None
+                or not valid_registry_environment(environment) or not callable(consent)):
+                raise InvalidIdentityRequest()
+            try:
+                approved = consent(intent, environment) is True
+            except Exception:
+                raise InvalidIdentityRequest() from None
+            self._touch()
+            if not approved or self.signing_key_rotation_dispatch_intent != intent:
+                raise InvalidIdentityRequest()
+            bound = replace(intent, environment=environment)
+            updated = dict(self._payload)
+            updated[_ROTATION_DISPATCH_INTENT] = bound._to_payload()
+            envelope = self._build_envelope(updated)
+            self._invalidate_capabilities()
+            self._persist_envelope(envelope)
+            self._payload = updated
+            self._envelope = envelope
+            return bound
 
     def finalize_signing_key_rotation(
         self, confirmation: "RotationConfirmation"
