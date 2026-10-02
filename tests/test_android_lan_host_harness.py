@@ -169,9 +169,9 @@ def test_device_driver_archives_consumed_owned_helper_before_launch(tmp_path):
     import os
     import shutil
     # Scratch archival drivers are not part of a clean checkout. Opt in explicitly.
-    driver_path = os.environ.get("ISSUE18_LAN_HOST_DRIVER")
+    driver_path = os.environ.get("ANDROID_LAN_HOST_ARCHIVAL_DRIVER")
     if not driver_path:
-        pytest.skip("set ISSUE18_LAN_HOST_DRIVER to verify a trusted local archival driver")
+        pytest.skip("set ANDROID_LAN_HOST_ARCHIVAL_DRIVER to verify a trusted local archival driver")
     driver = Path(driver_path).read_text()
     tree = ast.parse(driver)
     helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "archive_owned_helper"]
