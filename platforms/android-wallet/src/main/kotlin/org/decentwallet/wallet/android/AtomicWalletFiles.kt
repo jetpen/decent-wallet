@@ -9,6 +9,7 @@ import java.nio.file.Path
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
+import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
 import java.util.concurrent.ConcurrentHashMap
@@ -17,6 +18,22 @@ import kotlin.concurrent.withLock
 
 internal object AtomicWalletFiles {
     private val testDirectorySync = ThreadLocal<Pair<Path, (Path) -> Unit>>()
+    private val testBeforeCreateInstall = ThreadLocal<Pair<Path, (Path) -> Unit>>()
+
+    /** Scoped internal test seam for an external writer racing first installation. */
+    internal fun <T> withBeforeCreateInstallForTest(
+        directory: Path,
+        beforeInstall: (Path) -> Unit,
+        action: () -> T,
+    ): T {
+        val prior = testBeforeCreateInstall.get()
+        testBeforeCreateInstall.set(directory.toAbsolutePath().normalize() to beforeInstall)
+        return try {
+            action()
+        } finally {
+            if (prior == null) testBeforeCreateInstall.remove() else testBeforeCreateInstall.set(prior)
+        }
+    }
 
     /** Scoped internal test seam; never a public API or process-wide fault switch. */
     internal fun <T> withDirectorySyncForTest(
@@ -78,14 +95,19 @@ internal object AtomicWalletFiles {
             }
             staged = stage(parent, bytes)
             if (Files.exists(target, NOFOLLOW_LINKS)) throw WalletStorageException()
-            Files.move(staged, target, ATOMIC_MOVE)
-            staged = null
-            installed = true
-            fsyncDirectory(parent)
-            val persisted = readLocked(target)
-            val verified = persisted.contentEquals(bytes)
-            persisted.fill(0)
-            if (!verified) throw IOException()
+            val beforeInstall = testBeforeCreateInstall.get()
+            if (beforeInstall != null && beforeInstall.first == parent) beforeInstall.second(target)
+            withCreateInstallLock(parent) {
+                if (Files.exists(target, NOFOLLOW_LINKS)) throw WalletStorageException()
+                Files.move(checkNotNull(staged), target)
+                staged = null
+                installed = true
+                fsyncDirectory(parent)
+                val persisted = readLocked(target)
+                val verified = persisted.contentEquals(bytes)
+                persisted.fill(0)
+                if (!verified) throw IOException()
+            }
         } catch (failure: WalletContainerException) {
             cleanupStage(staged)
             if (!installed) throw failure
@@ -246,7 +268,34 @@ internal object AtomicWalletFiles {
         }
     }
 
+    internal const val INSTALL_LOCK_FILE_NAME = ".decent-wallet-install.lock"
+
     private val pathLocks = ConcurrentHashMap<String, ReentrantLock>()
+    private val installDirectoryLocks = ConcurrentHashMap<String, ReentrantLock>()
+
+    private fun <T> withCreateInstallLock(parent: Path, action: () -> T): T {
+        val directory = parent.toAbsolutePath().normalize()
+        val key = directory.toString()
+        return installDirectoryLocks.computeIfAbsent(key) { ReentrantLock() }.withLock {
+            val lockPath = directory.resolve(INSTALL_LOCK_FILE_NAME)
+            FileChannel.open(lockPath, CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
+                channel.lock().use {
+                    try {
+                        Files.setPosixFilePermissions(
+                            lockPath,
+                            setOf(
+                                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                            ),
+                        )
+                    } catch (_: UnsupportedOperationException) {
+                        // App-private Android directories already restrict access to the application UID.
+                    }
+                    action()
+                }
+            }
+        }
+    }
 
     private fun <T> withPathLock(path: Path, action: () -> T): T {
         val key = path.toAbsolutePath().normalize().toString()

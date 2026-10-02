@@ -1,25 +1,29 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import sys
 import time
 from pathlib import Path
 from typing import cast
 
 import pytest
-
 import trio
 
-from decent_wallet.identity import ExpiredPublication, StalePublication
 from decent_wallet import (
     ConsentDecision,
     IdentityBundle,
     PublishStatus,
     RegistryAdapter,
     RegistryTransport,
+    RotationInProgress,
+    StorageFailure,
+    StorageOutcomeUnknown,
     Wallet,
+    WalletLockedError,
 )
-
+from decent_wallet.identity import ExpiredPublication, StalePublication
 
 OWNER_NAME = b"wallet-direct-dht-integration"
 
@@ -226,6 +230,7 @@ async def test_remote_readback_uses_independent_peer_after_writer_stops(tmp_path
                 readback_peer=readback_peer,
                 store_path=tmp_path / "wallet-independent-readback.lmdb",
                 supports_owner_key_rotation=True,
+                registry_environment="local-registry-test",
             )
 
             def publish_candidate():
@@ -262,9 +267,16 @@ async def test_remote_readback_uses_independent_peer_after_writer_stops(tmp_path
 
 @pytest.mark.registry_integration
 @pytest.mark.trio
-@pytest.mark.parametrize("outcome", ["success", "expired", "ambiguous"])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "success", "expired", "ambiguous", "conditional", "promotion_failure",
+        "promotion_rollback", "promotion_unknown",
+    ]
+)
 async def test_operation_five_desktop_api_handles_dispatch_outcomes(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
     outcome: str,
 ):
     from decent_registry.dht.libp2p_dht import Libp2pKadDHT
@@ -300,7 +312,7 @@ async def test_operation_five_desktop_api_handles_dispatch_outcomes(
                 for name in ("owner", "bob", "carol")
             )
         )
-        bootstrap_adapter = RegistryAdapter(transport)
+        bootstrap_adapter = RegistryAdapter(transport, registry_environment="local-registry-test")
 
         def create_genesis_bundle():
             draft = bootstrap_adapter.create_draft(
@@ -337,6 +349,7 @@ async def test_operation_five_desktop_api_handles_dispatch_outcomes(
                 )
                 self.hide_remote_readback = False
                 self.write_attempts = 0
+                self.conditional_rejections = 0
 
             def get_identity_envelope(
                 self, *, owner_name_hex: str
@@ -373,12 +386,21 @@ async def test_operation_five_desktop_api_handles_dispatch_outcomes(
                 self.write_attempts += 1
                 if self.outcome == "expired":
                     raise ExpiredPublication()
-                self.inner.put_identity_envelope(
-                    owner_name_hex=owner_name_hex,
-                    envelope_cbor=envelope_cbor,
-                    expected_state_hash=expected_state_hash,
-                    expires_at=expires_at,
-                )
+                try:
+                    self.inner.put_identity_envelope(
+                        owner_name_hex=owner_name_hex,
+                        envelope_cbor=envelope_cbor,
+                        expected_state_hash=(
+                            b"\xff" * 32
+                            if self.outcome == "conditional"
+                            else expected_state_hash
+                        ),
+                        expires_at=expires_at,
+                    )
+                except StalePublication:
+                    if self.outcome == "conditional":
+                        self.conditional_rejections += 1
+                    raise
                 if self.outcome == "ambiguous":
                     self.hide_remote_readback = True
                     raise TimeoutError("simulated lost acknowledgement after dispatch")
@@ -449,6 +471,27 @@ async def test_operation_five_desktop_api_handles_dispatch_outcomes(
         assert owner.pending_signing_public_key == successor_public_key
         assert owner.signing_key_rotation_dispatch_intent == permit.intent
 
+        if outcome == "conditional":
+            assert dispatch_result.status is PublishStatus.UNKNOWN
+            assert dispatch_result.confirmation is None
+            assert dispatch_result.rejection is None
+            assert dispatch_transport.write_attempts == 1
+            assert dispatch_transport.conditional_rejections == 1
+            assert owner.public_key == active_public_key
+            assert owner.pending_signing_public_key == successor_public_key
+            assert owner.signing_key_rotation_dispatch_intent == permit.intent
+            observed_remote = await run_in_thread(
+                lambda: transport.get_remote_identity_envelope(
+                    owner_name_hex=owner_name_hex
+                )
+            )
+            assert observed_remote == genesis_envelope
+            assert observed_remote != finalized_envelope
+            await run_in_thread(owner.lock)
+            await run_in_thread(bob.lock)
+            await run_in_thread(carol.lock)
+            return
+
         if outcome == "expired":
             assert dispatch_result.status is PublishStatus.EXPIRED
             assert dispatch_result.confirmation is None
@@ -489,11 +532,113 @@ async def test_operation_five_desktop_api_handles_dispatch_outcomes(
                 lambda: adapter.confirm_owner_key_rotation(permit.intent)
             )
         else:
-            assert outcome == "success"
+            assert outcome in {
+                "success", "promotion_failure", "promotion_rollback", "promotion_unknown"
+            }
             assert dispatch_result.status is PublishStatus.CONFIRMED
             confirmation = dispatch_result.confirmation
 
         assert confirmation is not None
+        if outcome in {"promotion_failure", "promotion_rollback", "promotion_unknown"}:
+            import decent_wallet.container as container_module
+
+            wallet_path = tmp_path / "owner.dw"
+            before = wallet_path.read_bytes()
+            intent = permit.intent
+
+            original_stage = container_module._stage_file
+            original_sync = container_module._fsync_directory
+            stage_calls = 0
+            sync_calls = 0
+
+            def fail_stage(path, data, *, replace):
+                nonlocal stage_calls
+                stage_calls += 1
+                if outcome == "promotion_failure" or (
+                    outcome == "promotion_unknown" and stage_calls == 2
+                ):
+                    raise OSError("injected promotion staging failure")
+                return original_stage(path, data, replace=replace)
+
+            def fail_first_sync(directory):
+                nonlocal sync_calls
+                sync_calls += 1
+                if sync_calls == 1:
+                    # Replacement is real and already visible before the failure.
+                    assert wallet_path.read_bytes() != before
+                    raise OSError("injected promotion directory-sync failure")
+                original_sync(directory)
+
+            expected_error = (
+                StorageOutcomeUnknown if outcome == "promotion_unknown" else StorageFailure
+            )
+            with monkeypatch.context() as storage_fault:
+                storage_fault.setattr(container_module, "_stage_file", fail_stage)
+                if outcome != "promotion_failure":
+                    storage_fault.setattr(
+                        container_module, "_fsync_directory", fail_first_sync
+                    )
+                with pytest.raises(expected_error):
+                    await run_in_thread(
+                        lambda: owner.finalize_signing_key_rotation(confirmation)
+                    )
+
+            if outcome == "promotion_unknown":
+                assert stage_calls == 2
+                assert sync_calls == 1
+                assert not owner.is_unlocked
+                with pytest.raises(WalletLockedError):
+                    owner.create_signer()
+                # This injected failure leaves the promoted file visible, but does
+                # not establish durable persistence after an actual filesystem outage.
+                assert wallet_path.read_bytes() != before
+                assert list(tmp_path.glob(".decent-wallet-*")) == []
+                assert await run_in_thread(
+                    lambda: transport.get_remote_identity_envelope(
+                        owner_name_hex=owner_name_hex
+                    )
+                ) == finalized_envelope
+                reopened = await run_in_thread(lambda: Wallet.open(wallet_path, password))
+                assert reopened.public_key == successor_public_key
+                assert reopened.pending_signing_public_key is None
+                assert reopened.signing_key_rotation_dispatch_intent is None
+                assert dispatch_transport.write_attempts == 1
+                await run_in_thread(reopened.lock)
+                await run_in_thread(bob.lock)
+                await run_in_thread(carol.lock)
+                return
+
+            if outcome == "promotion_rollback":
+                assert stage_calls == 2
+                assert sync_calls == 2
+            assert wallet_path.read_bytes() == before
+            assert owner.public_key == active_public_key
+            assert owner.pending_signing_public_key == successor_public_key
+            assert owner.signing_key_rotation_dispatch_intent == intent
+            with pytest.raises(RotationInProgress):
+                owner.create_signer()
+            assert list(tmp_path.glob(".decent-wallet-*")) == []
+            assert await run_in_thread(
+                lambda: transport.get_remote_identity_envelope(
+                    owner_name_hex=owner_name_hex
+                )
+            ) == finalized_envelope
+            await run_in_thread(owner.lock)
+            owner = await run_in_thread(lambda: Wallet.open(wallet_path, password))
+            assert owner.public_key == active_public_key
+            assert owner.pending_signing_public_key == successor_public_key
+            assert owner.signing_key_rotation_dispatch_intent == intent
+            with pytest.raises(RotationInProgress):
+                owner.create_signer()
+            # Recreate the adapter too: recovery must not depend on its prior
+            # process-local confirmation/latch bookkeeping.
+            adapter = RegistryAdapter(dispatch_transport, registry_environment="local-registry-test")
+            confirmation = await run_in_thread(
+                lambda: adapter.confirm_owner_key_rotation(intent)
+            )
+            assert confirmation is not None
+            assert dispatch_transport.write_attempts == 1
+
         await run_in_thread(lambda: owner.finalize_signing_key_rotation(confirmation))
 
         assert owner.public_key == successor_public_key
@@ -504,6 +649,89 @@ async def test_operation_five_desktop_api_handles_dispatch_outcomes(
             owner_name_hex=owner_name_hex
         ) == finalized_envelope
 
+        if outcome in {"promotion_failure", "promotion_rollback"}:
+            await run_in_thread(owner.lock)
+            owner = await run_in_thread(
+                lambda: Wallet.open(tmp_path / "owner.dw", password)
+            )
+            assert owner.public_key == successor_public_key
+            assert owner.pending_signing_public_key is None
+            assert owner.signing_key_rotation_dispatch_intent is None
+            assert dispatch_transport.write_attempts == 1
+
         await run_in_thread(owner.lock)
         await run_in_thread(bob.lock)
         await run_in_thread(carol.lock)
+
+
+@pytest.mark.registry_integration
+@pytest.mark.trio
+@pytest.mark.parametrize("fault", ["missing", "corrupt"])
+async def test_operation_five_desktop_adapter_fails_closed_on_unavailable_versioned_history(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+    fault: str,
+) -> None:
+    from decent_registry.dht.libp2p_dht import Libp2pKadDHT
+    from decent_registry.durable_store import LMDBDatastore
+    from decent_registry.exceptions import IdentityHistoryUnavailable
+    from decent_registry.registry_service import RegistryService
+
+    from decent_wallet.identity import InvalidIdentityRequest
+
+    helper_path = Path(__file__).parent / "interop" / "start_android_registry_peer.py"
+    spec = importlib.util.spec_from_file_location("issue18_history_fixture", helper_path)
+    assert spec is not None and spec.loader is not None
+    history_fixture = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = history_fixture
+    request.addfinalizer(lambda: sys.modules.pop(spec.name, None))
+    spec.loader.exec_module(history_fixture)
+    fixture = history_fixture.load_fixture("versioned")
+
+    async with Libp2pKadDHT(
+        durable_store=LMDBDatastore(path=tmp_path / "fault-writer.lmdb")
+    ) as writer, Libp2pKadDHT(
+        durable_store=LMDBDatastore(path=tmp_path / "fault-readback.lmdb")
+    ) as readback:
+        writer_peer = writer.get_listen_multiaddr()
+        if "/p2p/" not in writer_peer:
+            writer_peer = f"{writer_peer}/p2p/{writer.host.get_id().to_string()}"
+        readback_peer = readback.get_listen_multiaddr()
+        if "/p2p/" not in readback_peer:
+            readback_peer = f"{readback_peer}/p2p/{readback.host.get_id().to_string()}"
+        await history_fixture.seed_peer_with_fixture(writer, fixture)
+        await history_fixture.seed_peer_with_fixture(readback, fixture)
+        await writer.bootstrap(readback_peer)
+        await readback.bootstrap(writer_peer)
+        history_fixture.inject_history_fault(writer, fixture, fault)
+        history_fixture.inject_history_fault(readback, fixture, fault)
+
+        record_key = bytes.fromhex(fixture.identity_key)
+        assert writer._durable_get(kind="identity", key=record_key) == fixture.predecessor
+        assert readback._durable_get(kind="identity", key=record_key) == fixture.predecessor
+        with pytest.raises(IdentityHistoryUnavailable):
+            await RegistryService(writer).get_identity_envelope(
+                owner_name_hex=fixture.owner_name.hex()
+            )
+        with pytest.raises(IdentityHistoryUnavailable):
+            await RegistryService(readback).get_identity_envelope(
+                owner_name_hex=fixture.owner_name.hex()
+            )
+
+        transport = RegistryTransport(
+            bootstrap_peers=[writer_peer],
+            readback_peer=readback_peer,
+            store_path=tmp_path / "wallet-fault-client.lmdb",
+            supports_owner_key_rotation=True,
+            registry_environment="local-registry-test",
+        )
+        adapter = RegistryAdapter(transport, registry_environment="local-registry-test")
+
+        def create_rotation_draft() -> None:
+            adapter.create_owner_key_rotation_draft(
+                owner_name=fixture.owner_name,
+                successor_owner_public_key=bytes.fromhex("a5" * 32),
+            )
+
+        with pytest.raises(InvalidIdentityRequest):
+            await trio.to_thread.run_sync(create_rotation_draft)

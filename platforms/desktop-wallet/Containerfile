@@ -20,6 +20,18 @@ RUN uv sync --locked --extra test --extra registry --no-editable \
   && uv cache clean
 COPY scripts ./scripts
 COPY tests ./tests
+# Source-capture conformance consumes the same locked Android/JVM build inputs.
+COPY build.gradle.kts settings.gradle.kts gradle.properties gradlew gradlew.bat ./
+COPY gradle ./gradle
+COPY platforms/android-wallet/build.gradle.kts platforms/android-wallet/gradle.lockfile ./platforms/android-wallet/
+COPY platforms/android-wallet/src ./platforms/android-wallet/src
+COPY interop/android-lan-host/build.gradle.kts interop/android-lan-host/gradle.lockfile ./interop/android-lan-host/
+COPY interop/android-lan-host/src ./interop/android-lan-host/src
+COPY interop/android-runtime/build.gradle.kts interop/android-runtime/gradle.lockfile ./interop/android-runtime/
+COPY interop/android-runtime/src ./interop/android-runtime/src
+COPY interop/kotlin/pom.xml interop/kotlin/lockfile.json interop/kotlin/mvnw interop/kotlin/mvnw.cmd ./interop/kotlin/
+COPY interop/kotlin/.mvn ./interop/kotlin/.mvn
+COPY interop/kotlin/src ./interop/kotlin/src
 ENV HOME=/tmp
 WORKDIR /tmp
 USER 65532:65532
@@ -44,7 +56,10 @@ COPY pyproject.toml /tests/pyproject.toml
 ENV HOME=/tmp
 WORKDIR /tmp
 ENTRYPOINT ["/opt/venv/bin/python"]
-CMD ["-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "addopts=", "-m", "registry_integration", "/tests/test_registry_transport_integration.py", "/tests/test_portable_latch_registry_integration.py"]
+# Keep canonical local-storage/CLI cases in the ordinary host suite; select them
+# explicitly here instead of mislabelling them as optional Registry integration.
+# Kotlin-authored peer cases still require PORTABLE_LATCH_ARTIFACT_DIR.
+CMD ["-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "addopts=", "/tests/test_registry_transport_integration.py", "/tests/test_portable_latch_registry_integration.py", "/tests/test_desktop_cli.py::test_export_and_import_never_overwrite_existing_paths", "/tests/test_desktop_cli.py::test_migration_failure_does_not_rewrite_legacy_wallet", "/tests/test_container.py::test_v1_migration_directory_sync_failure_restores_source", "/tests/test_container.py::test_v1_migration_pre_replace_failure_preserves_source", "/tests/test_container.py::test_v1_migration_reports_unknown_if_rollback_fails", "/tests/test_container.py::test_wallet_locks_after_unverified_storage_rollback"]
 
 FROM runtime AS registry-peer
 COPY tests/interop/podman_registry_node.py /opt/registry_peer_node.py

@@ -629,6 +629,39 @@ class AndroidWalletTest {
     }
 
     @Test
+    fun publicImportCannotReplaceDestinationCreatedAfterItsPreflightCheck() {
+        val directory = Files.createTempDirectory("wallet-android-import-race-")
+        val source = directory.resolve("source.dw")
+        val destination = directory.resolve("destination.dw")
+        val password = "a sufficiently long test password"
+        val sourceWallet = AndroidWallet.create(source, password, password, mapOf("owner" to "incoming"))
+        val incoming = sourceWallet.exportContainer()
+        sourceWallet.close()
+        val rivalPath = directory.resolve("rival.dw")
+        val rivalWallet = AndroidWallet.create(rivalPath, password, password, mapOf("owner" to "external"))
+        val rivalBytes = rivalWallet.exportContainer()
+        rivalWallet.close()
+        Files.delete(rivalPath)
+        try {
+            org.junit.Assert.assertThrows(WalletStorageException::class.java) {
+                AtomicWalletFiles.withBeforeCreateInstallForTest(directory, { target ->
+                    Files.write(target, rivalBytes)
+                }) {
+                    AndroidWallet.importContainer(destination, incoming, password).use { }
+                }
+            }
+            assertArrayEquals(rivalBytes, Files.readAllBytes(destination))
+            AndroidWallet.open(destination, password).use { rival ->
+                assertEquals("external", rival.readPayload()["owner"])
+            }
+        } finally {
+            incoming.fill(0)
+            rivalBytes.fill(0)
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    @Test
     fun createDoesNotReplaceAnInitializedWallet() {
         val directory = Files.createTempDirectory("wallet-android-no-overwrite-")
         val path = directory.resolve("wallet.dw")
@@ -724,7 +757,9 @@ class AndroidWalletTest {
             assertFalse(sessionReturned)
             assertEquals(2, syncCalls)
             assertFalse(Files.exists(path))
-            Files.list(directory).use { paths -> assertEquals(0L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(0L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
             if (!cleanupSyncFails) {
                 AndroidWallet.importContainer(path, imported, password).use { recovered -> assertArrayEquals(imported, recovered.exportContainer()) }
                 AndroidWallet.open(path, password).use { reopened -> assertArrayEquals(imported, reopened.exportContainer()) }
@@ -776,7 +811,9 @@ class AndroidWalletTest {
             assertEquals("wallet storage outcome is unknown", failure.message)
             assertFalse(sessionReturned)
             assertEquals(2, syncCalls)
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                    assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+                }
             // Visible restored bytes are not a durable-state assertion. Do not reopen/retry this wallet.
             assertArrayEquals(original, Files.readAllBytes(path))
             val probe = directory.resolve("scope-probe.dw")
@@ -862,7 +899,9 @@ class AndroidWalletTest {
             assertEquals("wallet storage operation failed", failure.message)
             assertEquals(2, syncCalls)
             assertArrayEquals(original, Files.readAllBytes(path))
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                    assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+                }
             // Exception unwinding must remove the scoped callback before healthy public recovery.
             AndroidWallet.migrateContainer(path, password).use { recovered ->
                 assertEquals(32, recovered.ownerPublicKey.size)

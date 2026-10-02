@@ -6,10 +6,6 @@ import sys
 from collections.abc import Sequence
 
 import trio
-from decent_registry.dht.libp2p_dht import Libp2pKadDHT
-from decent_registry.durable_store import LMDBDatastore
-from libp2p.peer.peerinfo import info_from_p2p_addr
-from multiaddr import Multiaddr
 
 
 def announce_address(listen_multiaddr: str, peer_id: str) -> str:
@@ -31,6 +27,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 async def _run_peer(args: argparse.Namespace) -> None:
+    from decent_registry.dht.libp2p_dht import DHTMode, Libp2pKadDHT
+    from decent_registry.durable_store import LMDBDatastore
+    from libp2p.peer.peerinfo import info_from_p2p_addr
+    from multiaddr import Multiaddr
+
     listen = f"/ip4/{args.host}/tcp/{args.port}"
     datastore = LMDBDatastore(path=args.datastore_path)
     async with Libp2pKadDHT(listen=listen, durable_store=datastore) as peer:
