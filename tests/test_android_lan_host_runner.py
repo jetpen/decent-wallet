@@ -1,6 +1,6 @@
 from pathlib import Path
 import pytest
-from test_issue18_lan_host_harness import harness
+from test_android_lan_host_harness import harness
 
 
 def test_existing_incomplete_evidence_directory_is_immutable(tmp_path):

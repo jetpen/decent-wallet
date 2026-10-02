@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-_REMOTE_ROOT_NAME = re.compile(r"issue18-registry-[A-Za-z0-9]{8,64}\Z")
+_REMOTE_ROOT_NAME = re.compile(r"decent-wallet-registry-[A-Za-z0-9]{8,64}\Z")
 _TAILSCALE_IPV4 = ipaddress.IPv4Network("100.64.0.0/10")
 _PEER_ID = re.compile(r"[1-9A-HJ-NP-Za-km-z]{20,100}\Z")
 _REGISTRY_GIT_REVISION = re.compile(r"(?:[?&]rev=|#)([0-9a-f]{40})(?=$|[&#])")
@@ -295,7 +295,7 @@ class RemoteRegistryPeerFixture:
 
     def _allocate_remote_root(self) -> Path:
         result = self._run_remote(
-            ["mktemp", "-d", "--tmpdir=/tmp", "issue18-registry-XXXXXXXXXXXX"]
+            ["mktemp", "-d", "--tmpdir=/tmp", "decent-wallet-registry-XXXXXXXXXXXX"]
         )
         if result.returncode != 0:
             raise RuntimeError("could not create the temporary Registry test directory")
@@ -465,7 +465,7 @@ class RemoteRegistryPeerFixture:
             )
             if result.returncode == 0 and not self._remote_exists(self.remote_root):
                 return
-            marker = self.remote_root / ".issue18-remote-test"
+            marker = self.remote_root / ".decent-wallet-registry-test"
             worker_stopped = self.process is None or self.process.poll() is not None
             if self._remote_exists(marker) or not worker_stopped:
                 raise RuntimeError("remote Registry cleanup refused to remove its temporary root")

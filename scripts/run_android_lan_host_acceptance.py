@@ -11,12 +11,12 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from issue18_remote_registry import (
+from remote_registry_fixture import (
     RemotePeerAddress,
     RemoteRegistryPeerFixture,
     ssh_command,
 )
-from run_issue18_registry_acceptance import (
+from run_wallet_registry_acceptance import (
     adb_path,
     select_single_emulator,
     verify_android_target,

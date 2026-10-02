@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-REMOTE_PATH = ROOT / "scripts" / "issue18_remote_registry.py"
-REMOTE_SPEC = importlib.util.spec_from_file_location("issue18_remote_registry", REMOTE_PATH)
+REMOTE_PATH = ROOT / "scripts" / "remote_registry_fixture.py"
+REMOTE_SPEC = importlib.util.spec_from_file_location("remote_registry_fixture", REMOTE_PATH)
 assert REMOTE_SPEC is not None and REMOTE_SPEC.loader is not None
 REMOTE = importlib.util.module_from_spec(REMOTE_SPEC)
 sys.modules[REMOTE_SPEC.name] = REMOTE
 REMOTE_SPEC.loader.exec_module(REMOTE)
 
-MODULE_PATH = ROOT / "scripts" / "run_issue18_remote_registry_acceptance.py"
-SPEC = importlib.util.spec_from_file_location("run_issue18_remote_registry_acceptance", MODULE_PATH)
+MODULE_PATH = ROOT / "scripts" / "run_remote_registry_acceptance.py"
+SPEC = importlib.util.spec_from_file_location("run_remote_registry_acceptance", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)

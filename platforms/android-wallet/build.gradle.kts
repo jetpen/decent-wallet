@@ -10,7 +10,7 @@ plugins {
 val registryTestPeer = providers.environmentVariable("DECENT_REGISTRY_TEST_PEER").orElse("")
 val registryTestReadbackPeer = providers.environmentVariable("DECENT_REGISTRY_TEST_READBACK_PEER").orElse("")
 val registryTestFixture = providers.environmentVariable("DECENT_REGISTRY_TEST_FIXTURE").orElse("legacy")
-val issue18AndroidTestClass = providers.gradleProperty("issue18AndroidTestClass").orElse("")
+val walletAndroidTestClass = providers.gradleProperty("walletAndroidTestClass").orElse("")
 
 android {
     namespace = "org.decentwallet.wallet.android"
@@ -23,7 +23,7 @@ android {
         testInstrumentationRunnerArguments["decentRegistryTestPeer"] = registryTestPeer.get()
         testInstrumentationRunnerArguments["decentRegistryTestReadbackPeer"] = registryTestReadbackPeer.get()
         testInstrumentationRunnerArguments["decentRegistryTestFixture"] = registryTestFixture.get()
-        issue18AndroidTestClass.orNull?.takeIf(String::isNotBlank)?.let {
+        walletAndroidTestClass.orNull?.takeIf(String::isNotBlank)?.let {
             testInstrumentationRunnerArguments["class"] = it
         }
     }
@@ -78,7 +78,7 @@ tasks.matching { it.name == "connectedDebugAndroidTest" }.configureEach {
     inputs.property("decentRegistryTestPeer", registryTestPeer)
     inputs.property("decentRegistryTestReadbackPeer", registryTestReadbackPeer)
     inputs.property("decentRegistryTestFixture", registryTestFixture)
-    inputs.property("issue18AndroidTestClass", issue18AndroidTestClass)
+    inputs.property("walletAndroidTestClass", walletAndroidTestClass)
 }
 
 dependencies {

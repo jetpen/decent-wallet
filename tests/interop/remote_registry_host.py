@@ -17,11 +17,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-ROOT_PATTERN = re.compile(r"issue18-registry-[A-Za-z0-9]{8,64}\Z")
+ROOT_PATTERN = re.compile(r"decent-wallet-registry-[A-Za-z0-9]{8,64}\Z")
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 REGISTRY_URL = "https://github.com/jetpen/decent-registry.git"
 UV_VERSION = "0.12.19"
-MARKER_NAME = ".issue18-remote-test"
+MARKER_NAME = ".decent-wallet-registry-test"
 MAX_LIFETIME_SECONDS = 3600
 STARTUP_TIMEOUT_SECONDS = 180
 _ACTIVE_SETUP_PROCESS: subprocess.Popen[bytes] | None = None
@@ -63,12 +63,12 @@ def validate_root(root_text: str, *, require_marker: bool = False) -> Path:
         or root.is_symlink()
         or not root.is_dir()
     ):
-        raise ValueError("remote root is not an owned Issue #18 temporary directory")
+        raise ValueError("remote root is not an owned wallet Registry temporary directory")
     if root.stat().st_uid != os.getuid():
         raise ValueError("remote temporary directory is not owned by the current user")
     if require_marker:
         marker = root / MARKER_NAME
-        if not marker.is_file() or marker.read_text(encoding="utf-8") != "issue18-remote-test\n":
+        if not marker.is_file() or marker.read_text(encoding="utf-8") != "decent-wallet-registry-test\n":
             raise ValueError("remote temporary directory marker does not match")
     return root
 
@@ -104,8 +104,8 @@ def _isolated_env(root: Path) -> dict[str, str]:
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    session_id = getattr(process, "_issue18_session_id", None) or _process_session_id(process.pid)
-    leader_start_time = getattr(process, "_issue18_start_time", None) or _process_start_time(process.pid)
+    session_id = getattr(process, "_registry_fixture_session_id", None) or _process_session_id(process.pid)
+    leader_start_time = getattr(process, "_registry_fixture_start_time", None) or _process_start_time(process.pid)
     if not _stop_process_group(
         process.pid,
         lambda _pid: True,
@@ -146,8 +146,8 @@ def _run_setup_command(
             if process_session_id is None or process_start_time is None:
                 raise RemoteSetupError("registry_setup_process_identity_unavailable")
             process_metadata: Any = process
-            process_metadata._issue18_session_id = process_session_id
-            process_metadata._issue18_start_time = process_start_time
+            process_metadata._registry_fixture_session_id = process_session_id
+            process_metadata._registry_fixture_start_time = process_start_time
             _write_manifest(
                 root,
                 setup_pid=process.pid,
@@ -427,8 +427,8 @@ def _start_peer_phase(
         if process_session_id is None or process_start_time is None:
             raise RemoteSetupError("registry_peer_process_identity_unavailable")
         process_metadata: Any = process
-        process_metadata._issue18_session_id = process_session_id
-        process_metadata._issue18_start_time = process_start_time
+        process_metadata._registry_fixture_session_id = process_session_id
+        process_metadata._registry_fixture_start_time = process_start_time
         _write_manifest(
             root,
             phase=phase,
@@ -489,8 +489,8 @@ def _start_peer_phase(
 def _stop_peer_process(process: subprocess.Popen[str] | None) -> bool:
     if process is None:
         return True
-    session_id = getattr(process, "_issue18_session_id", None) or _process_session_id(process.pid)
-    leader_start_time = getattr(process, "_issue18_start_time", None) or _process_start_time(process.pid)
+    session_id = getattr(process, "_registry_fixture_session_id", None) or _process_session_id(process.pid)
+    leader_start_time = getattr(process, "_registry_fixture_start_time", None) or _process_start_time(process.pid)
     return _stop_process_group(
         process.pid,
         lambda _pid: True,
@@ -692,8 +692,8 @@ def _stop_process_group(
 
 
 def _signal_owned_process_group(process: subprocess.Popen[Any], signal_number: int) -> bool:
-    session_id = getattr(process, "_issue18_session_id", None) or _process_session_id(process.pid)
-    leader_start_time = getattr(process, "_issue18_start_time", None) or _process_start_time(process.pid)
+    session_id = getattr(process, "_registry_fixture_session_id", None) or _process_session_id(process.pid)
+    leader_start_time = getattr(process, "_registry_fixture_start_time", None) or _process_start_time(process.pid)
     members = _process_group_pids(process.pid)
     if not members:
         return True
@@ -809,7 +809,7 @@ def _serve(root_text: str, revision: str) -> int:
     root = validate_root(root_text)
     revision = validate_registry_revision(revision)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    (root / MARKER_NAME).write_text("issue18-remote-test\n", encoding="utf-8")
+    (root / MARKER_NAME).write_text("decent-wallet-registry-test\n", encoding="utf-8")
     for name in ("fixtures/tests/interop", "fixtures/tests/vectors", "data"):
         (root / name).mkdir(parents=True, exist_ok=True)
     supervisor_session_id = _process_session_id(os.getpid())
@@ -937,7 +937,7 @@ def _serve(root_text: str, revision: str) -> int:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Temporary Issue #18 Registry test host")
+    parser = argparse.ArgumentParser(description="Temporary wallet Registry test host")
     subparsers = parser.add_subparsers(dest="command", required=True)
     serve = subparsers.add_parser("serve")
     serve.add_argument("--root", required=True)
