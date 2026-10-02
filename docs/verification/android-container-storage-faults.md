@@ -78,7 +78,7 @@ ANDROID_HOME="$HOME/Android/Sdk" ANDROID_SDK_ROOT="$HOME/Android/Sdk" \
 
 ANDROID_HOME="$HOME/Android/Sdk" ANDROID_SDK_ROOT="$HOME/Android/Sdk" \
   ./gradlew --no-daemon --dependency-verification=strict \
-  -Pissue18AndroidTestClass=org.decentwallet.wallet.android.AndroidWalletRuntimeTest \
+  -PwalletAndroidTestClass=org.decentwallet.wallet.android.AndroidWalletRuntimeTest \
   :platforms:android-wallet:connectedDebugAndroidTest --rerun-tasks
 ```
 
@@ -89,8 +89,14 @@ before running the next target. The class selector is explicit; running it does
 not refresh the full networked suite. No Registry configuration or ADB reverse
 mapping is needed.
 
-The adjacent `issue18-android-storage/` evidence bundle records the tested base,
-implementation patch hash, tracked source hashes, fresh machine reports, exact
-device commands, runtime/AVD/image identities, and independent review. Hashes refer
-to the extracted implementation before this documentation/evidence was added;
-older broad-worktree matrix results are not relabelled as this PR's verification.
+The adjacent `issue18-android-storage/` evidence bundle is deliberately retained
+under its historical path. It is an immutable record of the Issue #18 verification
+run: captured commands, logs, source manifests and hashes use the original names.
+Renaming or rewriting the bundle would make its provenance harder to audit. The
+maintained runner, selector, and reproduction command above use purpose-based
+names; this archive path is historical evidence, not an executable interface.
+The bundle records the tested base, implementation patch hash, tracked source hashes,
+fresh machine reports, exact device commands, runtime/AVD/image identities, and
+independent review. Hashes refer to the extracted implementation before this
+documentation/evidence was added; older broad-worktree matrix results are not
+relabeled as this PR's verification.

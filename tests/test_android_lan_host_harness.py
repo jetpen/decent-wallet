@@ -8,10 +8,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from issue18_remote_registry import parse_remote_peer_address
+from remote_registry_fixture import parse_remote_peer_address
 
 spec = importlib.util.spec_from_file_location(
-    "lan_host_acceptance", ROOT / "scripts/run_issue18_lan_host_acceptance.py"
+    "lan_host_acceptance", ROOT / "scripts/run_android_lan_host_acceptance.py"
 )
 assert spec and spec.loader
 harness = importlib.util.module_from_spec(spec)
@@ -152,7 +152,7 @@ def test_source_snapshot_captures_all_consumed_build_sources_and_packaged_assets
     files = {str(path.relative_to(ROOT)) for path in harness.source_files()}
     required = {
         "platforms/android-wallet/build.gradle.kts", "platforms/android-wallet/gradle.lockfile",
-        "scripts/run_issue18_registry_acceptance.py", "pyproject.toml", "gradle.properties",
+        "scripts/run_wallet_registry_acceptance.py", "pyproject.toml", "gradle.properties",
         "gradle/wrapper/gradle-wrapper.properties", "gradle/wrapper/gradle-wrapper.jar", "gradlew",
         "interop/kotlin/src/test/kotlin/org/decentwallet/interop/WalletContainerV2Verifier.kt",
         "interop/kotlin/src/test/kotlin/org/decentwallet/interop/WireJson.kt",
@@ -169,9 +169,9 @@ def test_device_driver_archives_consumed_owned_helper_before_launch(tmp_path):
     import os
     import shutil
     # Scratch archival drivers are not part of a clean checkout. Opt in explicitly.
-    driver_path = os.environ.get("ISSUE18_LAN_HOST_DRIVER")
+    driver_path = os.environ.get("ANDROID_LAN_HOST_ARCHIVAL_DRIVER")
     if not driver_path:
-        pytest.skip("set ISSUE18_LAN_HOST_DRIVER to verify a trusted local archival driver")
+        pytest.skip("set ANDROID_LAN_HOST_ARCHIVAL_DRIVER to verify a trusted local archival driver")
     driver = Path(driver_path).read_text()
     tree = ast.parse(driver)
     helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "archive_owned_helper"]

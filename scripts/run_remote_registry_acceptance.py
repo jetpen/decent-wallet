@@ -6,14 +6,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from issue18_remote_registry import RemoteRegistryPeerFixture
+from remote_registry_fixture import RemoteRegistryPeerFixture
 
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID_TEST = (
     "org.decentwallet.wallet.android.AndroidDirectDhtRegistryInteropTest."
     "readsHistoryPublishesAndFreshReadsAgainstPythonRegistryPeer"
 )
-DESKTOP_TEST = "tests/test_issue18_remote_registry_acceptance.py"
+DESKTOP_TEST = "tests/test_remote_registry_acceptance.py"
 
 
 def desktop_test_command() -> list[str]:
@@ -126,9 +126,9 @@ def main(argv: list[str] | None = None) -> int:
             phase=args.phase,
         )
     except (OSError, RuntimeError, subprocess.CalledProcessError, TimeoutError, ValueError) as exc:
-        print(f"Issue #18 remote acceptance failed: {exc}", file=sys.stderr, flush=True)
+        print(f"Remote Registry acceptance failed: {exc}", file=sys.stderr, flush=True)
         return 1
-    print("Issue #18 remote acceptance completed; temporary Registry deployment was removed.")
+    print("Remote Registry acceptance completed; temporary Registry deployment was removed.")
     return 0
 
 

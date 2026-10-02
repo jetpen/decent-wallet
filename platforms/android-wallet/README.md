@@ -46,12 +46,12 @@ From the repository root, with JDK 17 and Android SDK/build-tools 37 installed:
   :platforms:android-wallet:connectedDebugAndroidTest
 ```
 
-## Issue #18 Registry acceptance harness
+## Wallet Registry acceptance harness
 
 Use the self-managed runner to test both the desktop `RegistryTransport` and Android device transport against real local Registry peers:
 
 ```sh
-python scripts/run_issue18_registry_acceptance.py --serial emulator-5554
+python scripts/run_wallet_registry_acceptance.py --serial emulator-5554
 ```
 
 The default run executes the marked Python Registry integration tests first, which own their peer fixtures. It then runs the complete Android host-JVM suite against a fresh two-peer Registry fixture, followed by ten device phases, each with another fresh fixture:
@@ -72,9 +72,9 @@ Each filtered phase requires its exact class/method and fixture label. The defau
 Options:
 
 ```sh
-python scripts/run_issue18_registry_acceptance.py --desktop-only
-python scripts/run_issue18_registry_acceptance.py --jvm-only
-python scripts/run_issue18_registry_acceptance.py --android-only --serial emulator-5554
+python scripts/run_wallet_registry_acceptance.py --desktop-only
+python scripts/run_wallet_registry_acceptance.py --jvm-only
+python scripts/run_wallet_registry_acceptance.py --android-only --serial emulator-5554
 ```
 
 `--android-only` skips the Python tests but still runs host-JVM interop and device instrumentation.

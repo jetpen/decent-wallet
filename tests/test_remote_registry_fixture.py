@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "scripts" / "issue18_remote_registry.py"
-SPEC = importlib.util.spec_from_file_location("issue18_remote_registry", MODULE_PATH)
+MODULE_PATH = ROOT / "scripts" / "remote_registry_fixture.py"
+SPEC = importlib.util.spec_from_file_location("remote_registry_fixture", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 REMOTE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = REMOTE
@@ -24,20 +24,20 @@ HOST_SPEC.loader.exec_module(HOST)
 
 
 def test_remote_root_must_be_a_dedicated_tmp_directory() -> None:
-    root = REMOTE.validate_temp_root("/tmp/issue18-registry-a1b2c3d4")
-    assert root == Path("/tmp/issue18-registry-a1b2c3d4")
+    root = REMOTE.validate_temp_root("/tmp/decent-wallet-registry-a1b2c3d4")
+    assert root == Path("/tmp/decent-wallet-registry-a1b2c3d4")
 
     for path in (
         "/home/ben/projects/decent-registry",
         "/tmp/registry-data",
-        "/tmp/issue18-registry-../other",
+        "/tmp/decent-wallet-registry-../other",
     ):
         with pytest.raises(ValueError, match="dedicated temporary directory"):
             REMOTE.validate_temp_root(path)
 
 
 def test_remote_environment_redirects_all_install_caches_into_temp_root() -> None:
-    root = Path("/tmp/issue18-registry-a1b2c3d4")
+    root = Path("/tmp/decent-wallet-registry-a1b2c3d4")
     env = REMOTE.isolated_environment(root, {"HOME": "/home/ben", "PATH": "/custom/bin"})
 
     for key in (
@@ -212,9 +212,9 @@ def test_scp_copies_only_into_the_created_temporary_root() -> None:
         "ben-x260.tailca8b51.ts.net",
         host_key_alias="ben-x260",
         source=Path("/tmp/source.py"),
-        remote_path="/tmp/issue18-registry-a1b2c3d4/source.py",
+        remote_path="/tmp/decent-wallet-registry-a1b2c3d4/source.py",
     )
-    assert command[-1] == "ben-x260.tailca8b51.ts.net:/tmp/issue18-registry-a1b2c3d4/source.py"
+    assert command[-1] == "ben-x260.tailca8b51.ts.net:/tmp/decent-wallet-registry-a1b2c3d4/source.py"
     with pytest.raises(ValueError, match="temporary Registry directory"):
         REMOTE.scp_command(
             "ben-x260.tailca8b51.ts.net",
@@ -225,7 +225,7 @@ def test_scp_copies_only_into_the_created_temporary_root() -> None:
         REMOTE.scp_command(
             "ben-x260.tailca8b51.ts.net",
             source=Path("/tmp/source.py"),
-            remote_path="/tmp/issue18-registry-a1b2c3d4/../outside.py",
+            remote_path="/tmp/decent-wallet-registry-a1b2c3d4/../outside.py",
         )
 
 
@@ -240,7 +240,7 @@ def test_remote_fixture_deploys_resets_and_tears_down_in_one_temp_root(
     import queue
     import subprocess
 
-    root = "/tmp/issue18-registry-a1b2c3d4"
+    root = "/tmp/decent-wallet-registry-a1b2c3d4"
     writer_id = "12D3KooWPSZfHTwEMA91h9NVw3ocpuNWAzKLjBEU9ofioP795EHB"
     readback_id = "11111111111111111111"
 
@@ -330,7 +330,7 @@ def test_remote_fixture_deploys_resets_and_tears_down_in_one_temp_root(
     assert any(command[0] == "scp" for command in commands)
     assert all(
         command[0] != "scp"
-        or command[-1].startswith("ben-x260.tailca8b51.ts.net:/tmp/issue18-registry-a1b2c3d4/")
+        or command[-1].startswith("ben-x260.tailca8b51.ts.net:/tmp/decent-wallet-registry-a1b2c3d4/")
         for command in commands
     )
     assert fake_process.code == 0

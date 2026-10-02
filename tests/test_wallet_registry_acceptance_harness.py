@@ -9,8 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "run_issue18_registry_acceptance.py"
-SPEC = importlib.util.spec_from_file_location("issue18_registry_acceptance", SCRIPT)
+SCRIPT = ROOT / "scripts" / "run_wallet_registry_acceptance.py"
+SPEC = importlib.util.spec_from_file_location("wallet_registry_acceptance", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 HARNESS = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = HARNESS
@@ -352,7 +352,7 @@ def test_registry_fixture_stops_on_keyboard_interrupt_during_startup(
         fixture.__enter__()
 
     assert process.returncode == 0
-    assert list(tmp_path.glob("issue18-registry-harness-*")) == []
+    assert list(tmp_path.glob("wallet-registry-harness-*")) == []
 
 
 def test_fixture_reader_queues_only_readiness_records() -> None:
@@ -611,7 +611,7 @@ def test_versioned_android_runtime_wires_fixture_filter_and_verified_report(
     command = captured["command"]
     assert isinstance(command, list)
     assert (
-        f"-Pissue18AndroidTestClass={HARNESS.ROTATION_TEST_CLASS}#{HARNESS.ROTATION_TEST_NAME}"
+        f"-PwalletAndroidTestClass={HARNESS.ROTATION_TEST_CLASS}#{HARNESS.ROTATION_TEST_NAME}"
         in command
     )
     env = captured["env"]
@@ -667,7 +667,7 @@ def test_versioned_history_fault_android_runtime_wires_fixture_filter_and_report
     command = captured["command"]
     assert isinstance(command, list)
     assert (
-        "-Pissue18AndroidTestClass="
+        "-PwalletAndroidTestClass="
         "org.decentwallet.wallet.android.AndroidDirectDhtRegistryRuntimeTest#"
         "versionedHistoryAvailabilityFailsClosedBeforeDraftCreation"
     ) in command
@@ -811,7 +811,7 @@ def test_promotion_staging_runtime_wires_fault_label_and_cleanup(
     assert fixture_args["predecessor_format"] == "versioned"
     assert fixture_args["history_fault"] == "none"
     assert (
-        f"-Pissue18AndroidTestClass={HARNESS.ROTATION_TEST_CLASS}#{HARNESS.ROTATION_TEST_NAME}"
+        f"-PwalletAndroidTestClass={HARNESS.ROTATION_TEST_CLASS}#{HARNESS.ROTATION_TEST_NAME}"
         in command
     )
     assert cleanup[2] == {31457: 39101, 31458: 39102}
@@ -1090,7 +1090,7 @@ def test_parse_args_accepts_podman_peer_backend(
         HARNESS.sys,
         "argv",
         [
-            "run_issue18_registry_acceptance.py",
+            "run_wallet_registry_acceptance.py",
             "--jvm-only",
             "--peer-backend",
             "podman",
@@ -1197,7 +1197,7 @@ def test_registry_fixture_does_not_allocate_scratch_before_environment_resolutio
         fixture.__enter__()
 
     assert fixture._scratch is None
-    assert list(tmp_path.glob("issue18-registry-harness-*")) == []
+    assert list(tmp_path.glob("wallet-registry-harness-*")) == []
 
 
 def test_registry_python_executable_comes_from_locked_project(

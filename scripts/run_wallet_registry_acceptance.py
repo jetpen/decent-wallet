@@ -28,9 +28,9 @@ ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_REPO_DEFAULT = ROOT.parent / "decent-registry"
 FIXTURE_SCRIPT = ROOT / "tests" / "interop" / "start_android_registry_peer.py"
 PODMAN_FIXTURE_SCRIPT = ROOT / "tests" / "interop" / "start_podman_registry_peers.py"
-PODMAN_DESKTOP_TEST = ROOT / "tests" / "test_issue18_podman_registry_deployment.py"
+PODMAN_DESKTOP_TEST = ROOT / "tests" / "test_podman_registry_deployment.py"
 PODMAN_DESKTOP_TEST_NAME = "test_podman_writer_publication_remains_peer_scoped"
-PODMAN_DESKTOP_TEST_CLASS = "tests.test_issue18_podman_registry_deployment"
+PODMAN_DESKTOP_TEST_CLASS = "tests.test_podman_registry_deployment"
 ROTATION_TEST_NAME = "rotatesWalletThroughDirectDhtAndPersistsPromotionOnAndroid"
 HISTORY_AVAILABILITY_TEST_NAME = (
     "versionedHistoryAvailabilityFailsClosedBeforeDraftCreation"
@@ -671,7 +671,7 @@ class RegistryPeerFixture:
         )
         scratch_root.mkdir(parents=True, exist_ok=True)
         self._scratch = tempfile.TemporaryDirectory(
-            prefix="issue18-registry-harness-", dir=scratch_root
+            prefix="wallet-registry-harness-", dir=scratch_root
         )
         self._data_root = Path(self._scratch.name) / "peer-data"
         self._data_root.mkdir()
@@ -813,7 +813,7 @@ class RegistryPeerFixture:
 
 
 def fail(message: str) -> NoReturn:
-    raise SystemExit(f"Issue #18 Registry acceptance harness: {message}")
+    raise SystemExit(f"Wallet Registry acceptance harness: {message}")
 
 
 def run_command(
@@ -1198,7 +1198,7 @@ def run_versioned_android_runtime(
                 "./gradlew",
                 "--no-daemon",
                 "--dependency-verification=strict",
-                f"-Pissue18AndroidTestClass={ROTATION_TEST_CLASS}#{test_name}",
+                f"-PwalletAndroidTestClass={ROTATION_TEST_CLASS}#{test_name}",
                 ":platforms:android-wallet:connectedDebugAndroidTest",
                 "--rerun-tasks",
             ]
@@ -1540,7 +1540,7 @@ def main() -> int:
         )
     except HarnessError as exc:
         print(
-            f"Issue #18 Registry acceptance harness: {format_harness_error(exc)}",
+            f"Wallet Registry acceptance harness: {format_harness_error(exc)}",
             file=sys.stderr,
             flush=True,
         )
@@ -1582,7 +1582,7 @@ def main() -> int:
         )
     except HarnessError as exc:
         print(
-            f"Issue #18 Registry acceptance harness: {format_harness_error(exc)}",
+            f"Wallet Registry acceptance harness: {format_harness_error(exc)}",
             file=sys.stderr,
             flush=True,
         )

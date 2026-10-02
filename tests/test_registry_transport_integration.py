@@ -680,7 +680,7 @@ async def test_operation_five_desktop_adapter_fails_closed_on_unavailable_versio
     from decent_wallet.identity import InvalidIdentityRequest
 
     helper_path = Path(__file__).parent / "interop" / "start_android_registry_peer.py"
-    spec = importlib.util.spec_from_file_location("issue18_history_fixture", helper_path)
+    spec = importlib.util.spec_from_file_location("versioned_history_fixture", helper_path)
     assert spec is not None and spec.loader is not None
     history_fixture = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = history_fixture
