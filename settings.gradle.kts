@@ -33,4 +33,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "decent-wallet"
-include(":interop:android-runtime", ":platforms:android-wallet")
+include(":interop:android-runtime", ":platforms:android-wallet", ":interop:android-lan-host")

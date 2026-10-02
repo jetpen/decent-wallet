@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <service
+            android:name="org.decentwallet.wallet.android.ImportRaceWriterOneService"
+            android:exported="false"
+            android:process=":walletImportRaceOne" />
+        <service
+            android:name="org.decentwallet.wallet.android.ImportRaceWriterTwoService"
+            android:exported="false"
+            android:process=":walletImportRaceTwo" />
+    </application>
+</manifest>

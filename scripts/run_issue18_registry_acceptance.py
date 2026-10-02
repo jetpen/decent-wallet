@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_REPO_DEFAULT = ROOT.parent / "decent-registry"
 FIXTURE_SCRIPT = ROOT / "tests" / "interop" / "start_android_registry_peer.py"
@@ -33,11 +32,34 @@ PODMAN_DESKTOP_TEST = ROOT / "tests" / "test_issue18_podman_registry_deployment.
 PODMAN_DESKTOP_TEST_NAME = "test_podman_writer_publication_remains_peer_scoped"
 PODMAN_DESKTOP_TEST_CLASS = "tests.test_issue18_podman_registry_deployment"
 ROTATION_TEST_NAME = "rotatesWalletThroughDirectDhtAndPersistsPromotionOnAndroid"
-ROTATION_TEST_CLASS = "org.decentwallet.wallet.android.AndroidDirectDhtRegistryRuntimeTest"
+HISTORY_AVAILABILITY_TEST_NAME = (
+    "versionedHistoryAvailabilityFailsClosedBeforeDraftCreation"
+)
+ROTATION_TEST_CLASS = (
+    "org.decentwallet.wallet.android.AndroidDirectDhtRegistryRuntimeTest"
+)
 JVM_INTEROP_TEST_NAME = "readsHistoryPublishesAndFreshReadsAgainstPythonRegistryPeer"
-JVM_INTEROP_TEST_CLASS = "org.decentwallet.wallet.android.AndroidDirectDhtRegistryInteropTest"
-JVM_RESULTS = ROOT / "platforms" / "android-wallet" / "build" / "test-results" / "testDebugUnitTest"
-ANDROID_RESULTS = ROOT / "platforms" / "android-wallet" / "build" / "outputs" / "androidTest-results" / "connected" / "debug"
+JVM_INTEROP_TEST_CLASS = (
+    "org.decentwallet.wallet.android.AndroidDirectDhtRegistryInteropTest"
+)
+JVM_RESULTS = (
+    ROOT
+    / "platforms"
+    / "android-wallet"
+    / "build"
+    / "test-results"
+    / "testDebugUnitTest"
+)
+ANDROID_RESULTS = (
+    ROOT
+    / "platforms"
+    / "android-wallet"
+    / "build"
+    / "outputs"
+    / "androidTest-results"
+    / "connected"
+    / "debug"
+)
 APPROVED_ANDROID_TARGETS = {
     "Medium_Phone": {
         "AvdId": "Medium_Phone",
@@ -132,12 +154,16 @@ def parse_peer_multiaddr(value: str) -> RegistryPeerAddress:
         raise HarnessError("fixture emitted an unsupported loopback peer multiaddr")
     port = int(match.group(1))
     peer_id = match.group(2)
-    if not 1 <= port <= 65535 or not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{20,}", peer_id):
+    if not 1 <= port <= 65535 or not re.fullmatch(
+        r"[1-9A-HJ-NP-Za-km-z]{20,}", peer_id
+    ):
         raise HarnessError("fixture emitted an invalid Registry peer address")
     return RegistryPeerAddress(multiaddr=value.strip(), port=port, peer_id=peer_id)
 
 
-def parse_ready_lines(lines: list[str]) -> tuple[RegistryPeerAddress, RegistryPeerAddress]:
+def parse_ready_lines(
+    lines: list[str],
+) -> tuple[RegistryPeerAddress, RegistryPeerAddress]:
     ready: dict[str, RegistryPeerAddress] = {}
     for line in lines:
         parts = line.strip().split("\t", 1)
@@ -145,18 +171,26 @@ def parse_ready_lines(lines: list[str]) -> tuple[RegistryPeerAddress, RegistryPe
             continue
         tag, multiaddr = parts
         if tag in ready:
-            raise HarnessError(f"Registry fixture emitted duplicate {tag} readiness lines")
+            raise HarnessError(
+                f"Registry fixture emitted duplicate {tag} readiness lines"
+            )
         ready[tag] = parse_peer_multiaddr(multiaddr)
     if set(ready) != {"READY_WRITE", "READY_READBACK"}:
-        raise HarnessError("Registry fixture did not announce both writer and read-back peers")
+        raise HarnessError(
+            "Registry fixture did not announce both writer and read-back peers"
+        )
     writer = ready["READY_WRITE"]
     readback = ready["READY_READBACK"]
     if writer.peer_id == readback.peer_id or writer.port == readback.port:
-        raise HarnessError("fixture must expose distinct Registry peers and listener ports")
+        raise HarnessError(
+            "fixture must expose distinct Registry peers and listener ports"
+        )
     return writer, readback
 
 
-def select_single_emulator(devices_output: str, requested_serial: str | None = None) -> str:
+def select_single_emulator(
+    devices_output: str, requested_serial: str | None = None
+) -> str:
     emulators: list[tuple[str, str]] = []
     connected: list[str] = []
     for line in devices_output.splitlines():
@@ -179,7 +213,9 @@ def select_single_emulator(devices_output: str, requested_serial: str | None = N
         )
     serial = emulators[0][0]
     if requested_serial is not None and serial != requested_serial:
-        raise HarnessError(f"requested serial {requested_serial!r}, but the sole emulator is {serial!r}")
+        raise HarnessError(
+            f"requested serial {requested_serial!r}, but the sole emulator is {serial!r}"
+        )
     return serial
 
 
@@ -196,7 +232,9 @@ def read_avd_config(avd_name: str, env: dict[str, str]) -> dict[str, str]:
     try:
         lines = config_path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
-        raise HarnessError(f"could not read host AVD configuration for {avd_name}") from exc
+        raise HarnessError(
+            f"could not read host AVD configuration for {avd_name}"
+        ) from exc
     config: dict[str, str] = {}
     for line in lines:
         if "=" in line and not line.lstrip().startswith("#"):
@@ -213,28 +251,49 @@ def verify_android_target(adb: Path, serial: str) -> tuple[str, int, str]:
         if line.strip() and line.strip().upper() != "OK"
     ]
     if len(avd_names) != 1:
-        raise HarnessError("could not determine the connected emulator's host-side AVD name")
+        raise HarnessError(
+            "could not determine the connected emulator's host-side AVD name"
+        )
     avd_name = avd_names[0]
     expected = APPROVED_ANDROID_TARGETS.get(avd_name)
     if expected is None:
-        raise HarnessError(f"{avd_name} is not an approved AVD for Issue #18 runtime tests")
+        raise HarnessError(
+            f"{avd_name} is not an approved AVD for Issue #18 runtime tests"
+        )
     if adb_output(adb, serial, "shell", "getprop", "sys.boot_completed").strip() != "1":
         raise HarnessError(f"approved AVD {avd_name} has not completed boot")
     config = read_avd_config(avd_name, os.environ.copy())
-    for key in ("AvdId", "abi.type", "image.sysdir.1", "target", "PlayStore.enabled", "tag.ids"):
+    for key in (
+        "AvdId",
+        "abi.type",
+        "image.sysdir.1",
+        "target",
+        "PlayStore.enabled",
+        "tag.ids",
+    ):
         if config.get(key) != expected[key]:
-            raise HarnessError(f"approved AVD {avd_name} has an unexpected {key} image configuration")
-    api_text = adb_output(adb, serial, "shell", "getprop", "ro.build.version.sdk").strip()
+            raise HarnessError(
+                f"approved AVD {avd_name} has an unexpected {key} image configuration"
+            )
+    api_text = adb_output(
+        adb, serial, "shell", "getprop", "ro.build.version.sdk"
+    ).strip()
     abi = adb_output(adb, serial, "shell", "getprop", "ro.product.cpu.abi").strip()
     try:
         api = int(api_text)
     except ValueError as exc:
-        raise HarnessError(f"approved AVD {avd_name} reported an invalid Android API level") from exc
+        raise HarnessError(
+            f"approved AVD {avd_name} reported an invalid Android API level"
+        ) from exc
     if api != expected["api"] or abi != expected["abi"]:
-        raise HarnessError(f"approved AVD {avd_name} API/ABI does not match the acceptance matrix")
+        raise HarnessError(
+            f"approved AVD {avd_name} API/ABI does not match the acceptance matrix"
+        )
     play_store = adb_output(adb, serial, "shell", "pm", "path", "com.android.vending")
     if not any(line.strip().startswith("package:") for line in play_store.splitlines()):
-        raise HarnessError(f"approved AVD {avd_name} is missing the Google Play Store package")
+        raise HarnessError(
+            f"approved AVD {avd_name} is missing the Google Play Store package"
+        )
     return avd_name, api, abi
 
 
@@ -252,9 +311,13 @@ def revalidate_android_target(
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise HarnessError(f"could not recheck Android targets before Gradle: {exc}") from exc
+        raise HarnessError(
+            f"could not recheck Android targets before Gradle: {exc}"
+        ) from exc
     if devices.returncode:
-        raise HarnessError(f"adb devices failed before Gradle: {devices.stdout.strip()}")
+        raise HarnessError(
+            f"adb devices failed before Gradle: {devices.stdout.strip()}"
+        )
     current_serial = select_single_emulator(devices.stdout, requested_serial=serial)
     current_target = verify_android_target(adb, current_serial)
     if current_target != expected_target:
@@ -286,14 +349,18 @@ def verify_junit_test_result(
     if testcase.find("skipped") is not None:
         raise HarnessError(f"{expected_class}.{expected_test_name} must pass, not skip")
     if testcase.find("failure") is not None or testcase.find("error") is not None:
-        raise HarnessError(f"{expected_class}.{expected_test_name} reported a failure or error")
+        raise HarnessError(
+            f"{expected_class}.{expected_test_name} reported a failure or error"
+        )
     return {"tests": 1, "failures": 0, "errors": 0, "skipped": 0}
 
 
 def verify_android_test_result(
     report_paths: list[Path], expected_test_name: str = ROTATION_TEST_NAME
 ) -> dict[str, int]:
-    return verify_junit_test_result(report_paths, ROTATION_TEST_CLASS, expected_test_name)
+    return verify_junit_test_result(
+        report_paths, ROTATION_TEST_CLASS, expected_test_name
+    )
 
 
 def report_snapshot(report_root: Path) -> dict[Path, tuple[int, int]]:
@@ -306,7 +373,9 @@ def report_snapshot(report_root: Path) -> dict[Path, tuple[int, int]]:
     }
 
 
-def changed_reports(report_root: Path, before: dict[Path, tuple[int, int]]) -> list[Path]:
+def changed_reports(
+    report_root: Path, before: dict[Path, tuple[int, int]]
+) -> list[Path]:
     if not report_root.exists():
         return []
     return [
@@ -325,7 +394,9 @@ def select_reverse_ports(reverse_output: str) -> tuple[int, int]:
             available.append(port)
             if len(available) == 2:
                 return available[0], available[1]
-    raise HarnessError("could not find two unused Android reverse-forward ports in 31457..39999")
+    raise HarnessError(
+        "could not find two unused Android reverse-forward ports in 31457..39999"
+    )
 
 
 def parse_reverse_mappings(reverse_output: str) -> dict[int, int]:
@@ -336,7 +407,9 @@ def parse_reverse_mappings(reverse_output: str) -> dict[int, int]:
             continue
         remote_port, local_port = int(ports[-2]), int(ports[-1])
         if remote_port in mappings:
-            raise HarnessError(f"adb reported duplicate reverse mappings for tcp:{remote_port}")
+            raise HarnessError(
+                f"adb reported duplicate reverse mappings for tcp:{remote_port}"
+            )
         mappings[remote_port] = local_port
     return mappings
 
@@ -379,9 +452,13 @@ def cleanup_reverse_mappings(
         return []
     for remote_port, local_port in sorted(candidates.items()):
         try:
-            current = parse_reverse_mappings(adb_output(adb, serial, "reverse", "--list"))
+            current = parse_reverse_mappings(
+                adb_output(adb, serial, "reverse", "--list")
+            )
         except (HarnessError, OSError, subprocess.TimeoutExpired) as exc:
-            return [f"could not inspect adb reverse tcp:{remote_port} before cleanup: {exc}"]
+            return [
+                f"could not inspect adb reverse tcp:{remote_port} before cleanup: {exc}"
+            ]
         if current.get(remote_port) != local_port:
             continue
         # adb has no compare-and-remove; avoid touching a mapping whose target changed.
@@ -407,6 +484,30 @@ def cleanup_reverse_mappings(
         if remaining.get(remote_port) == local_port
     ]
     return [f"adb reverse mappings remain: {leftovers}"] if leftovers else []
+
+
+def handle_android_cleanup_errors(
+    cleanup_errors: list[str],
+    *,
+    operation: str,
+    primary_exception: BaseException | None,
+    exit_code: int | None,
+) -> None:
+    if primary_exception is not None and exit_code not in (None, 0):
+        primary_exception.add_note(f"{operation} exited with status {exit_code}")
+    if not cleanup_errors:
+        return
+    cleanup_message = (
+        f"Android reverse-mapping cleanup failed: {'; '.join(cleanup_errors)}"
+    )
+    if primary_exception is not None:
+        primary_exception.add_note(cleanup_message)
+        return
+    if exit_code not in (None, 0):
+        raise HarnessError(
+            f"{operation} exited with status {exit_code}; {cleanup_message}"
+        )
+    raise HarnessError(cleanup_message)
 
 
 def ensure_distinct_lmdb_stores(writer_path: Path, readback_path: Path) -> None:
@@ -451,13 +552,17 @@ def registry_python_executable(uv: str, registry_repo: Path) -> str:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        raise HarnessError("could not resolve the locked Registry Python environment") from None
+        raise HarnessError(
+            "could not resolve the locked Registry Python environment"
+        ) from None
     executable = result.stdout.strip()
     if result.returncode != 0 or not executable or "\n" in executable:
         raise HarnessError("could not resolve the locked Registry Python environment")
     path = Path(executable)
     if not path.is_absolute() or not path.is_file():
-        raise HarnessError("locked Registry project returned an invalid Python executable")
+        raise HarnessError(
+            "locked Registry project returned an invalid Python executable"
+        )
     return str(path)
 
 
@@ -489,18 +594,38 @@ class RegistryPeerFixture:
         timeout_seconds: float | None = None,
         *,
         peer_backend: str = "process",
+        predecessor_format: str = "legacy",
+        history_fault: str = "none",
     ):
         if peer_backend not in {"process", "podman"}:
             raise HarnessError(f"unsupported Registry peer backend: {peer_backend}")
+        if predecessor_format not in {"legacy", "versioned"}:
+            raise HarnessError(
+                f"unsupported Registry predecessor format: {predecessor_format}"
+            )
+        if history_fault not in {"none", "missing", "corrupt"}:
+            raise HarnessError(f"unsupported Registry history fault: {history_fault}")
+        if predecessor_format == "versioned" and peer_backend != "process":
+            raise HarnessError(
+                "versioned Registry history fixtures require the process backend"
+            )
+        if history_fault != "none" and predecessor_format != "versioned":
+            raise HarnessError(
+                "Registry history faults require versioned predecessor history"
+            )
         self.registry_repo = registry_repo.resolve()
         self.timeout_seconds = fixture_startup_timeout(peer_backend, timeout_seconds)
         self.peer_backend = peer_backend
+        self.predecessor_format = predecessor_format
+        self.history_fault = history_fault
         self.fixture_script = (
             FIXTURE_SCRIPT if peer_backend == "process" else PODMAN_FIXTURE_SCRIPT
         )
         self.process: subprocess.Popen[str] | None = None
         self._lines: list[str] = []
-        self._messages: queue.Queue[str | None] = queue.Queue(maxsize=ANDROID_QUEUE_MAXSIZE)
+        self._messages: queue.Queue[str | None] = queue.Queue(
+            maxsize=ANDROID_QUEUE_MAXSIZE
+        )
         self._reader: threading.Thread | None = None
         self._scratch: tempfile.TemporaryDirectory[str] | None = None
         self._data_root: Path | None = None
@@ -511,30 +636,48 @@ class RegistryPeerFixture:
         self.writer_store: Path | None = None
         self.readback_store: Path | None = None
 
+    def build_command(self, fixture_python: str, data_root: Path) -> list[str]:
+        command = [fixture_python, str(self.fixture_script)]
+        if self.peer_backend == "process":
+            command.extend(
+                ["--advertise-host", "127.0.0.1", "--data-dir", str(data_root)]
+            )
+            if self.predecessor_format != "legacy":
+                command.extend(["--predecessor-format", self.predecessor_format])
+            if self.history_fault != "none":
+                command.extend(["--history-fault", self.history_fault])
+        else:
+            command.extend(["--data-dir", str(data_root), "--wallet-repo", str(ROOT)])
+        return command
+
     def __enter__(self) -> RegistryPeerFixture:
         if not self.registry_repo.is_dir():
-            raise HarnessError(f"decent-registry checkout not found: {self.registry_repo}")
+            raise HarnessError(
+                f"decent-registry checkout not found: {self.registry_repo}"
+            )
         if not self.fixture_script.is_file():
-            raise HarnessError(f"Registry fixture script not found: {self.fixture_script}")
+            raise HarnessError(
+                f"Registry fixture script not found: {self.fixture_script}"
+            )
         uv = shutil.which("uv")
         if uv is None:
-            raise HarnessError("uv is required to start the locked decent-registry fixture")
+            raise HarnessError(
+                "uv is required to start the locked decent-registry fixture"
+            )
         fixture_python = registry_python_executable(uv, self.registry_repo)
 
-        scratch_root = Path(os.environ.get("TMPDIR", Path.home() / ".cache" / "decent-wallet"))
+        scratch_root = Path(
+            os.environ.get("TMPDIR", Path.home() / ".cache" / "decent-wallet")
+        )
         scratch_root.mkdir(parents=True, exist_ok=True)
-        self._scratch = tempfile.TemporaryDirectory(prefix="issue18-registry-harness-", dir=scratch_root)
+        self._scratch = tempfile.TemporaryDirectory(
+            prefix="issue18-registry-harness-", dir=scratch_root
+        )
         self._data_root = Path(self._scratch.name) / "peer-data"
         self._data_root.mkdir()
         env = os.environ.copy()
         env["TMPDIR"] = self._scratch.name
-        command = [fixture_python, str(self.fixture_script)]
-        if self.peer_backend == "process":
-            command.extend(
-                ["--advertise-host", "127.0.0.1", "--data-dir", str(self._data_root)]
-            )
-        else:
-            command.extend(["--data-dir", str(self._data_root), "--wallet-repo", str(ROOT)])
+        command = self.build_command(fixture_python, self._data_root)
         print(f"Starting temporary Registry peers: {' '.join(command)}", flush=True)
         try:
             self.process = subprocess.Popen(
@@ -569,17 +712,24 @@ class RegistryPeerFixture:
                 self._lines.append(line)
                 tag = line.split("\t", 1)[0]
                 print(f"Registry fixture announced {tag}.", flush=True)
-                if sum(
-                    entry.startswith("READY_WRITE\t") or entry.startswith("READY_READBACK\t")
-                    for entry in self._lines
-                ) == 2:
+                if (
+                    sum(
+                        entry.startswith("READY_WRITE\t")
+                        or entry.startswith("READY_READBACK\t")
+                        for entry in self._lines
+                    )
+                    == 2
+                ):
                     self.writer, self.readback = parse_ready_lines(self._lines)
                     self.writer_store, self.readback_store = registry_store_paths(
                         self._data_root, self.peer_backend
                     )
                     ensure_distinct_lmdb_stores(self.writer_store, self.readback_store)
                     self._ready.set()
-                    print("Managed writer/read-back peers ready; separate LMDB files verified.", flush=True)
+                    print(
+                        "Managed writer/read-back peers ready; separate LMDB files verified.",
+                        flush=True,
+                    )
                     return self
             tags = [line.split("\t", 1)[0] for line in self._lines]
             raise HarnessError(
@@ -653,15 +803,22 @@ class RegistryPeerFixture:
             if exit_code != 0 and not (
                 self._stop_signal_sent and exit_code in expected_signal_exits
             ):
-                raise HarnessError(f"Registry fixture teardown failed (exit={exit_code})")
-            print("Temporary Registry peers stopped and scratch LMDB data removed.", flush=True)
+                raise HarnessError(
+                    f"Registry fixture teardown failed (exit={exit_code})"
+                )
+            print(
+                "Temporary Registry peers stopped and scratch LMDB data removed.",
+                flush=True,
+            )
 
 
 def fail(message: str) -> NoReturn:
     raise SystemExit(f"Issue #18 Registry acceptance harness: {message}")
 
 
-def run_command(command: list[str], *, cwd: Path, env: dict[str, str], timeout: int) -> int:
+def run_command(
+    command: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+) -> int:
     print(f"\n$ {' '.join(command)}", flush=True)
     try:
         result = subprocess.run(command, cwd=cwd, env=env, timeout=timeout, check=False)
@@ -695,7 +852,10 @@ def run_desktop_integration() -> int:
         "registry_integration",
         "tests/test_registry_transport_integration.py",
     ]
-    print("Running desktop RegistryTransport integration tests; pytest owns their peer fixtures.", flush=True)
+    print(
+        "Running desktop RegistryTransport integration tests; pytest owns their peer fixtures.",
+        flush=True,
+    )
     return run_command(command, cwd=ROOT, env=os.environ.copy(), timeout=1800)
 
 
@@ -753,9 +913,15 @@ def run_podman_desktop_registry_diagnostic(
 
 def android_sdk_path(env: dict[str, str], sdk_default: Path | None = None) -> Path:
     configured = env.get("ANDROID_HOME") or env.get("ANDROID_SDK_ROOT")
-    sdk = Path(configured).expanduser() if configured else (sdk_default or Path.home() / "Android" / "Sdk")
+    sdk = (
+        Path(configured).expanduser()
+        if configured
+        else (sdk_default or Path.home() / "Android" / "Sdk")
+    )
     if not sdk.is_dir():
-        raise HarnessError(f"Android SDK not found at {sdk}; set ANDROID_HOME or ANDROID_SDK_ROOT")
+        raise HarnessError(
+            f"Android SDK not found at {sdk}; set ANDROID_HOME or ANDROID_SDK_ROOT"
+        )
     return sdk.resolve()
 
 
@@ -839,7 +1005,9 @@ def run_jvm_registry_interop(
     if gradle_code != 0:
         return gradle_code if gradle_code is not None else 1
     reports = changed_reports(JVM_RESULTS, before_reports)
-    result = verify_junit_test_result(reports, JVM_INTEROP_TEST_CLASS, JVM_INTEROP_TEST_NAME)
+    result = verify_junit_test_result(
+        reports, JVM_INTEROP_TEST_CLASS, JVM_INTEROP_TEST_NAME
+    )
     print(
         "Android host-JVM Registry interop passed: "
         f"{result['tests']} test, {result['failures']} failures, "
@@ -857,7 +1025,9 @@ def adb_path() -> Path:
     located = shutil.which("adb")
     if located is not None:
         return Path(located)
-    raise HarnessError(f"adb not found under {sdk}; set ANDROID_HOME or install platform-tools")
+    raise HarnessError(
+        f"adb not found under {sdk}; set ANDROID_HOME or install platform-tools"
+    )
 
 
 def adb_output(adb: Path, serial: str, *args: str) -> str:
@@ -871,7 +1041,9 @@ def adb_output(adb: Path, serial: str, *args: str) -> str:
         check=False,
     )
     if result.returncode:
-        raise HarnessError(f"adb {' '.join(args)} failed ({result.returncode}): {result.stdout.strip()}")
+        raise HarnessError(
+            f"adb {' '.join(args)} failed ({result.returncode}): {result.stdout.strip()}"
+        )
     return result.stdout
 
 
@@ -879,11 +1051,184 @@ def android_report_snapshot() -> dict[Path, tuple[int, int]]:
     return report_snapshot(ANDROID_RESULTS)
 
 
+def run_versioned_android_runtime(
+    registry_repo: Path,
+    fixture_timeout: float,
+    *,
+    adb: Path,
+    serial: str,
+    expected_target: tuple[str, int, str],
+    peer_backend: str,
+    history_fault: str = "none",
+    promotion_staging_failure: bool = False,
+    lost_acknowledgement: bool = False,
+    conditional_rejection: bool = False,
+    promotion_rollback: bool = False,
+    promotion_unknown: bool = False,
+    competing_write: bool = False,
+) -> tuple[int, list[Path]]:
+    if history_fault not in {"none", "missing", "corrupt"}:
+        raise HarnessError(
+            f"unsupported Android versioned-history fault: {history_fault}"
+        )
+    fixture_kind = (
+        "versioned" if history_fault == "none" else f"versioned-{history_fault}-history"
+    )
+    if promotion_staging_failure:
+        if history_fault != "none":
+            raise HarnessError(
+                "promotion staging failure cannot use a history-fault fixture"
+            )
+        fixture_kind = "versioned-promotion-staging-failure"
+    if lost_acknowledgement:
+        if history_fault != "none" or promotion_staging_failure:
+            raise HarnessError("lost acknowledgement cannot combine with another fault")
+        fixture_kind = "versioned-lost-acknowledgement"
+    if conditional_rejection:
+        if history_fault != "none" or promotion_staging_failure or lost_acknowledgement:
+            raise HarnessError(
+                "conditional rejection cannot combine with another fault"
+            )
+        fixture_kind = "versioned-conditional-rejection"
+    if promotion_rollback:
+        if (
+            history_fault != "none"
+            or promotion_staging_failure
+            or lost_acknowledgement
+            or conditional_rejection
+        ):
+            raise HarnessError("promotion rollback cannot combine with another fault")
+        fixture_kind = "versioned-promotion-rollback"
+    if promotion_unknown:
+        if (
+            history_fault != "none"
+            or promotion_staging_failure
+            or lost_acknowledgement
+            or conditional_rejection
+            or promotion_rollback
+        ):
+            raise HarnessError("promotion unknown cannot combine with another fault")
+        fixture_kind = "versioned-promotion-unknown"
+    if competing_write:
+        if (
+            history_fault != "none"
+            or promotion_staging_failure
+            or lost_acknowledgement
+            or conditional_rejection
+            or promotion_rollback
+            or promotion_unknown
+        ):
+            raise HarnessError("competing write cannot combine with another fault")
+        fixture_kind = "versioned-competing-write"
+    test_name = (
+        ROTATION_TEST_NAME
+        if history_fault == "none"
+        else HISTORY_AVAILABILITY_TEST_NAME
+    )
+    phase_name = {
+        "none": "versioned owner-key rotation",
+        "missing": "missing versioned predecessor history",
+        "corrupt": "corrupt versioned predecessor history",
+    }[history_fault]
+    if promotion_staging_failure:
+        phase_name = "promotion staging failure"
+    env = gradle_environment()
+    if lost_acknowledgement:
+        phase_name = "lost acknowledgement"
+    if conditional_rejection:
+        phase_name = "conditional rejection"
+    if promotion_rollback:
+        phase_name = "promotion rollback"
+    if promotion_unknown:
+        phase_name = "promotion unknown"
+    if competing_write:
+        phase_name = "competing write"
+    env["DECENT_REGISTRY_TEST_FIXTURE"] = fixture_kind
+    owned_mappings: dict[int, int] = {}
+    pending_mappings: dict[int, int] = {}
+    before_reports = android_report_snapshot()
+    gradle_code: int | None = None
+    primary_exception: BaseException | None = None
+    try:
+        with RegistryPeerFixture(
+            registry_repo,
+            timeout_seconds=fixture_timeout,
+            peer_backend=peer_backend,
+            predecessor_format="versioned",
+            history_fault=history_fault,
+        ) as fixture:
+            assert fixture.writer is not None and fixture.readback is not None
+            writer_device_port, readback_device_port = select_reverse_ports(
+                adb_output(adb, serial, "reverse", "--list")
+            )
+            expected_mappings = [
+                (writer_device_port, fixture.writer.port),
+                (readback_device_port, fixture.readback.port),
+            ]
+            for device_port, host_port in expected_mappings:
+                pending_mappings[device_port] = host_port
+                try:
+                    add_reverse_mapping(adb, serial, device_port, host_port)
+                except HarnessError:
+                    pending_mappings.pop(device_port, None)
+                    raise
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise HarnessError(
+                        f"adb reverse tcp:{device_port} setup outcome is uncertain: {exc}"
+                    ) from exc
+                else:
+                    pending_mappings.pop(device_port, None)
+                    owned_mappings[device_port] = host_port
+            verify_reverse_mappings(
+                adb_output(adb, serial, "reverse", "--list"), expected_mappings
+            )
+            env["DECENT_REGISTRY_TEST_PEER"] = (
+                f"/ip4/127.0.0.1/tcp/{writer_device_port}/p2p/{fixture.writer.peer_id}"
+            )
+            env["DECENT_REGISTRY_TEST_READBACK_PEER"] = (
+                f"/ip4/127.0.0.1/tcp/{readback_device_port}/p2p/{fixture.readback.peer_id}"
+            )
+            revalidated_target = revalidate_android_target(adb, serial, expected_target)
+            print(
+                f"Revalidated sole target immediately before {phase_name} Android Gradle run: "
+                f"{revalidated_target[0]} API {revalidated_target[1]}, {revalidated_target[2]}",
+                flush=True,
+            )
+            command = [
+                "./gradlew",
+                "--no-daemon",
+                "--dependency-verification=strict",
+                f"-Pissue18AndroidTestClass={ROTATION_TEST_CLASS}#{test_name}",
+                ":platforms:android-wallet:connectedDebugAndroidTest",
+                "--rerun-tasks",
+            ]
+            gradle_code = run_command(command, cwd=ROOT, env=env, timeout=2400)
+    except BaseException as exc:
+        primary_exception = exc
+        raise
+    finally:
+        cleanup_errors = cleanup_reverse_mappings(
+            adb, serial, owned_mappings, pending_mappings
+        )
+        handle_android_cleanup_errors(
+            cleanup_errors,
+            operation=f"{phase_name} Android Gradle run",
+            primary_exception=primary_exception,
+            exit_code=gradle_code,
+        )
+
+    if gradle_code != 0:
+        return gradle_code if gradle_code is not None else 1, []
+    return 0, changed_reports(ANDROID_RESULTS, before_reports)
+
+
 def run_android_runtime(
     registry_repo: Path,
     requested_serial: str | None,
     fixture_timeout: float,
     peer_backend: str = "process",
+    *,
+    all_device_faults: bool = True,
 ) -> int:
     adb = adb_path()
     subprocess.run([str(adb), "start-server"], cwd=ROOT, timeout=30, check=True)
@@ -906,12 +1251,13 @@ def run_android_runtime(
     )
 
     env = gradle_environment()
+    env["DECENT_REGISTRY_TEST_FIXTURE"] = "legacy"
     owned_mappings: dict[int, int] = {}
     pending_mappings: dict[int, int] = {}
     before_reports = android_report_snapshot()
     gradle_code: int | None = None
     result_summary: dict[str, int] | None = None
-    cleanup_errors: list[str] = []
+    primary_exception: BaseException | None = None
     try:
         with RegistryPeerFixture(
             registry_repo, timeout_seconds=fixture_timeout, peer_backend=peer_backend
@@ -971,21 +1317,154 @@ def run_android_runtime(
                 "--rerun-tasks",
             ]
             gradle_code = run_command(command, cwd=ROOT, env=env, timeout=2400)
+    except BaseException as exc:
+        primary_exception = exc
+        raise
     finally:
-        cleanup_errors.extend(cleanup_reverse_mappings(adb, serial, owned_mappings, pending_mappings))
-        if cleanup_errors:
-            raise HarnessError("; ".join(cleanup_errors))
+        cleanup_errors = cleanup_reverse_mappings(
+            adb, serial, owned_mappings, pending_mappings
+        )
+        handle_android_cleanup_errors(
+            cleanup_errors,
+            operation="Legacy Android Gradle run",
+            primary_exception=primary_exception,
+            exit_code=gradle_code,
+        )
 
     if gradle_code != 0:
         return gradle_code if gradle_code is not None else 1
     new_reports = changed_reports(ANDROID_RESULTS, before_reports)
     result_summary = verify_android_test_result(new_reports)
     print(
-        "Android wallet Registry runtime acceptance passed: "
-        f"{result_summary['tests']} test, {result_summary['failures']} failures, "
+        "Android wallet legacy Registry runtime acceptance passed: "
+        f"{result_summary['tests']} target rotation test, {result_summary['failures']} failures, "
         f"{result_summary['errors']} errors, {result_summary['skipped']} skipped.",
         flush=True,
     )
+    versioned_code, versioned_reports = run_versioned_android_runtime(
+        registry_repo,
+        fixture_timeout,
+        adb=adb,
+        serial=serial,
+        expected_target=(avd_name, api, abi),
+        peer_backend=peer_backend,
+    )
+    if versioned_code != 0:
+        return versioned_code
+    versioned_summary = verify_android_test_result(versioned_reports)
+    print(
+        "Android wallet versioned non-genesis Registry runtime acceptance passed: "
+        f"{versioned_summary['tests']} test, {versioned_summary['failures']} failures, "
+        f"{versioned_summary['errors']} errors, {versioned_summary['skipped']} skipped.",
+        flush=True,
+    )
+    missing_history_code, missing_history_reports = run_versioned_android_runtime(
+        registry_repo,
+        fixture_timeout,
+        adb=adb,
+        serial=serial,
+        expected_target=(avd_name, api, abi),
+        peer_backend=peer_backend,
+        history_fault="missing",
+    )
+    if missing_history_code != 0:
+        return missing_history_code
+    missing_history_summary = verify_android_test_result(
+        missing_history_reports,
+        expected_test_name=HISTORY_AVAILABILITY_TEST_NAME,
+    )
+    print(
+        "Android wallet missing-versioned-history fault acceptance passed: "
+        f"{missing_history_summary['tests']} test, "
+        f"{missing_history_summary['failures']} failures, "
+        f"{missing_history_summary['errors']} errors, "
+        f"{missing_history_summary['skipped']} skipped.",
+        flush=True,
+    )
+    corrupt_history_code, corrupt_history_reports = run_versioned_android_runtime(
+        registry_repo,
+        fixture_timeout,
+        adb=adb,
+        serial=serial,
+        expected_target=(avd_name, api, abi),
+        peer_backend=peer_backend,
+        history_fault="corrupt",
+    )
+    if corrupt_history_code != 0:
+        return corrupt_history_code
+    corrupt_history_summary = verify_android_test_result(
+        corrupt_history_reports,
+        expected_test_name=HISTORY_AVAILABILITY_TEST_NAME,
+    )
+    print(
+        "Android wallet corrupt-versioned-history fault acceptance passed: "
+        f"{corrupt_history_summary['tests']} test, "
+        f"{corrupt_history_summary['failures']} failures, "
+        f"{corrupt_history_summary['errors']} errors, "
+        f"{corrupt_history_summary['skipped']} skipped.",
+        flush=True,
+    )
+    promotion_code, promotion_reports = run_versioned_android_runtime(
+        registry_repo,
+        fixture_timeout,
+        adb=adb,
+        serial=serial,
+        expected_target=(avd_name, api, abi),
+        peer_backend=peer_backend,
+        promotion_staging_failure=True,
+    )
+    if promotion_code != 0:
+        return promotion_code
+    promotion_summary = verify_android_test_result(promotion_reports)
+    print(
+        "Android wallet promotion-staging fault acceptance passed: "
+        f"{promotion_summary['tests']} test, {promotion_summary['failures']} failures, "
+        f"{promotion_summary['errors']} errors, {promotion_summary['skipped']} skipped.",
+        flush=True,
+    )
+    lost_ack_code, lost_ack_reports = run_versioned_android_runtime(
+        registry_repo,
+        fixture_timeout,
+        adb=adb,
+        serial=serial,
+        expected_target=(avd_name, api, abi),
+        peer_backend=peer_backend,
+        lost_acknowledgement=True,
+    )
+    if lost_ack_code != 0:
+        return lost_ack_code
+    lost_ack_summary = verify_android_test_result(lost_ack_reports)
+    print(
+        "Android wallet lost-acknowledgement acceptance passed: "
+        f"{lost_ack_summary['tests']} test, {lost_ack_summary['failures']} failures, "
+        f"{lost_ack_summary['errors']} errors, {lost_ack_summary['skipped']} skipped.",
+        flush=True,
+    )
+    if all_device_faults:
+        for fault in (
+            "conditional_rejection",
+            "promotion_rollback",
+            "promotion_unknown",
+            "competing_write",
+        ):
+            code, reports = run_versioned_android_runtime(
+                registry_repo,
+                fixture_timeout,
+                adb=adb,
+                serial=serial,
+                expected_target=(avd_name, api, abi),
+                peer_backend=peer_backend,
+                **{fault: True},
+            )
+            if code != 0:
+                return code
+            summary = verify_android_test_result(reports)
+            print(
+                f"Android wallet {fault} acceptance passed: "
+                f"{summary['tests']} test, {summary['failures']} failures, "
+                f"{summary['errors']} errors, {summary['skipped']} skipped.",
+                flush=True,
+            )
     return 0
 
 
@@ -1004,11 +1483,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="run Python RegistryTransport tests (plus the Podman diagnostic if selected)",
     )
-    selection.add_argument("--jvm-only", action="store_true", help="run Android host-JVM interop only")
+    selection.add_argument(
+        "--jvm-only", action="store_true", help="run Android host-JVM interop only"
+    )
     selection.add_argument(
         "--android-only",
         action="store_true",
         help="run host-JVM interop and Android device instrumentation, skipping Python tests",
+    )
+    parser.add_argument(
+        "--all-device-faults",
+        action="store_true",
+        help="compatibility option: all ten device phases run by default",
     )
     parser.add_argument(
         "--peer-backend",
@@ -1016,7 +1502,10 @@ def parse_args() -> argparse.Namespace:
         default="process",
         help="local Registry peer backend (podman currently supports --desktop-only diagnostics)",
     )
-    parser.add_argument("--serial", help="the sole connected emulator serial (for example emulator-5554)")
+    parser.add_argument(
+        "--serial",
+        help="the sole connected emulator serial (for example emulator-5554)",
+    )
     parser.add_argument(
         "--registry-repo",
         type=Path,
@@ -1029,7 +1518,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="seconds to wait for Registry peers (defaults: 90 for process, 540 for Podman)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.all_device_faults and (args.desktop_only or args.jvm_only):
+        parser.error("--all-device-faults requires Android device phases")
+    return args
+
+
+def format_harness_error(exc: HarnessError) -> str:
+    notes = getattr(exc, "__notes__", ())
+    if not notes:
+        return str(exc)
+    return "\n".join((str(exc), *(f"  note: {note}" for note in notes)))
 
 
 def main() -> int:
@@ -1040,7 +1539,11 @@ def main() -> int:
             desktop_only=args.desktop_only,
         )
     except HarnessError as exc:
-        print(f"Issue #18 Registry acceptance harness: {exc}", file=sys.stderr, flush=True)
+        print(
+            f"Issue #18 Registry acceptance harness: {format_harness_error(exc)}",
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
     if args.fixture_timeout is not None and args.fixture_timeout <= 0:
         fail("--fixture-timeout must be positive")
@@ -1075,9 +1578,14 @@ def main() -> int:
             args.serial,
             fixture_timeout,
             peer_backend=args.peer_backend,
+            all_device_faults=True,
         )
     except HarnessError as exc:
-        print(f"Issue #18 Registry acceptance harness: {exc}", file=sys.stderr, flush=True)
+        print(
+            f"Issue #18 Registry acceptance harness: {format_harness_error(exc)}",
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
 
 

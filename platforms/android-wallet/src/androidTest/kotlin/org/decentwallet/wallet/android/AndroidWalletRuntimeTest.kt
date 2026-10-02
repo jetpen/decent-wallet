@@ -5,6 +5,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -153,7 +154,9 @@ class AndroidWalletRuntimeTest {
             assertFalse(sessionReturned)
             assertEquals(2, syncCalls)
             assertFalse(Files.exists(path))
-            Files.list(directory).use { paths -> assertEquals(0L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(0L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
             if (!cleanupSyncFails) {
                 AndroidWallet.importContainer(path, imported, password).use { recovered ->
                     assertArrayEquals(imported, recovered.exportContainer())
@@ -161,13 +164,17 @@ class AndroidWalletRuntimeTest {
                 AndroidWallet.open(path, password).use { reopened ->
                     assertArrayEquals(imported, reopened.exportContainer())
                 }
-                Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+                Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
             } else {
                 // Absent destination is a fixture observation, not durable deletion proof.
                 val probe = directory.resolve("scope-probe.dw")
                 AndroidWallet.create(probe, password, password, mapOf("purpose" to "scope-check")).use { }
                 Files.delete(probe)
-                Files.list(directory).use { paths -> assertEquals(0L, paths.count()) }
+                Files.list(directory).use { paths ->
+                assertEquals(0L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
                 // Do not retry/reopen the unknown-outcome destination.
             }
             assertEquals(2, syncCalls)
@@ -230,14 +237,18 @@ class AndroidWalletRuntimeTest {
             assertEquals("wallet storage outcome is unknown", failure.message)
             assertFalse(sessionReturned)
             assertEquals(2, syncCalls)
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
             // Fixture observation only: failed rollback sync does not establish durable original state.
             assertArrayEquals(original, Files.readAllBytes(path))
             val probe = directory.resolve("scope-probe.dw")
             AndroidWallet.create(probe, password, password, mapOf("purpose" to "scope-check")).use { }
             assertEquals(2, syncCalls)
             Files.delete(probe)
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
             // No reopen, retry or promoted-state claim for the unknown-outcome wallet.
         } finally {
             original.fill(0)
@@ -299,7 +310,9 @@ class AndroidWalletRuntimeTest {
             assertEquals("wallet storage operation failed", failure.message)
             assertEquals(2, syncCalls)
             assertArrayEquals(original, Files.readAllBytes(path))
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
             assertThrows(WalletUnsupportedFormatException::class.java) { AndroidWallet.open(path, password).use { } }
             // Scoped seam must be removed after failure; recover through the unchanged public API.
             AndroidWallet.migrateContainer(path, password).use { recovered ->
@@ -311,7 +324,9 @@ class AndroidWalletRuntimeTest {
                 assertArrayEquals(pending, reopened.pendingOwnerPublicKey)
             }
             assertEquals(2, syncCalls)
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
         } finally {
             original.fill(0)
             active.fill(0)
@@ -338,7 +353,9 @@ class AndroidWalletRuntimeTest {
             assertArrayEquals(original, Files.readAllBytes(path))
             val envelope = WalletJson.parse(Files.readAllBytes(path), ContainerCrypto.MAX_CONTAINER_BYTES) as Map<*, *>
             assertEquals(BigInteger.ONE, envelope["version"])
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
         } finally {
             original.fill(0)
             Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
@@ -373,13 +390,144 @@ class AndroidWalletRuntimeTest {
                     WalletJson.clearByteArrays(payload)
                 }
             }
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
         } finally {
             vector.fill(0)
             importedBytes.fill(0)
             before.fill(0)
             Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
         }
+    }
+
+    @Test
+    fun publicImportDoesNotReplaceDestinationCreatedAfterPreflightOnAndroid() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val vector = instrumentation.context.assets.open("wallet-container-v2.json")
+            .use { it.readBytes() }
+        val importedBytes = vectorContainer(vector)
+        val password = "public-test-only: wallet-v2-vector"
+        val directory = Files.createTempDirectory(
+            instrumentation.targetContext.cacheDir.toPath(), "import-race-no-overwrite-",
+        )
+        val rivalPath = directory.resolve("rival.dw")
+        val rivalWallet = AndroidWallet.create(rivalPath, password, password, mapOf("owner" to "external"))
+        val rivalBytes = rivalWallet.exportContainer()
+        rivalWallet.close()
+        Files.delete(rivalPath)
+        try {
+            val destination = directory.resolve("wallet.dw")
+            assertThrows(WalletStorageException::class.java) {
+                AtomicWalletFiles.withBeforeCreateInstallForTest(directory, { target ->
+                    Files.write(target, rivalBytes)
+                }) {
+                    AndroidWallet.importContainer(destination, importedBytes, password).use { }
+                }
+            }
+            assertArrayEquals(rivalBytes, Files.readAllBytes(destination))
+            AndroidWallet.open(destination, password).use { rival ->
+                val payload = rival.readPayload()
+                try {
+                    assertEquals("external", payload["owner"])
+                } finally {
+                    WalletJson.clearByteArrays(payload)
+                }
+            }
+            Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
+        } finally {
+            vector.fill(0)
+            importedBytes.fill(0)
+            rivalBytes.fill(0)
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    @Test
+    fun concurrentPublicImportsInSeparateProcessesDoNotReplaceTheWinnerOnAndroid() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.context
+        val password = "public-test-only: cross-process-import-race"
+        val directory = Files.createTempDirectory(context.cacheDir.toPath(), "cross-process-import-race-")
+        val firstBytes = createRaceWallet(directory.resolve("first-source.dw"), password, "first")
+        val secondBytes = createRaceWallet(directory.resolve("second-source.dw"), password, "second")
+        val destination = directory.resolve("wallet.dw")
+        try {
+            Files.write(directory.resolve("input-first.dw"), firstBytes)
+            Files.write(directory.resolve("input-second.dw"), secondBytes)
+            val firstIntent = importRaceIntent(context, ImportRaceWriterOneService::class.java, directory, destination, "first", password)
+            val secondIntent = importRaceIntent(context, ImportRaceWriterTwoService::class.java, directory, destination, "second", password)
+            context.startService(firstIntent)
+            context.startService(secondIntent)
+
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(90)
+            val firstResult = directory.resolve("result-first.txt")
+            val secondResult = directory.resolve("result-second.txt")
+            while ((!Files.exists(firstResult) || !Files.exists(secondResult)) && System.nanoTime() < deadline) {
+                Thread.sleep(50)
+            }
+            val observedFiles = Files.list(directory).use { paths ->
+                paths.map { it.fileName.toString() }.toArray().joinToString()
+            }
+            assertTrue(
+                "both isolated writer processes must report completion; observed files: $observedFiles",
+                Files.exists(firstResult) && Files.exists(secondResult),
+            )
+            assertTrue(
+                "both processes must reach the create-install boundary before either install proceeds",
+                Files.exists(directory.resolve("ready-first")) && Files.exists(directory.resolve("ready-second")),
+            )
+            val firstOutcome = String(Files.readAllBytes(firstResult), Charsets.UTF_8).split(":", limit = 3)
+            val secondOutcome = String(Files.readAllBytes(secondResult), Charsets.UTF_8).split(":", limit = 3)
+            assertNotEquals("writer processes must be distinct", firstOutcome[0], secondOutcome[0])
+            val outcomes = listOf(firstOutcome, secondOutcome)
+            assertEquals(listOf("STORAGE_FAILURE", "SUCCESS"), outcomes.map { it[1] }.sorted())
+            val loserDetail = outcomes.single { it[1] == "STORAGE_FAILURE" }.getOrNull(2).orEmpty()
+            assertTrue(
+                "loser must report the destination-exists storage failure, got: $loserDetail",
+                loserDetail.startsWith(WalletStorageException::class.java.name),
+            )
+
+            val stored = Files.readAllBytes(destination)
+            try {
+                assertTrue("destination must equal one complete contender", stored.contentEquals(firstBytes) || stored.contentEquals(secondBytes))
+                AndroidWallet.open(destination, password).use { winner ->
+                    val payload = winner.readPayload()
+                    try {
+                        assertEquals(if (stored.contentEquals(firstBytes)) "first" else "second", payload["owner"])
+                    } finally {
+                        WalletJson.clearByteArrays(payload)
+                    }
+                }
+            } finally {
+                stored.fill(0)
+            }
+        } finally {
+            context.stopService(importRaceIntent(context, ImportRaceWriterOneService::class.java, directory, destination, "first", password))
+            context.stopService(importRaceIntent(context, ImportRaceWriterTwoService::class.java, directory, destination, "second", password))
+            firstBytes.fill(0)
+            secondBytes.fill(0)
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    private fun createRaceWallet(path: java.nio.file.Path, password: String, owner: String): ByteArray =
+        AndroidWallet.create(path, password, password, mapOf("owner" to owner)).use { wallet -> wallet.exportContainer() }
+
+    private fun importRaceIntent(
+        context: android.content.Context,
+        service: Class<out android.app.Service>,
+        directory: java.nio.file.Path,
+        destination: java.nio.file.Path,
+        contender: String,
+        password: String,
+    ) = android.content.Intent(context, service).apply {
+        putExtra(ImportRaceWriterService.EXTRA_DIRECTORY, directory.toString())
+        putExtra(ImportRaceWriterService.EXTRA_DESTINATION, destination.toString())
+        putExtra(ImportRaceWriterService.EXTRA_CONTENDER, contender)
+        putExtra(ImportRaceWriterService.EXTRA_PASSWORD, password)
     }
 
     @Test
@@ -443,7 +591,9 @@ class AndroidWalletRuntimeTest {
             )
             // Failed rollback sync can leave restored bytes visible without establishing durability.
             assertArrayEquals(original, Files.readAllBytes(path))
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
             assertThrows(WalletUnsupportedFormatException::class.java) {
                 AndroidWallet.open(path, password)
             }
@@ -532,7 +682,9 @@ class AndroidWalletRuntimeTest {
                 assertEquals(1, replacements)
                 assertEquals(2, syncCalls)
                 assertArrayEquals(before, Files.readAllBytes(path))
-                Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+                Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
                 if (rollbackSyncFails) {
                     assertFalse(wallet.isUnlocked)
                     assertTrue(raw.all { it == 0.toByte() })
@@ -594,7 +746,9 @@ class AndroidWalletRuntimeTest {
             assertEquals(WalletStorageException::class.java, failure.javaClass)
             assertEquals("wallet storage operation failed", failure.message)
             assertArrayEquals(original, Files.readAllBytes(path))
-            Files.list(directory).use { paths -> assertEquals(1L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(1L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
             assertThrows(WalletUnsupportedFormatException::class.java) {
                 AndroidWallet.open(path, "correct horse battery staple")
             }
@@ -642,7 +796,9 @@ class AndroidWalletRuntimeTest {
             assertEquals(WalletStorageException::class.java, failure.javaClass)
             assertEquals("wallet storage operation failed", failure.message)
             assertFalse(Files.exists(destination))
-            Files.list(directory).use { paths -> assertEquals(0L, paths.count()) }
+            Files.list(directory).use { paths ->
+                assertEquals(0L, paths.filter { it.fileName.toString() != AtomicWalletFiles.INSTALL_LOCK_FILE_NAME }.count())
+            }
             Files.setPosixFilePermissions(directory, permissions)
             AndroidWallet.importContainer(destination, importedBytes, password).use { imported ->
                 assertArrayEquals(importedBytes, imported.exportContainer())

@@ -10,6 +10,8 @@ import cbor2
 import pytest
 import trio
 
+pytest.importorskip("decent_registry.dht.libp2p_dht")
+
 from decent_registry.dht.libp2p_dht import DHTMode, Libp2pKadDHT
 from decent_wallet import RegistryTransport
 from decent_wallet.identity import ExpiredPublication, StalePublication
