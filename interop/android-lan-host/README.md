@@ -35,7 +35,7 @@ This verifies the narrow consuming-host slice, not the final combined primary wo
 Build from the repository root with the strict app assemble/test/lint tasks in the archived common invocation. Boot exactly one approved local AVD, then run:
 
 ```sh
-python scripts/run_android_lan_host_acceptance.py --ssh-host ben-x260 --serial emulator-5554 --output "$TMPDIR/issue18-lan-host-result"
+python scripts/run_android_lan_host_acceptance.py --ssh-host ben-x260 --serial emulator-5554 --output "$TMPDIR/android-lan-host-result"
 ```
 
 The harness verifies the exact approved AVD/API/ABI, installs only its test-only app/test APKs, resets app test data, deploys pinned remote Registry peers, opens owned SSH forwards, parses exactly one executed passing instrumentation case per phase, and tears down the forwarding/deployment/app. API26 selects legacy access; API37 selects denial, grant and subsequent externally revoked access. The caller owns local emulator startup/shutdown. Never run Android emulators on ben-x260. Do not run against another Android device or grant real-app permissions with this harness.
