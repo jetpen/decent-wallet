@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -22,17 +23,131 @@ junit_result = ACCEPTANCE.junit_result
 validate_receipt = ACCEPTANCE.validate_receipt
 
 
+def controlled_report(path: Path, identities: list[str], outcomes: dict[str, str] | None = None) -> None:
+    outcomes = outcomes or {}
+    counts = {key: sum(outcomes.get(name) == key for name in identities) for key in ("failure", "error", "skipped")}
+    root = ET.Element("testsuite", tests=str(len(identities)), failures=str(counts["failure"]), errors=str(counts["error"]), skipped=str(counts["skipped"]))
+    for identity in identities:
+        classname, name = identity.split("::", 1)
+        case = ET.SubElement(root, "testcase", classname=classname, name=name)
+        if identity in outcomes:
+            ET.SubElement(case, outcomes[identity], message="synthetic prerequisite")
+    ET.ElementTree(root).write(path, encoding="unicode")
+
+
+def test_python_runner_rejects_duplicate_native_case_ids(monkeypatch, tmp_path):
+    identities = ["synthetic::mandatory", "synthetic::mandatory", *sorted(ACCEPTANCE.PYTHON_OPTIONAL_CASES)]
+    def run(command, *, env, timeout):
+        controlled_report(Path(command[command.index("--junitxml") + 1]), identities)
+    monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    with pytest.raises(ReceiptValidationError, match="duplicate"):
+        ACCEPTANCE._python_profile("python", {}, tmp_path / "report.xml")
+
+
+@pytest.mark.parametrize("corruption", ["aggregate-failure", "aggregate-error", "aggregate-skip", "aggregate-tests", "skip-and-failure", "skip-and-error", "repeated-outcome", "wrapper-count", "missing-count", "missing-identity"])
+def test_python_runner_rejects_inconsistent_native_results(monkeypatch, tmp_path, corruption):
+    identities = ["synthetic::mandatory", *sorted(ACCEPTANCE.PYTHON_OPTIONAL_CASES)]
+    def run(command, *, env, timeout):
+        report = Path(command[command.index("--junitxml") + 1])
+        controlled_report(report, identities)
+        root = ET.parse(report).getroot()
+        if corruption.startswith("aggregate-"):
+            key = {"failure": "failures", "error": "errors", "skip": "skipped", "tests": "tests"}[corruption.removeprefix("aggregate-")]
+            root.set(key, str(int(root.attrib[key]) + 1))
+        elif corruption == "missing-count":
+            del root.attrib["tests"]
+        elif corruption == "missing-identity":
+            del root[0].attrib["name"]
+        elif corruption == "wrapper-count":
+            wrapper = ET.Element("testsuites", tests="999", failures="0", errors="0", skipped="0")
+            wrapper.append(root)
+            root = wrapper
+        else:
+            optional_case = list(root)[1]
+            ET.SubElement(optional_case, "skipped")
+            ET.SubElement(optional_case, "failure" if corruption == "skip-and-failure" else "error" if corruption == "skip-and-error" else "skipped")
+            root.set("skipped", "1")
+        ET.ElementTree(root).write(report, encoding="unicode")
+    monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    monkeypatch.setattr(ACCEPTANCE, "_expected_inventory", lambda suite_id, test_file=None: frozenset({"synthetic::mandatory"}))
+    with pytest.raises(ReceiptValidationError):
+        ACCEPTANCE._python_profile("python", {}, tmp_path / "report.xml")
+
+
+def test_python_runner_rejects_truncated_reviewed_inventory(monkeypatch, tmp_path):
+    def run(command, *, env, timeout):
+        mandatory = sorted(ACCEPTANCE._expected_inventory("python-security-matrix"))
+        controlled_report(Path(command[command.index("--junitxml") + 1]), [*mandatory[:-1], *sorted(ACCEPTANCE.PYTHON_OPTIONAL_CASES)])
+    monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    with pytest.raises(ReceiptValidationError, match="inventory"):
+        ACCEPTANCE._python_profile("python", {}, tmp_path / "report.xml")
+
+
+def test_android_runner_rejects_truncated_reviewed_inventory(monkeypatch, tmp_path):
+    results = tmp_path / "reports"
+    monkeypatch.setattr(ACCEPTANCE, "ANDROID_RESULTS", results)
+    def run(command, *, env, timeout):
+        mandatory = sorted(ACCEPTANCE._expected_inventory("android-wallet-jvm-security"))
+        controlled_report(results / "TEST-synthetic.xml", [*mandatory[:-1], *sorted(ACCEPTANCE.ANDROID_OPTIONAL_SKIPS)])
+        for name in ("kotlin-bound.dw", "kotlin-legacy.dw", "kotlin-bignum.dw"):
+            (Path(env[ACCEPTANCE.ARTIFACT_ENV]) / name).write_bytes(b"synthetic")
+    monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    with pytest.raises(ReceiptValidationError, match="inventory"):
+        ACCEPTANCE._android_profile(str(ACCEPTANCE.ROOT / "gradlew"), {}, tmp_path)
+
+
+@pytest.mark.parametrize("optional_status", ["passed", "skipped"])
+def test_android_optional_outcome_does_not_inflate_mandatory_count(monkeypatch, tmp_path, optional_status):
+    mandatory = [
+        "org.decentwallet.wallet.android.PortableLatchTest::actualKotlinPublicAuthoringExportsBoundAndLegacyCiphertext",
+        "org.decentwallet.wallet.android.PortableLatchTest::largePositiveIntegerRealEncryptedPublicReadersAndWriter",
+    ]
+    optional = next(iter(ACCEPTANCE.ANDROID_OPTIONAL_SKIPS))
+    results = tmp_path / "reports"
+    monkeypatch.setattr(ACCEPTANCE, "ANDROID_RESULTS", results)
+    monkeypatch.setattr(ACCEPTANCE, "_expected_inventory", lambda suite_id, test_file=None: frozenset(mandatory))
+    def run(command, *, env, timeout):
+        controlled_report(results / "TEST-synthetic.xml", [*mandatory, optional], {optional: "skipped"} if optional_status == "skipped" else {})
+        for name in ("kotlin-bound.dw", "kotlin-legacy.dw", "kotlin-bignum.dw"):
+            (Path(env[ACCEPTANCE.ARTIFACT_ENV]) / name).write_bytes(b"synthetic")
+    monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    suite, _artifacts = ACCEPTANCE._android_profile(str(ACCEPTANCE.ROOT / "gradlew"), {}, tmp_path)
+    assert suite["tests"] == len(mandatory)
+    assert suite["skipped"] == int(optional_status == "skipped")
+
+
+@pytest.mark.parametrize("corruption", ["duplicate", "aggregate-failure", "aggregate-error", "aggregate-skip", "skip-and-failure"])
+def test_android_runner_rejects_corrupt_native_results(monkeypatch, tmp_path, corruption):
+    mandatory = "synthetic::mandatory"
+    optional = next(iter(ACCEPTANCE.ANDROID_OPTIONAL_SKIPS))
+    results = tmp_path / "reports"
+    monkeypatch.setattr(ACCEPTANCE, "ANDROID_RESULTS", results)
+    monkeypatch.setattr(ACCEPTANCE, "_expected_inventory", lambda suite_id, test_file=None: frozenset({mandatory}))
+    def run(command, *, env, timeout):
+        report = results / "TEST-synthetic.xml"
+        controlled_report(report, [mandatory, optional])
+        root = ET.parse(report).getroot()
+        if corruption == "duplicate":
+            root.append(ET.fromstring(ET.tostring(root[0])))
+            root.set("tests", "3")
+        elif corruption == "skip-and-failure":
+            ET.SubElement(root[1], "skipped")
+            ET.SubElement(root[1], "failure")
+            root.set("skipped", "1")
+            root.set("failures", "1")
+        else:
+            key = {"aggregate-failure": "failures", "aggregate-error": "errors", "aggregate-skip": "skipped"}[corruption]
+            root.set(key, "1")
+        ET.ElementTree(root).write(report, encoding="unicode")
+    monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    with pytest.raises(ReceiptValidationError, match="duplicate|inconsistent|contradictory"):
+        ACCEPTANCE._android_profile(str(ACCEPTANCE.ROOT / "gradlew"), {}, tmp_path)
+
+
 def write_junit(path: Path, *, tests: int, failures: int = 0, errors: int = 0, skipped: int = 0) -> None:
-    path.write_text(
-        f'<testsuite name="synthetic" tests="{tests}" failures="{failures}" '
-        f'errors="{errors}" skipped="{skipped}">'
-        + "".join(
-            '<testcase classname="synthetic" name="case" />'
-            for _ in range(tests - failures - errors - skipped)
-        )
-        + "</testsuite>",
-        encoding="utf-8",
-    )
+    identities = [f"synthetic::case{index}" for index in range(tests)]
+    statuses = ["failure"] * failures + ["error"] * errors + ["skipped"] * skipped
+    controlled_report(path, identities, dict(zip(identities, statuses)))
 
 
 def test_gradle_failure_diagnostics_never_echo_subprocess_output(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -130,6 +245,7 @@ def test_python_profile_preserves_configured_default_exclusions(
         )
 
     monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    monkeypatch.setattr(ACCEPTANCE, "_expected_inventory", lambda suite_id, test_file=None: frozenset({"tests.test_synthetic::mandatory_case"}))
     summary, optional = ACCEPTANCE._python_profile("python", {}, tmp_path / "python.xml")
     assert len(commands) == 1
     assert "--junitxml" in commands[0]
@@ -175,6 +291,7 @@ def test_python_profile_optional_passing_cases_do_not_inflate_mandatory_count(
         )
 
     monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    monkeypatch.setattr(ACCEPTANCE, "_expected_inventory", lambda suite_id, test_file=None: frozenset({"tests.test_synthetic::mandatory_case"}))
     summary, _optional = ACCEPTANCE._python_profile("python", {}, report)
     assert summary["tests"] == 1
     assert summary["state_transitions"][0] == "mandatory-cases-passed"
@@ -495,22 +612,40 @@ source = { git = "https://example.invalid/decent-registry.git?rev=0123456789abcd
 
 
 def test_registry_profile_clears_pytest_selection_options(monkeypatch, tmp_path):
-    provider = tmp_path / "decent-registry"
-    provider.mkdir()
-    (provider / "pyproject.toml").write_text("[project]\nname='decent-registry'\n")
-    monkeypatch.setattr(ACCEPTANCE, "_pinned_provider_path", lambda: provider)
-    monkeypatch.setattr(ACCEPTANCE, "_run", lambda command, *, env, timeout: captured.append((command, dict(env))) or None)
     captured = []
-    def junit_cases(reports):
-        index = int(Path(reports[0]).stem.rsplit("-", 1)[-1])
-        counts = (11, 11, 4)
-        return [("synthetic::case", "passed", "") for _ in range(counts[index])]
-
-    monkeypatch.setattr(ACCEPTANCE, "_junit_cases", junit_cases)
-    monkeypatch.setattr(ACCEPTANCE, "_suite", lambda suite_id, reports, cases: {"id": suite_id, "passed": "yes"})
-    ACCEPTANCE._registry_profile({"PYTEST_ADDOPTS": "--deselect=tests/test_secret.py::test_case"}, tmp_path / "report.xml")
+    files = (
+        "tests/test_android_registry_peer.py",
+        "tests/test_registry_transport_integration.py",
+        "tests/test_portable_latch_registry_integration.py",
+    )
+    inventory = {file: frozenset(f"synthetic.job{index}::case{case}" for case in range(count)) for index, (file, count) in enumerate(zip(files, (11, 11, 4), strict=True))}
+    monkeypatch.setattr(ACCEPTANCE, "_pinned_provider_path", lambda: tmp_path)
+    monkeypatch.setattr(ACCEPTANCE, "_expected_inventory", lambda suite_id, test_file=None: inventory[test_file] if test_file else frozenset().union(*inventory.values()))
+    def run(command, *, env, timeout):
+        captured.append((command, dict(env)))
+        controlled_report(Path(command[command.index("--junitxml") + 1]), sorted(inventory[command[-1]]))
+    monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    suite = ACCEPTANCE._registry_profile({"PYTEST_ADDOPTS": "--deselect=tests/test_secret.py::test_case"}, tmp_path / "report.xml")
+    assert suite["tests"] == 26
     assert len(captured) == 3
     assert all("PYTEST_ADDOPTS" not in env for _command, env in captured)
+
+
+@pytest.mark.parametrize("corruption", ["duplicate", "wrong-identities", "truncated"])
+def test_registry_runner_rejects_unreviewed_native_inventory(monkeypatch, tmp_path, corruption):
+    monkeypatch.setattr(ACCEPTANCE, "_pinned_provider_path", lambda: tmp_path)
+    def run(command, *, env, timeout):
+        ids = sorted(ACCEPTANCE._expected_inventory("local-registry-integration", command[-1]))
+        if corruption == "duplicate":
+            ids[-1] = ids[0]
+        elif corruption == "truncated":
+            ids.pop()
+        else:
+            ids[-1] = f"synthetic.{Path(command[-1]).stem}::unreviewed"
+        controlled_report(Path(command[command.index("--junitxml") + 1]), ids)
+    monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    with pytest.raises(ReceiptValidationError, match="duplicate" if corruption == "duplicate" else "inventory"):
+        ACCEPTANCE._registry_profile({}, tmp_path / "report.xml")
 
 
 def test_registry_provider_must_be_clean(monkeypatch, tmp_path):

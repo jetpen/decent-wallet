@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
+INVENTORY_PATH = Path(__file__).with_name("security-acceptance-inventory.json")
 RECEIPT_SCHEMA = "decent-wallet-security-acceptance-receipt-v1"
 ANDROID_RESULTS = ROOT / "platforms/android-wallet/build/test-results/testDebugUnitTest"
 ANDROID_COMMAND = [
@@ -291,59 +292,111 @@ def validate_receipt(value: Any) -> dict[str, Any]:
     return receipt
 
 
-def junit_result(report_paths: list[Path]) -> SuiteResult:
-    """Aggregate JUnit reports; missing, malformed, failed, or skipped blocks."""
+def _native_report(report_paths: list[Path]) -> tuple[SuiteResult, list[tuple[str, str, str]]]:
+    """Validate native case identities, outcomes and every declared aggregate."""
     if not report_paths:
         _fail("mandatory test report is missing")
-    totals = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+    cases: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    keys = ("tests", "failures", "errors", "skipped")
+
+    def check_counts(node: ET.Element, counts: dict[str, int], *, required: bool) -> None:
+        for key in keys:
+            raw = node.get(key)
+            if raw is None and not required:
+                continue
+            if raw is None or re.fullmatch(r"[0-9]+", raw) is None:
+                _fail("mandatory test report has invalid counts")
+            if int(raw) != counts[key]:
+                _fail("mandatory test report summary is inconsistent")
+
+    def visit(node: ET.Element) -> dict[str, int]:
+        if node.tag not in {"testsuite", "testsuites"}:
+            _fail("mandatory test report has an unexpected format")
+        counts: dict[str, int] = dict.fromkeys(keys, 0)
+        for child in node:
+            if child.tag in {"testsuite", "testsuites"}:
+                nested = visit(child)
+                for key in keys:
+                    counts[key] += nested[key]
+            elif child.tag == "testcase" and node.tag == "testsuite":
+                classname, name = child.get("classname"), child.get("name")
+                if not classname or not name:
+                    _fail("mandatory test report has invalid case identities")
+                identity = f"{classname}::{name}"
+                if identity in seen:
+                    _fail("mandatory test report contains duplicate case identities")
+                seen.add(identity)
+                outcomes = [item for item in child if item.tag in {"failure", "error", "skipped"}]
+                # A failure can never be hidden by a skip. Contradictory or
+                # repeated native outcome elements are invalid, not optional.
+                if len(outcomes) > 1:
+                    _fail("mandatory test report contains contradictory case outcomes")
+                outcome = outcomes[0] if outcomes else None
+                status = "failed" if outcome is not None and outcome.tag in {"failure", "error"} else "skipped" if outcome is not None else "passed"
+                reason = outcome.get("message", "") if status == "skipped" and outcome is not None else ""
+                cases.append((identity, status, reason))
+                counts["tests"] += 1
+                if outcome is not None:
+                    counts[{"failure": "failures", "error": "errors", "skipped": "skipped"}[outcome.tag]] += 1
+            elif child.tag not in {"properties", "system-out", "system-err"}:
+                _fail("mandatory test report has an unexpected format")
+        check_counts(node, counts, required=node.tag == "testsuite")
+        return counts
+
+    totals: dict[str, int] = dict.fromkeys(keys, 0)
     for path in report_paths:
         try:
             root = ET.parse(path).getroot()
         except (OSError, ET.ParseError):
             _fail("mandatory test report is unreadable")
-        if root.tag not in {"testsuite", "testsuites"}:
-            _fail("mandatory test report has an unexpected format")
-        test_suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
-        if not test_suites:
-            _fail("mandatory test report contains no suites")
-        for suite in test_suites:
-            for key in totals:
-                try:
-                    count = int(suite.attrib.get(key, "0"))
-                except ValueError:
-                    _fail("mandatory test report has invalid counts")
-                if count < 0:
-                    _fail("mandatory test report has invalid counts")
-                totals[key] += count
-    result = SuiteResult(**totals)
-    if result.tests <= 0:
-        _fail("mandatory test report contains no tests")
+        counts = visit(root)
+        for key in keys:
+            totals[key] += counts[key]
+    if not cases:
+        _fail("mandatory test report contains no cases")
+    return SuiteResult(**totals), cases
+
+
+def junit_result(report_paths: list[Path]) -> SuiteResult:
+    """Aggregate validated native reports; failed or skipped mandatory blocks."""
+    result, _cases = _native_report(report_paths)
     if result.failures or result.errors or result.skipped:
         _fail("mandatory suite failed or skipped a test")
     return result
 
 
 def _junit_cases(report_paths: list[Path]) -> list[tuple[str, str, str]]:
-    if not report_paths:
-        _fail("mandatory test report is missing")
-    cases = []
-    for path in report_paths:
-        try:
-            root = ET.parse(path).getroot()
-        except (OSError, ET.ParseError):
-            _fail("mandatory test report is unreadable")
-        if root.tag not in {"testsuite", "testsuites"}:
-            _fail("mandatory test report has an unexpected format")
-        for case in root.iter("testcase"):
-            skipped = case.find("skipped")
-            failed = case.find("failure") is not None or case.find("error") is not None
-            name = f"{case.attrib.get('classname', '')}::{case.attrib.get('name', '')}"
-            status = "skipped" if skipped is not None else "failed" if failed else "passed"
-            reason = skipped.attrib.get("message", "") if skipped is not None else ""
-            cases.append((name, status, reason))
-    if not cases:
-        _fail("mandatory test report contains no cases")
-    return cases
+    return _native_report(report_paths)[1]
+
+
+def _expected_inventory(suite_id: str, test_file: str | None = None) -> frozenset[str]:
+    try:
+        manifest = json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _fail("reviewed mandatory inventory is missing or unreadable")
+    _exact_keys(manifest, {"schema", "python-security-matrix", "android-wallet-jvm-security", "local-registry-integration"}, "inventory")
+    if manifest["schema"] != "decent-wallet-security-acceptance-inventory-v1":
+        _fail("reviewed mandatory inventory schema is invalid")
+    value = manifest[suite_id]
+    if suite_id == "local-registry-integration":
+        jobs = _exact_keys(value, {
+            "tests/test_android_registry_peer.py", "tests/test_registry_transport_integration.py",
+            "tests/test_portable_latch_registry_integration.py",
+        }, "Registry inventory")
+        value = jobs.get(test_file) if test_file else [identity for identities in jobs.values() for identity in identities]
+    if not isinstance(value, list) or not value or any(
+        not isinstance(identity, str) or "::" not in identity
+        or not all(identity.split("::", 1)) for identity in value
+    ) or len(set(value)) != len(value):
+        _fail("reviewed mandatory inventory has invalid identities")
+    return frozenset(value)
+
+
+def _require_inventory(suite_id: str, cases: list[tuple[str, str, str]], optional: frozenset[str] = frozenset(), test_file: str | None = None) -> None:
+    expected = _expected_inventory(suite_id, test_file)
+    if expected & optional or {name for name, _status, _reason in cases} != expected | optional:
+        _fail("mandatory case inventory does not match the reviewed manifest")
 
 
 def _hash_file(path: Path) -> str:
@@ -525,6 +578,7 @@ def _python_profile(python: str, env: dict[str, str], report: Path) -> tuple[dic
     failure_cases = {name for name, status, _reason in cases if status == "failed"}
     if failure_cases:
         _fail("Python suite reported a failed mandatory case")
+    _require_inventory("python-security-matrix", cases, PYTHON_OPTIONAL_CASES)
     unexpected_skipped_nodes = {
         name for name, status, reason in cases
         if status == "skipped" and ("deselected" in reason.lower() or "not run" in reason.lower())
@@ -586,6 +640,7 @@ def _android_profile(gradle: str, env: dict[str, str], scratch: Path) -> tuple[d
     case_ids = {name for name, _status, _reason in cases}
     if expected - case_ids:
         _fail("Android live-peer optional case was not collected")
+    _require_inventory("android-wallet-jvm-security", cases, ANDROID_OPTIONAL_SKIPS)
     optional_case = next(
         (
             (name, status)
@@ -606,7 +661,7 @@ def _android_profile(gradle: str, env: dict[str, str], scratch: Path) -> tuple[d
         for name, status, _ in cases
     ):
         _fail("Android peer integration case did not report its environment-gated status")
-    producer_cases = [case for case in cases if case[1] == "passed"]
+    producer_cases = [case for case in cases if case[1] == "passed" and case[0] not in ANDROID_OPTIONAL_SKIPS]
     android_optional_name = next(iter(ANDROID_OPTIONAL_SKIPS))
     android_optional_digest = hashlib.sha256(android_optional_name.encode("utf-8")).hexdigest()[:12]
     android_optional_state = (
@@ -670,6 +725,7 @@ def _registry_profile(env: dict[str, str], report: Path) -> dict[str, Any]:
     for index, (test_file, _marker, _expected_count) in enumerate(integration_jobs):
         report_path = report.with_name(f"{report.stem}-{index}.xml")
         cases_by_file[test_file] = _junit_cases([report_path])
+        _require_inventory("local-registry-integration", cases_by_file[test_file], test_file=test_file)
     if any(
         len(file_cases) != expected_count
         or any(status != "passed" for _name, status, _reason in file_cases)
