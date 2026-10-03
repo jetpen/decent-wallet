@@ -137,7 +137,7 @@ def test_python_profile_preserves_configured_default_exclusions(
         "tests/test_podman_registry_deployment.py",
         "tests/test_remote_registry_acceptance.py",
     }.isdisjoint(commands[0])
-    assert optional == sorted(ACCEPTANCE.OPTIONAL_SKIPS)
+    assert optional == sorted(name for name in ACCEPTANCE.PYTHON_OPTIONAL_CASES if name not in expected_passing_optional)
     assert summary["tests"] == 1
     assert summary["skipped"] == 0
     assert len(summary["state_transitions"]) == 1 + len(ACCEPTANCE.PYTHON_OPTIONAL_CASES)

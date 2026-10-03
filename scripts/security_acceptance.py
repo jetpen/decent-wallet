@@ -519,7 +519,7 @@ def _python_profile(python: str, env: dict[str, str], report: Path) -> tuple[dic
     )
     cases = _junit_cases([report])
     skipped_cases = {name for name, status, _reason in cases if status == "skipped"}
-    skipped_mandatory = skipped_cases - OPTIONAL_SKIPS
+    skipped_mandatory = skipped_cases - OPTIONAL_SKIPS - OPTIONAL_PASSED_CASES
     if skipped_mandatory:
         _fail("Python suite skipped an unapproved mandatory case")
     collected = {name for name, _status, _reason in cases}
