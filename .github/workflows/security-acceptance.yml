@@ -94,6 +94,8 @@ jobs:
         run: uv sync --locked --extra test
       - name: Set up Android SDK
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
       - name: Run Android wallet JVM security suite
         run: uv run --locked --extra test python scripts/security_acceptance.py --profile android-jvm --receipt "$RUNNER_TEMP/android-jvm-security-receipt.json"
 
@@ -129,6 +131,8 @@ jobs:
           java-version: "17"
       - name: Set up Android SDK
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
       - name: Run full acceptance and produce fresh Kotlin artifacts
         working-directory: decent-wallet
         env:
