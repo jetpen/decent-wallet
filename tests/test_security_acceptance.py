@@ -179,6 +179,30 @@ def test_python_profile_optional_passing_cases_do_not_inflate_mandatory_count(
     assert summary["state_transitions"][0] == "mandatory-cases-passed"
 
 
+def test_python_profile_rejects_unapproved_skip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    report = tmp_path / "python.xml"
+    mandatory = '<testcase classname="tests.test_synthetic" name="mandatory_case"/>'
+    optional = []
+    for node_id in sorted(ACCEPTANCE.PYTHON_OPTIONAL_CASES):
+        classname, name = node_id.split("::", 1)
+        is_passing = node_id in ACCEPTANCE.OPTIONAL_PASSED_CASES
+        skipped = '<skipped message="optional prerequisite absent"/>' if not is_passing else ""
+        optional.append(f'<testcase classname="{classname}" name="{name}">{skipped}</testcase>')
+    unexpected = '<testcase classname="tests.test_unlisted" name="environmental_case"><skipped message="environmental dependency"/></testcase>'
+
+    def run(command: list[str], *, env: dict[str, str], timeout: int) -> None:
+        report_path = Path(command[command.index("--junitxml") + 1])
+        report_path.write_text(
+            f'<testsuite tests="{len(optional) + 2}" failures="0" errors="0" skipped="{len(optional) - len(ACCEPTANCE.OPTIONAL_PASSED_CASES) + 1}">'
+            + mandatory + "".join(optional) + unexpected + "</testsuite>",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(ACCEPTANCE, "_run", run)
+    with pytest.raises(ACCEPTANCE.ReceiptValidationError, match="unapproved mandatory case"):
+        ACCEPTANCE._python_profile("python", {}, report)
+
+
 def test_receipt_schema_is_allowlisted_and_verdict_matches_suite_results() -> None:
     passed_case = "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"
     receipt = {
