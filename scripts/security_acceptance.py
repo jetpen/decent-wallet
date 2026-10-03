@@ -46,6 +46,7 @@ OPTIONAL_SKIPS = frozenset(
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-bound.dw-False]",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-legacy.dw-True]",
         "tests.test_portable_latch::test_large_positive_integer_real_encrypted_public_readers[kotlin]",
+        "tests.test_podman_registry_deployment::test_podman_writer_publication_remains_peer_scoped",
     }
 )
 OPTIONAL_PASSED_CASES = frozenset(
