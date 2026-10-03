@@ -258,7 +258,7 @@ The following are mandatory release gates:
 - all supported platforms pass shared semantic and wire-format vectors;
 - failed, skipped, quarantined, or nondeterministic mandatory tests block MVP acceptance.
 
-Rootless desktop/Podman CLI conformance and runtime-smoke acceptance run in the dedicated `Desktop rotation runtime` GitHub Actions workflow, triggered by the desktop Containerfile, verifier, README, runtime spec, and all test changes. `security_acceptance.py` remains the receipt-producing core/Android/Registry matrix; desktop/Podman runtime is a separate required release gate.
+Rootless desktop/Podman CLI conformance and runtime-smoke acceptance run in the dedicated `Desktop rotation runtime` GitHub Actions workflow, triggered by the desktop Containerfile, verifier, README, runtime spec, and all test changes. The `Wallet security acceptance` workflow additionally provisions disposable Podman Registry peers for its mandatory `podman-registry-deployment` diagnostic; collection with absent peers is not evidence for that target. `security_acceptance.py` remains the receipt-producing core/Android/Registry matrix; desktop/Podman runtime and the managed peer-scoped publication diagnostic are separate required release gates. The diagnostic does not claim independent candidate confirmation or DHT convergence.
 
 - Tests use disposable wallets, ephemeral directories, synthetic test-only secrets and keys, and local/zero-value Registry state. Receipts contain no secret values or decrypted wallet contents; randomized ciphertext is compared semantically rather than byte-for-byte.
 - The gate fails closed on mandatory test failure/error, unexpected skip, receipt schema violation, missing suite/artifact, or altered optional-test inventory.

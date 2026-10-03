@@ -34,13 +34,21 @@ uv run --locked --extra test --extra registry \
   python scripts/security_acceptance.py \
   --profile full --receipt "$TMPDIR/wallet-security-full.json"
 
+# Required managed local Podman diagnostic (no Android tooling or remote peers).
+env -u PYTEST_ADDOPTS uv run --locked --extra test --extra registry \
+  python scripts/run_wallet_registry_acceptance.py \
+  --desktop-only --peer-backend podman --registry-repo "$DECENT_REGISTRY_PATH"
+
+# Required packaged desktop lifecycle/runtime gate.
+CONTAINER_RUNTIME=podman platforms/desktop-wallet/verify-container.sh
+
 ```
 
 ## Optional-case reporting
 
 Report digests stay local; do not write a JUnit report digest into the receipt because low-entropy strings in raw reports create an offline guessing oracle. Verify reports locally, discard them after validation, and keep only aggregate counts and bounded, allowlisted evidence categories in receipts.
 
-The `Wallet security acceptance` workflow runs the core and Android JVM profiles as independent required jobs. A Registry integration job runs the full profile against the exact provider revision pinned in `uv.lock`, including fresh Kotlin artifact production. Jobs use separate workspaces; none requires production credentials, production peers, or deployed Registry state. The workflow does not claim Android device/AVD runtime or global DHT acceptance; those remain dedicated gates.
+The `Wallet security acceptance` workflow runs core, Android JVM, full pinned-provider acceptance, and a managed rootless `podman-registry-deployment` diagnostic as separate fail-closed jobs. The Podman job provisions disposable peers and requires its exact test to pass rather than skip. It establishes peer-scoped stale/expired/ambiguous publication behavior, not independent candidate confirmation or global propagation. Jobs use separate workspaces; none requires production credentials, production peers, or deployed Registry state. Branch protection must require these job names plus the dedicated desktop runtime gate; workflow success is not itself branch-protection enforcement. Android device/AVD runtime and global DHT acceptance are not claimed by these profiles.
 
 ## Receipt privacy
 

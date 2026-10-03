@@ -12,6 +12,8 @@ on:
       - "src/decent_wallet/**"
       - "tests/**"
       - "scripts/security_acceptance.py"
+      - "scripts/security-acceptance-inventory.json"
+      - "platforms/desktop-wallet/**"
       - "scripts/run_wallet_registry_acceptance.py"
       - "platforms/android-wallet/src/**"
       - "platforms/android-wallet/build.gradle.kts"
@@ -36,6 +38,8 @@ on:
       - "src/decent_wallet/**"
       - "tests/**"
       - "scripts/security_acceptance.py"
+      - "scripts/security-acceptance-inventory.json"
+      - "platforms/desktop-wallet/**"
       - "scripts/run_wallet_registry_acceptance.py"
       - "platforms/android-wallet/src/**"
       - "platforms/android-wallet/build.gradle.kts"
@@ -98,6 +102,42 @@ jobs:
           packages: "platform-tools platforms;android-35 build-tools;35.0.0"
       - name: Run Android wallet JVM security suite
         run: uv run --locked --extra test python scripts/security_acceptance.py --profile android-jvm --receipt "$RUNNER_TEMP/android-jvm-security-receipt.json"
+
+  podman-registry-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out wallet
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: decent-wallet
+      - name: Check out pinned Registry provider
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: jetpen/decent-registry
+          ref: 3e561bbdaf7c6da85528a717dd555445d5e7dff7
+          path: decent-registry
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@6b9c6063abd6010835644d4c2e1bef4cf5cd0fca # v6.0.1
+        with:
+          version: "0.12.19"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: decent-wallet/uv.lock
+      - name: Install and verify rootless Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+      - name: Gate disposable Podman Registry deployment
+        working-directory: decent-wallet
+        run: |
+          env -u PYTEST_ADDOPTS uv run --locked --extra test --extra registry \
+            python scripts/run_wallet_registry_acceptance.py \
+            --desktop-only --peer-backend podman \
+            --registry-repo "$GITHUB_WORKSPACE/decent-registry"
 
   registry-integration:
     runs-on: ubuntu-latest
