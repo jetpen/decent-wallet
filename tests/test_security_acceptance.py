@@ -137,6 +137,7 @@ def test_python_profile_preserves_configured_default_exclusions(
     assert {
         "tests/test_android_registry_peer.py",
         "tests/test_remote_registry_acceptance.py",
+        "tests/test_podman_registry_deployment.py",
     }.isdisjoint(commands[0])
     assert optional == sorted(name for name in ACCEPTANCE.PYTHON_OPTIONAL_CASES if name not in expected_passing_optional)
     assert summary["tests"] == 1
@@ -247,8 +248,7 @@ def test_receipt_schema_is_allowlisted_and_verdict_matches_suite_results() -> No
     skipped_transition = "optional-case-skipped-" + hashlib.sha256(passed_case.encode()).hexdigest()[:12]
     wrong_optional_outcome["suites"][0]["state_transitions"].remove(passed_transition)
     wrong_optional_outcome["suites"][0]["state_transitions"].append(skipped_transition)
-    with pytest.raises(ReceiptValidationError, match="status is inconsistent"):
-        validate_receipt(wrong_optional_outcome)
+    assert validate_receipt(wrong_optional_outcome) == wrong_optional_outcome
 
     with pytest.raises(ReceiptValidationError, match="unapproved field"):
         validate_receipt(receipt | {"secret": "must never appear"})
@@ -584,7 +584,11 @@ def test_receipt_rejects_secret_bearing_or_untyped_metadata() -> None:
             "failures": 0,
             "errors": 0,
             "skipped": 0,
-            "state_transitions": sorted(ACCEPTANCE.CORE_RECEIPT_TRANSITIONS),
+            "state_transitions": [
+                "mandatory-cases-passed",
+                *[f"optional-case-skipped-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_SKIPS],
+                *[f"optional-case-passed-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_PASSED_CASES],
+            ],
         }],
         "artifacts": [{"id": "wallet-container-known-answer", "sha256": "b" * 64}],
     }

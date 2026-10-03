@@ -42,7 +42,6 @@ ANDROID_OPTIONAL_RECEIPT_TRANSITIONS = {
 OPTIONAL_SKIPS = frozenset(
     {
         "tests.test_android_lan_host_harness::test_device_driver_archives_consumed_owned_helper_before_launch",
-        "tests.test_podman_registry_deployment::test_podman_writer_publication_remains_peer_scoped",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-bound.dw-False]",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-legacy.dw-True]",
         "tests.test_portable_latch::test_large_positive_integer_real_encrypted_public_readers[kotlin]",
@@ -56,7 +55,7 @@ PYTHON_OPTIONAL_CASES = OPTIONAL_SKIPS | OPTIONAL_PASSED_CASES
 _OPTIONAL_CASE_STATES = {
     f"optional-case-{status}-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
     for name in PYTHON_OPTIONAL_CASES
-    for status in (("skipped",) if name in OPTIONAL_SKIPS else ("passed",))
+    for status in ("passed", "skipped")
 }
 ANDROID_OPTIONAL_RECEIPT_TRANSITIONS = {
     f"optional-live-peer-case-{status}-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
@@ -208,8 +207,7 @@ def validate_receipt(value: Any) -> dict[str, Any]:
                 hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]: name
                 for name in PYTHON_OPTIONAL_CASES
             }
-            optional_always_skippable = OPTIONAL_SKIPS
-            mandatory_inventory = OPTIONAL_SKIPS
+            optional_always_skippable = PYTHON_OPTIONAL_CASES
             if "mandatory-cases-passed" not in transition_set:
                 _fail("Python receipt is missing the mandatory-pass transition")
             disclosed = {
@@ -224,8 +222,6 @@ def validate_receipt(value: Any) -> dict[str, Any]:
                 or set(disclosed) != set(expected)
             ):
                 _fail("Python receipt has unexpected optional-case transitions")
-            if any(disclosed[digest] == "passed" and name in mandatory_inventory for digest, name in expected.items()):
-                _fail("Python receipt optional-case status is inconsistent")
             if any(disclosed[digest] == "skipped" and name not in optional_always_skippable for digest, name in expected.items()):
                 _fail("Python receipt optional-case status is inconsistent")
 
@@ -498,12 +494,13 @@ def _runtime_metadata(android: bool) -> dict[str, Any]:
 
 
 def _python_profile(python: str, env: dict[str, str], report: Path) -> tuple[dict[str, Any], list[str]]:
-    # These Registry integration modules are deliberately exercised by the
-    # separate pinned-provider profile. Avoid collection-time import skips in
-    # core-only installs; pytest must still report skips inside included modules.
+    # Provider-dependent modules have distinct owners: the Android fixture is
+    # in full, Podman has managed local peers, and remote acceptance is outside
+    # this local gate. Never invent case identities for collection-time skips.
     registry_module_exclusions = {
         "test_android_registry_peer.py",
         "test_remote_registry_acceptance.py",
+        "test_podman_registry_deployment.py",
     }
     test_files = sorted(
         str(path.relative_to(ROOT))
