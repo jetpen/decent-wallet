@@ -146,7 +146,6 @@ def test_python_profile_preserves_configured_default_exclusions(
     expected_outcomes = {
         "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration": "passed",
         "tests.test_android_lan_host_harness::test_device_driver_archives_consumed_owned_helper_before_launch": "skipped",
-        "tests.test_podman_registry_deployment::test_podman_writer_publication_remains_peer_scoped": "skipped",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-bound.dw-False]": "skipped",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-legacy.dw-True]": "skipped",
         "tests.test_portable_latch::test_large_positive_integer_real_encrypted_public_readers[kotlin]": "skipped",

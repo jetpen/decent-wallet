@@ -46,9 +46,9 @@ OPTIONAL_SKIPS = frozenset(
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-bound.dw-False]",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-legacy.dw-True]",
         "tests.test_portable_latch::test_large_positive_integer_real_encrypted_public_readers[kotlin]",
-        "tests.test_podman_registry_deployment::test_podman_writer_publication_remains_peer_scoped",
     }
 )
+_PODMAN_OPTIONAL_CASE = "tests.test_podman_registry_deployment::test_podman_writer_publication_remains_peer_scoped"
 OPTIONAL_PASSED_CASES = frozenset(
     {"tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"}
 )
@@ -530,8 +530,8 @@ def _python_profile(python: str, env: dict[str, str], report: Path) -> tuple[dic
     if failure_cases:
         _fail("Python suite reported a failed mandatory case")
     unexpected_skipped_nodes = {
-        name for name, _status, reason in cases
-        if "deselected" in reason.lower() or "not run" in reason.lower()
+        name for name, status, reason in cases
+        if status == "skipped" and ("deselected" in reason.lower() or "not run" in reason.lower())
     }
     if unexpected_skipped_nodes:
         _fail("Python suite reported unapproved deselection metadata")
