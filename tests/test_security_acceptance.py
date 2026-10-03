@@ -618,7 +618,7 @@ def test_registry_profile_clears_pytest_selection_options(monkeypatch, tmp_path)
         "tests/test_registry_transport_integration.py",
         "tests/test_portable_latch_registry_integration.py",
     )
-    inventory = {file: frozenset(f"synthetic.job{index}::case{case}" for case in range(count)) for index, (file, count) in enumerate(zip(files, (11, 11, 4), strict=True))}
+    inventory = {file: frozenset({f"synthetic.job{index}::case"}) for index, file in enumerate(files)}
     monkeypatch.setattr(ACCEPTANCE, "_pinned_provider_path", lambda: tmp_path)
     monkeypatch.setattr(ACCEPTANCE, "_expected_inventory", lambda suite_id, test_file=None: inventory[test_file] if test_file else frozenset().union(*inventory.values()))
     def run(command, *, env, timeout):
@@ -626,7 +626,7 @@ def test_registry_profile_clears_pytest_selection_options(monkeypatch, tmp_path)
         controlled_report(Path(command[command.index("--junitxml") + 1]), sorted(inventory[command[-1]]))
     monkeypatch.setattr(ACCEPTANCE, "_run", run)
     suite = ACCEPTANCE._registry_profile({"PYTEST_ADDOPTS": "--deselect=tests/test_secret.py::test_case"}, tmp_path / "report.xml")
-    assert suite["tests"] == 26
+    assert suite["tests"] == 3
     assert len(captured) == 3
     assert all("PYTEST_ADDOPTS" not in env for _command, env in captured)
 

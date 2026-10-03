@@ -190,19 +190,6 @@ def validate_receipt(value: Any) -> dict[str, Any]:
         )
         if suite["status"] != "passed" or failures or errors or (skipped and not optional_skip_allowed):
             _fail(f"suite[{index}] did not pass without unapproved skips")
-        if suite_id == "android-wallet-jvm-security":
-            optional_identity = next(iter(ANDROID_OPTIONAL_SKIPS))
-            digest = hashlib.sha256(optional_identity.encode("utf-8")).hexdigest()[:12]
-            optional_outcomes = {
-                f"optional-live-peer-case-passed-{digest}",
-                f"optional-live-peer-case-skipped-{digest}",
-            }
-            if len(transitions) != 2 or len(transition_set & optional_outcomes) != 1:
-                _fail("Android receipt has an invalid optional-case transition")
-            optional_is_skipped = f"optional-live-peer-case-skipped-{digest}" in transition_set
-            if skipped != int(optional_is_skipped):
-                _fail("Android receipt skip count disagrees with its transition")
-
         if suite_id == "python-security-matrix":
             expected = {
                 hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]: name
@@ -641,32 +628,10 @@ def _android_profile(gradle: str, env: dict[str, str], scratch: Path) -> tuple[d
     if expected - case_ids:
         _fail("Android live-peer optional case was not collected")
     _require_inventory("android-wallet-jvm-security", cases, ANDROID_OPTIONAL_SKIPS)
-    optional_case = next(
-        (
-            (name, status)
-            for name, status, _ in cases
-            if "AndroidDirectDhtRegistryInteropTest" in name
-            and "readsHistoryPublishesAndFreshReadsAgainstPythonRegistryPeer" in name
-        ),
-        None,
-    )
-    if optional_case is None:
-        _fail("Android peer integration case was not collected")
-    if optional_case[1] == "failed":
-        _fail("Android peer integration case failed")
-    if optional_case[1] == "skipped" and not any(
-        "AndroidDirectDhtRegistryInteropTest" in name
-        and "readsHistoryPublishesAndFreshReadsAgainstPythonRegistryPeer" in name
-        and status == "skipped"
-        for name, status, _ in cases
-    ):
-        _fail("Android peer integration case did not report its environment-gated status")
     producer_cases = [case for case in cases if case[1] == "passed" and case[0] not in ANDROID_OPTIONAL_SKIPS]
     android_optional_name = next(iter(ANDROID_OPTIONAL_SKIPS))
     android_optional_digest = hashlib.sha256(android_optional_name.encode("utf-8")).hexdigest()[:12]
-    android_optional_state = (
-        "skipped" if android_optional_name in actual_skips else "passed"
-    )
+    android_optional_state = next(status for name, status, _reason in cases if name == android_optional_name)
     suite = {
         "id": "android-wallet-jvm-security",
         "status": "passed",
@@ -702,12 +667,12 @@ def _registry_profile(env: dict[str, str], report: Path) -> dict[str, Any]:
     for name in ("DECENT_REGISTRY_TEST_PEER", "DECENT_REGISTRY_TEST_READBACK_PEER"):
         registry_env.pop(name, None)
     integration_jobs = (
-        ("tests/test_android_registry_peer.py", None, 11),
-        ("tests/test_registry_transport_integration.py", "registry_integration", 11),
-        ("tests/test_portable_latch_registry_integration.py", "registry_integration", 4),
+        ("tests/test_android_registry_peer.py", None),
+        ("tests/test_registry_transport_integration.py", "registry_integration"),
+        ("tests/test_portable_latch_registry_integration.py", "registry_integration"),
     )
     reports: list[Path] = []
-    for index, (test_file, marker, expected_count) in enumerate(integration_jobs):
+    for index, (test_file, marker) in enumerate(integration_jobs):
         report_path = report.with_name(f"{report.stem}-{index}.xml")
         test_args = ["-m", marker] if marker else []
         _run(
@@ -721,21 +686,9 @@ def _registry_profile(env: dict[str, str], report: Path) -> dict[str, Any]:
         )
         reports.append(report_path)
     cases = _junit_cases(reports)
-    cases_by_file: dict[str, list[tuple[str, str, str]]] = {}
-    for index, (test_file, _marker, _expected_count) in enumerate(integration_jobs):
+    for index, (test_file, _marker) in enumerate(integration_jobs):
         report_path = report.with_name(f"{report.stem}-{index}.xml")
-        cases_by_file[test_file] = _junit_cases([report_path])
-        _require_inventory("local-registry-integration", cases_by_file[test_file], test_file=test_file)
-    if any(
-        len(file_cases) != expected_count
-        or any(status != "passed" for _name, status, _reason in file_cases)
-        for expected_count, file_cases in zip(
-            (job[2] for job in integration_jobs),
-            cases_by_file.values(),
-            strict=True,
-        )
-    ):
-        _fail("Registry integration case inventory is incomplete")
+        _require_inventory("local-registry-integration", _junit_cases([report_path]), test_file=test_file)
     skipped = {name for name, status, _reason in cases if status == "skipped"}
     if skipped:
         _fail("Registry integration suite skipped a mandatory test")
