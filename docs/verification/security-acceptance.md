@@ -6,7 +6,7 @@ The acceptance contract is the mandatory security matrix in [the wallet implemen
 
 **Profile split**
 
-- `core` includes all default Python test files except the three modules that skip during import when the optional Registry provider is absent. Those modules run in `full` with the provider installed; individual test skips inside the core suite are still rejected unless explicitly listed. The optional Python pass case and four optional skip cases all have separate transitions in receipts. All five outcomes are excluded from mandatory counts. Receipt validation enforces each outcome against the reviewed case policy; an unexpected skip, omitted case, or mismatched status blocks acceptance.
+- `core` includes all default Python test files except the three modules that skip during import when the optional Registry provider is absent. Those modules run in `full` with the provider installed; individual test skips inside the core suite are still rejected unless explicitly listed. The five optional Python skip cases plus one optional pass case are all reported separately. The Podman Registry deployment probe is included: when managed peers are absent it is an allowlisted optional skip, otherwise it must run and pass. Optional passes/skips stay out of mandatory counts, and receipt validation enforces each outcome against the reviewed case policy.
 - `android-jvm` runs the Android wallet JVM suite; all tests except its one explicitly tracked environment-dependent live-peer test must pass. The live-peer test outcome is separately represented in receipt metadata.
 - `full` composes the core, Android JVM, Android Registry peer fixture, and local Registry integration suites, using the same JUnit and receipt validation rules across suites.
 

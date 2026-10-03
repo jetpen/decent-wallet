@@ -47,6 +47,8 @@ def test_gradle_failure_diagnostics_never_echo_subprocess_output(monkeypatch: py
     output = capsys.readouterr()
     assert "SYNTHETIC-SECRET-OUTPUT" not in output.out + output.err
     assert "Android Gradle acceptance task failed." in output.err
+
+
 @pytest.mark.parametrize(
     ("failures", "errors", "skipped"),
     [(1, 0, 0), (0, 1, 0), (0, 0, 1)],
@@ -134,7 +136,6 @@ def test_python_profile_preserves_configured_default_exclusions(
     assert not ("-o" in commands[0] and "addopts=" in commands[0])
     assert {
         "tests/test_android_registry_peer.py",
-        "tests/test_podman_registry_deployment.py",
         "tests/test_remote_registry_acceptance.py",
     }.isdisjoint(commands[0])
     assert optional == sorted(name for name in ACCEPTANCE.PYTHON_OPTIONAL_CASES if name not in expected_passing_optional)
@@ -145,6 +146,7 @@ def test_python_profile_preserves_configured_default_exclusions(
     expected_outcomes = {
         "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration": "passed",
         "tests.test_android_lan_host_harness::test_device_driver_archives_consumed_owned_helper_before_launch": "skipped",
+        "tests.test_podman_registry_deployment::test_podman_writer_publication_remains_peer_scoped": "skipped",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-bound.dw-False]": "skipped",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-legacy.dw-True]": "skipped",
         "tests.test_portable_latch::test_large_positive_integer_real_encrypted_public_readers[kotlin]": "skipped",
@@ -152,6 +154,7 @@ def test_python_profile_preserves_configured_default_exclusions(
     for name, status in expected_outcomes.items():
         digest = hashlib.sha256(name.encode()).hexdigest()[:12]
         assert f"optional-case-{status}-{digest}" in summary["state_transitions"]
+
 
 def test_python_profile_optional_passing_cases_do_not_inflate_mandatory_count(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -231,6 +234,7 @@ def test_receipt_schema_is_allowlisted_and_verdict_matches_suite_results() -> No
     failed["suites"][0]["status"] = "failed"
     with pytest.raises(ReceiptValidationError, match="pass"):
         validate_receipt(failed)
+
 
 def test_receipt_profiles_require_exact_suites_artifacts_and_optional_case_disclosures() -> None:
     passed_case = "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"
@@ -506,8 +510,6 @@ source = { git = "https://example.invalid/decent-registry.git?rev=0123456789abcd
     with pytest.raises(ACCEPTANCE.ReceiptValidationError):
         ACCEPTANCE._pinned_provider_path()
 
-
-def test_write_receipt_uses_allowlisted_atomic_destination(tmp_path: Path) -> None:
     passed_case = "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"
     receipt = {
         "schema": "decent-wallet-security-acceptance-receipt-v1",

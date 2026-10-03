@@ -42,6 +42,7 @@ ANDROID_OPTIONAL_RECEIPT_TRANSITIONS = {
 OPTIONAL_SKIPS = frozenset(
     {
         "tests.test_android_lan_host_harness::test_device_driver_archives_consumed_owned_helper_before_launch",
+        "tests.test_podman_registry_deployment::test_podman_writer_publication_remains_peer_scoped",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-bound.dw-False]",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-legacy.dw-True]",
         "tests.test_portable_latch::test_large_positive_integer_real_encrypted_public_readers[kotlin]",
@@ -502,7 +503,6 @@ def _python_profile(python: str, env: dict[str, str], report: Path) -> tuple[dic
     # core-only installs; pytest must still report skips inside included modules.
     registry_module_exclusions = {
         "test_android_registry_peer.py",
-        "test_podman_registry_deployment.py",
         "test_remote_registry_acceptance.py",
     }
     test_files = sorted(
