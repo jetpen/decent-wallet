@@ -219,6 +219,11 @@ def validate_receipt(value: Any) -> dict[str, Any]:
                 or set(disclosed) != set(expected)
             ):
                 _fail("Python receipt has unexpected optional-case transitions")
+            if any(
+                disclosed[digest] != ("skipped" if name in mandatory_inventory else "passed")
+                for digest, name in expected.items()
+            ):
+                _fail("Python receipt optional-case status is inconsistent")
 
             if skipped != 0:
                 _fail("Python receipt suite counts may not include accepted optional skips")
@@ -526,7 +531,11 @@ def _python_profile(python: str, env: dict[str, str], report: Path) -> tuple[dic
     }
     if unexpected_skipped_nodes:
         _fail("Python suite reported unapproved deselection metadata")
-    passing = [(name, status, reason) for name, status, reason in cases if status == "passed"]
+    mandatory_passing = [
+        (name, status, reason)
+        for name, status, reason in cases
+        if status == "passed" and name not in OPTIONAL_SKIPS
+    ]
     transitions = ["mandatory-cases-passed"]
     skipped_cases_set = set(skipped_cases)
     for name in sorted(OPTIONAL_SKIPS):
@@ -536,7 +545,7 @@ def _python_profile(python: str, env: dict[str, str], report: Path) -> tuple[dic
     passed_summary = {
         "id": "python-security-matrix",
         "status": "passed",
-        "tests": len(passing),
+        "tests": len(mandatory_passing),
         "failures": len(failure_cases),
         "errors": 0,
         "skipped": 0,
