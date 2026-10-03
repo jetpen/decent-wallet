@@ -258,7 +258,11 @@ The following are mandatory release gates:
 - all supported platforms pass shared semantic and wire-format vectors;
 - failed, skipped, quarantined, or nondeterministic mandatory tests block MVP acceptance.
 
-Tests use disposable wallets, ephemeral directories, synthetic test-only secrets, test-only keys, and zero-value/local Registry state. Evidence receipts contain no secret values or decrypted wallet contents. Ciphertext byte equality is not required across platforms because authenticated encryption is randomized; semantic results and canonical public artifacts must agree.
+`core` runs all default Python test modules other than provider-dependent Registry collection modules, which are intentionally left to the locked Registry integration profile. Five explicit environment-gated checks are included in the optional-case category allowlist; two host-JVM ciphertext consumer cases are expected to skip because that optional consumer is not invoked by the Python core runner. These cases are excluded from mandatory counts and do not count as passing. Any new skip, failure, or error blocks. `android-jvm` runs the Android JVM suite and Kotlin-authored container artifacts and records its collected live-peer case outcome separately. `full` adds the pinned Registry integration suite, verifies exact case inventories from the pinned Registry modules, and rejects omissions. Each profile produces a values-free receipt. Android device/AVD runtime and global DHT convergence remain separate acceptance evidence.
+
+- Tests use disposable wallets, ephemeral directories, synthetic test-only secrets and keys, and local/zero-value Registry state. Receipts contain no secret values or decrypted wallet contents; randomized ciphertext is compared semantically rather than byte-for-byte.
+- The gate fails closed on mandatory test failure/error, unexpected skip, receipt schema violation, missing suite/artifact, or altered optional-test inventory.
+- Receipts remain local evidence and are never published to wallet or Registry/DHT state.
 
 ## 13. External responsibilities and handoff
 
