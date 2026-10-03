@@ -106,9 +106,7 @@ def test_python_profile_clears_inherited_pytest_selection(monkeypatch: pytest.Mo
 def test_python_profile_preserves_configured_default_exclusions(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    expected_passing_optional = {
-        "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"
-    }
+    expected_passing_optional = ACCEPTANCE.OPTIONAL_PASSED_CASES
     commands: list[list[str]] = []
 
 
@@ -117,7 +115,7 @@ def test_python_profile_preserves_configured_default_exclusions(
         assert "PYTEST_ADDOPTS" not in env
         report = Path(command[command.index("--junitxml") + 1])
         cases = ['<testcase classname="tests.test_synthetic" name="mandatory_case"/>']
-        for node_id in sorted(ACCEPTANCE.OPTIONAL_SKIPS):
+        for node_id in sorted(ACCEPTANCE.PYTHON_OPTIONAL_CASES):
             classname, name = node_id.split("::", 1)
             is_skipped = node_id not in expected_passing_optional
             skipped_xml = '<skipped message="optional external prerequisite absent"/>' if is_skipped else ""
@@ -139,34 +137,33 @@ def test_python_profile_preserves_configured_default_exclusions(
         "tests/test_podman_registry_deployment.py",
         "tests/test_remote_registry_acceptance.py",
     }.isdisjoint(commands[0])
-    assert optional == sorted(name for name in ACCEPTANCE.OPTIONAL_SKIPS if name not in expected_passing_optional)
+    assert optional == sorted(ACCEPTANCE.OPTIONAL_SKIPS)
     assert summary["tests"] == 1
     assert summary["skipped"] == 0
-    assert len(summary["state_transitions"]) == 1 + len(ACCEPTANCE.OPTIONAL_SKIPS)
+    assert len(summary["state_transitions"]) == 1 + len(ACCEPTANCE.PYTHON_OPTIONAL_CASES)
     assert summary["state_transitions"][0] == "mandatory-cases-passed"
-    for name in ACCEPTANCE.OPTIONAL_SKIPS:
+    expected_outcomes = {
+        "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration": "passed",
+        "tests.test_android_lan_host_harness::test_device_driver_archives_consumed_owned_helper_before_launch": "skipped",
+        "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-bound.dw-False]": "skipped",
+        "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-legacy.dw-True]": "skipped",
+        "tests.test_portable_latch::test_large_positive_integer_real_encrypted_public_readers[kotlin]": "skipped",
+    }
+    for name, status in expected_outcomes.items():
         digest = hashlib.sha256(name.encode()).hexdigest()[:12]
-        status = "passed" if name in expected_passing_optional else "skipped"
         assert f"optional-case-{status}-{digest}" in summary["state_transitions"]
 
 def test_python_profile_optional_passing_cases_do_not_inflate_mandatory_count(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     report = tmp_path / "python.xml"
-    approved_pass = next(name for name in ACCEPTANCE.OPTIONAL_SKIPS if "concrete_transport" in name)
+    approved_pass = next(name for name in ACCEPTANCE.OPTIONAL_PASSED_CASES if "concrete_transport" in name)
 
     def run(command: list[str], *, env: dict[str, str], timeout: int) -> None:
         cases = ['<testcase classname="tests.test_synthetic" name="mandatory_case"/>']
-        expected_outcomes = [
-            ("tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration", "passed"),
-            ("tests.test_android_lan_host_harness::test_device_driver_archives_consumed_owned_helper_before_launch", "skipped"),
-            ("tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-bound.dw-False]", "skipped"),
-            ("tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-legacy.dw-True]", "skipped"),
-            ("tests.test_portable_latch::test_large_positive_integer_real_encrypted_public_readers[kotlin]", "skipped"),
-        ]
-        for node_id, outcome in expected_outcomes:
+        for node_id in sorted(ACCEPTANCE.PYTHON_OPTIONAL_CASES):
             classname, name = node_id.split("::", 1)
-            skipped = '<skipped message="optional prerequisite absent"/>' if outcome == "skipped" else ""
+            skipped = '<skipped message="optional prerequisite absent"/>' if node_id != approved_pass else ""
             cases.append(f'<testcase classname="{classname}" name="{name}">{skipped}</testcase>')
         report_path = Path(command[command.index("--junitxml") + 1])
         report_path.write_text(
@@ -199,8 +196,8 @@ def test_receipt_schema_is_allowlisted_and_verdict_matches_suite_results() -> No
                 "skipped": 0,
                 "state_transitions": [
                     "mandatory-cases-passed",
-                    *[f"optional-case-skipped-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_SKIPS if item != "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"],
-                    "optional-case-passed-" + hashlib.sha256("tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration".encode()).hexdigest()[:12],
+                    *[f"optional-case-skipped-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_SKIPS],
+                    "optional-case-passed-" + hashlib.sha256(passed_case.encode()).hexdigest()[:12],
                 ],
             }
         ],
@@ -236,6 +233,7 @@ def test_receipt_schema_is_allowlisted_and_verdict_matches_suite_results() -> No
         validate_receipt(failed)
 
 def test_receipt_profiles_require_exact_suites_artifacts_and_optional_case_disclosures() -> None:
+    passed_case = "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"
     receipt = {
         "schema": "decent-wallet-security-acceptance-receipt-v1",
         "created_at": "2026-10-02T00:00:00Z",
@@ -253,8 +251,8 @@ def test_receipt_profiles_require_exact_suites_artifacts_and_optional_case_discl
                 "skipped": 0,
                 "state_transitions": [
                     "mandatory-cases-passed",
-                    *[f"optional-case-skipped-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_SKIPS if item != "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"],
-                    "optional-case-passed-" + hashlib.sha256("tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration".encode()).hexdigest()[:12],
+                    *[f"optional-case-skipped-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_SKIPS],
+                    "optional-case-passed-" + hashlib.sha256(passed_case.encode()).hexdigest()[:12],
                 ],
             }
         ],
@@ -378,6 +376,7 @@ def test_android_profile_receipt_requires_suite_artifacts_and_omission_disclosur
 
 
 def test_full_receipt_rejects_unapproved_registry_transitions() -> None:
+    passed_case = "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"
     receipt = {
         "schema": ACCEPTANCE.RECEIPT_SCHEMA,
         "created_at": "2026-10-02T00:00:00Z",
@@ -400,8 +399,8 @@ def test_full_receipt_rejects_unapproved_registry_transitions() -> None:
                 "skipped": 0,
                 "state_transitions": [
                     "mandatory-cases-passed",
-                    *[f"optional-case-skipped-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_SKIPS if item != "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"],
-                    "optional-case-passed-" + hashlib.sha256("tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration".encode()).hexdigest()[:12],
+                    *[f"optional-case-skipped-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_SKIPS],
+                    "optional-case-passed-" + hashlib.sha256(passed_case.encode()).hexdigest()[:12],
                 ],
             },
             {
@@ -509,6 +508,7 @@ source = { git = "https://example.invalid/decent-registry.git?rev=0123456789abcd
 
 
 def test_write_receipt_uses_allowlisted_atomic_destination(tmp_path: Path) -> None:
+    passed_case = "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"
     receipt = {
         "schema": "decent-wallet-security-acceptance-receipt-v1",
         "created_at": "2026-10-02T00:00:00Z",
@@ -526,8 +526,8 @@ def test_write_receipt_uses_allowlisted_atomic_destination(tmp_path: Path) -> No
                 "skipped": 0,
                 "state_transitions": [
                     "mandatory-cases-passed",
-                    *[f"optional-case-skipped-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_SKIPS if item != "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"],
-                    "optional-case-passed-" + hashlib.sha256("tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration".encode()).hexdigest()[:12],
+                    *[f"optional-case-skipped-{hashlib.sha256(item.encode()).hexdigest()[:12]}" for item in ACCEPTANCE.OPTIONAL_SKIPS],
+                    "optional-case-passed-" + hashlib.sha256(passed_case.encode()).hexdigest()[:12],
                 ],
             }
         ],

@@ -42,15 +42,20 @@ ANDROID_OPTIONAL_RECEIPT_TRANSITIONS = {
 OPTIONAL_SKIPS = frozenset(
     {
         "tests.test_android_lan_host_harness::test_device_driver_archives_consumed_owned_helper_before_launch",
-        "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-bound.dw-False]",
         "tests.test_portable_latch::test_actual_kotlin_authored_ciphertext_through_python_public_reader[kotlin-legacy.dw-True]",
         "tests.test_portable_latch::test_large_positive_integer_real_encrypted_public_readers[kotlin]",
     }
 )
+OPTIONAL_PASSED_CASES = frozenset(
+    {"tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"}
+)
+PYTHON_OPTIONAL_CASES = OPTIONAL_SKIPS | OPTIONAL_PASSED_CASES
+
 _OPTIONAL_CASE_STATES = {
-    "optional-case-skipped-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
-    for name in OPTIONAL_SKIPS
+    f"optional-case-{status}-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+    for name in PYTHON_OPTIONAL_CASES
+    for status in (("skipped",) if name in OPTIONAL_SKIPS else ("passed",))
 }
 ANDROID_OPTIONAL_RECEIPT_TRANSITIONS = {
     f"optional-live-peer-case-{status}-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
@@ -200,11 +205,9 @@ def validate_receipt(value: Any) -> dict[str, Any]:
         if suite_id == "python-security-matrix":
             expected = {
                 hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]: name
-                for name in OPTIONAL_SKIPS
+                for name in PYTHON_OPTIONAL_CASES
             }
-            mandatory_inventory = OPTIONAL_SKIPS - {
-                "tests.test_portable_latch::test_concrete_transport_has_explicit_environment_configuration"
-            }
+            mandatory_inventory = OPTIONAL_SKIPS
             if "mandatory-cases-passed" not in transition_set:
                 _fail("Python receipt is missing the mandatory-pass transition")
             disclosed = {
@@ -520,7 +523,7 @@ def _python_profile(python: str, env: dict[str, str], report: Path) -> tuple[dic
     if skipped_mandatory:
         _fail("Python suite skipped an unapproved mandatory case")
     collected = {name for name, _status, _reason in cases}
-    if not OPTIONAL_SKIPS <= collected:
+    if not PYTHON_OPTIONAL_CASES <= collected:
         _fail("an approved environmental test was not collected")
     failure_cases = {name for name, status, _reason in cases if status == "failed"}
     if failure_cases:
@@ -534,11 +537,11 @@ def _python_profile(python: str, env: dict[str, str], report: Path) -> tuple[dic
     mandatory_passing = [
         (name, status, reason)
         for name, status, reason in cases
-        if status == "passed" and name not in OPTIONAL_SKIPS
+        if status == "passed" and name not in PYTHON_OPTIONAL_CASES
     ]
     transitions = ["mandatory-cases-passed"]
     skipped_cases_set = set(skipped_cases)
-    for name in sorted(OPTIONAL_SKIPS):
+    for name in sorted(PYTHON_OPTIONAL_CASES):
         digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
         status = "skipped" if name in skipped_cases_set else "passed"
         transitions.append(f"optional-case-{status}-{digest}")
