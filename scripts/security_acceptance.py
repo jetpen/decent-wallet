@@ -223,11 +223,9 @@ def validate_receipt(value: Any) -> dict[str, Any]:
                 or set(disclosed) != set(expected)
             ):
                 _fail("Python receipt has unexpected optional-case transitions")
-            if any(
-                disclosed[digest] == "passed" and name in mandatory_inventory
-                or disclosed[digest] == "skipped" and name not in optional_always_skippable
-                for digest, name in expected.items()
-            ):
+            if any(disclosed[digest] == "passed" and name in mandatory_inventory for digest, name in expected.items()):
+                _fail("Python receipt optional-case status is inconsistent")
+            if any(disclosed[digest] == "skipped" and name not in optional_always_skippable for digest, name in expected.items()):
                 _fail("Python receipt optional-case status is inconsistent")
 
             if skipped != 0:
