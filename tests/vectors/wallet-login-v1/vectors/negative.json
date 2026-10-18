@@ -1,0 +1,55 @@
+{
+  "protocol": "decent-wallet-login-v1",
+  "vectors": [
+    {
+      "id": "wrong-profile",
+      "mutation": "replace profile with decent-wallet-login-v0",
+      "expected": "reject-profile"
+    },
+    {
+      "id": "challenge-tampered",
+      "mutation": "replace one challenge base64url character without resigning",
+      "expected": "reject-challenge-mismatch"
+    },
+    {
+      "id": "identifier-case-changed",
+      "mutation": "change identity_id from mailto:alice@example.org to mailto:Alice@example.org without resigning",
+      "expected": "reject-signature"
+    },
+    {
+      "id": "identifier-unicode-normalized",
+      "mutation": "replace identity_id with a canonically equivalent but code-point-distinct Unicode string without resigning",
+      "expected": "reject-signature"
+    },
+    {
+      "id": "signature-tampered",
+      "mutation": "flip one decoded signature bit",
+      "expected": "reject-signature"
+    },
+    {
+      "id": "signature-wrong-length",
+      "mutation": "decode signature and remove one byte before base64url encoding",
+      "expected": "reject-encoding"
+    },
+    {
+      "id": "signature-padding",
+      "mutation": "add base64url padding to signature",
+      "expected": "reject-encoding"
+    },
+    {
+      "id": "proof-extra-member",
+      "mutation": "add an unknown top-level member",
+      "expected": "reject-schema"
+    },
+    {
+      "id": "proof-missing-member",
+      "mutation": "remove identity_id",
+      "expected": "reject-schema"
+    },
+    {
+      "id": "proof-duplicate-member",
+      "mutation": "repeat the identity_id JSON member in the input bytes",
+      "expected": "reject-duplicate-member"
+    }
+  ]
+}
