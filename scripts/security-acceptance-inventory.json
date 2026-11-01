@@ -494,7 +494,19 @@
     "org.decentwallet.wallet.android.PortableLatchTest::largePositiveIntegerRealEncryptedPublicReadersAndWriter",
     "org.decentwallet.wallet.android.PortableLatchTest::legacySixFieldsStayUnboundAcrossExactImport",
     "org.decentwallet.wallet.android.PortableLatchTest::publicImportRejectsMalformedLatchBeforeCreatingDestination",
-    "org.decentwallet.wallet.android.PortableLatchTest::pythonCiphertextPublicImportExactTransferAndReadonlyPromotion"
+    "org.decentwallet.wallet.android.PortableLatchTest::pythonCiphertextPublicImportExactTransferAndReadonlyPromotion",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::approvedLoginRequestMatchesSharedJcsAndEd25519Vector",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::bundledVectorManifestAndEveryNegativeProofMutationAreEnforced",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::challengeCanProduceOnlyOneConsentBoundProofPerUnlockedSession",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::expiredLoginConsentDoesNotCreateProof",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::expiryMustBeBoundedToWalletLoginTransactionWindow",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::loginProofEncodingRejectsPaddingUnknownFieldsAndDuplicateMembers",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::proofParserRejectsMalformedUtf8BytesInIdentity",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::publicRequestConstructionRejectsNonCanonicalChallengeSignatureAndIdentity",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::rejectedConsentAndLockedWalletNeverReturnProof",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::serializationRejectsProofsExceedingTransportLimit",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::signingBytesPreserveValidNonBmpIdentityUtf8Exactly",
+    "org.decentwallet.wallet.android.WalletLoginProofTest::walletCanLockWhileLoginConsentIsWaiting"
   ],
   "local-registry-integration": {
     "tests/test_android_registry_peer.py": [

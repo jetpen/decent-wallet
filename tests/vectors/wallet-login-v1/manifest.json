@@ -1,0 +1,31 @@
+{
+  "protocol": "decent-wallet-login-v1",
+  "vector_set": "decent-wallet-login-v1-proof-core-1",
+  "canonicalization": "RFC 8785 JCS UTF-8",
+  "signed_members": [
+    "profile",
+    "challenge",
+    "identity_id"
+  ],
+  "signature": {
+    "algorithm": "Ed25519",
+    "length_bytes": 64,
+    "encoding": "base64url-no-pad"
+  },
+  "challenge": {
+    "input_bytes": 32,
+    "digest": "SHA-256",
+    "encoding": "base64url-no-pad"
+  },
+  "positive_vectors": [
+    "vectors/valid-basic.json"
+  ],
+  "negative_vectors": [
+    "vectors/negative.json"
+  ],
+  "sha256": {
+    "vectors/valid-basic.json": "c870f59b86bc2350f28403209c1984bc58215786ebf1c0d1647be2a80a15c065",
+    "vectors/negative.json": "06046c7cc27f50b05056209f2d8d61c00e240e338d7151cbcb93c2dfbdd81ce9"
+  },
+  "test_key_policy": "The deterministic private seed embedded in the positive fixture is intentionally public and MUST NOT be used as a real wallet credential or shipped in production runtime artifacts."
+}

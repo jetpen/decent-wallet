@@ -1,7 +1,10 @@
 package org.decentwallet.wallet.android
 
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.security.SecureRandom
+import java.util.Base64
 
 object AndroidWallet {
     fun createWithGeneratedKey(
@@ -150,6 +153,11 @@ class WalletSession internal constructor(
     private var dataEncryptionKey: ByteArray? = dek
     private var walletPayload: MutableMap<String, Any?>? = payload
     private var activeOwnerKeyRotationPermit: OwnerKeyRotationDispatchPermit? = null
+    private val activeWalletLoginChallenges = mutableSetOf<String>()
+
+    private companion object {
+        const val MAX_LOGIN_CHALLENGE_LIFETIME_SECONDS = 300L
+    }
 
     val isUnlocked: Boolean
         @Synchronized get() = dataEncryptionKey != null
@@ -183,6 +191,95 @@ class WalletSession internal constructor(
 
     @Synchronized
     fun prepareSigningKeyRotation(): ByteArray = prepareSigningKeyRotation(SecureRandom())
+
+    fun createWalletLoginProofRequest(
+        challenge: String,
+        identityId: String,
+        expiresAtEpochSeconds: Long,
+        consent: (String, String) -> Boolean,
+    ): WalletLoginProofRequest {
+        val challengeKey = reserveLoginProofChallenge(challenge, identityId, expiresAtEpochSeconds)
+        try {
+            val profile = "decent-wallet-login-v1"
+            if (!isApprovedLoginConsent(consent, profile, identityId)) {
+                throw WalletLoginProofRejectedException()
+            }
+            synchronized(this) {
+                ensureUnlocked()
+                if (walletPayload?.containsKey("rotation_dispatch_intent") == true || activeOwnerKeyRotationPermit != null) {
+                    throw WalletRotationInProgressException()
+                }
+                if (System.currentTimeMillis() / 1000 >= expiresAtEpochSeconds) {
+                    throw WalletLoginProofRejectedException()
+                }
+                return signLoginProof(profile, challenge, identityId)
+            }
+        } catch (failure: Exception) {
+            synchronized(this) { activeWalletLoginChallenges.remove(challengeKey) }
+            throw failure
+        }
+    }
+
+    private fun reserveLoginProofChallenge(
+        challenge: String,
+        identityId: String,
+        expiresAtEpochSeconds: Long,
+    ): String {
+        val now = System.currentTimeMillis() / 1000
+        if (expiresAtEpochSeconds <= now || expiresAtEpochSeconds - now > MAX_LOGIN_CHALLENGE_LIFETIME_SECONDS) {
+            throw WalletLoginProofRejectedException()
+        }
+        val challengeBytes = StrictWalletLoginJson.parseBase64Url(challenge, 32)
+        val identityBytes = try {
+            encodeExactIdentityId(identityId)
+        } catch (_: Exception) {
+            challengeBytes.fill(0)
+            throw WalletLoginProofRejectedException()
+        }
+        val challengeKey = Base64.getUrlEncoder().withoutPadding().encodeToString(challengeBytes)
+        challengeBytes.fill(0)
+        identityBytes.fill(0)
+        synchronized(this) {
+            ensureUnlocked()
+            if (walletPayload?.containsKey("rotation_dispatch_intent") == true || activeOwnerKeyRotationPermit != null) {
+                throw WalletRotationInProgressException()
+            }
+            if (!activeWalletLoginChallenges.add(challengeKey)) throw WalletLoginProofRejectedException()
+        }
+        return challengeKey
+    }
+
+    private fun encodeExactIdentityId(identityId: String): ByteArray =
+        StandardCharsets.UTF_8.newEncoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .encode(java.nio.CharBuffer.wrap(identityId))
+            .let { encoded -> ByteArray(encoded.remaining()).also(encoded::get) }
+
+    private fun isApprovedLoginConsent(
+        consent: (String, String) -> Boolean,
+        profile: String,
+        identityId: String,
+    ): Boolean = try {
+        consent(profile, identityId)
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun signLoginProof(profile: String, challenge: String, identityId: String): WalletLoginProofRequest {
+        val active = requireActiveKeyPair(checkNotNull(walletPayload))
+        val signingBytes = StrictWalletLoginJson.signingBytes(profile, challenge, identityId)
+        var signature: ByteArray? = null
+        try {
+            signature = AndroidIdentityCrypto.sign(active.seed, signingBytes)
+            if (signature.size != AndroidIdentityCrypto.SIGNATURE_BYTES) throw WalletSigningException()
+            val encodedSignature = Base64.getUrlEncoder().withoutPadding().encodeToString(signature)
+            return WalletLoginProofRequest(profile, challenge, identityId, encodedSignature)
+        } finally {
+            signingBytes.fill(0)
+            signature?.fill(0)
+        }
+    }
 
     @Synchronized
     internal fun prepareSigningKeyRotation(random: SecureRandom): ByteArray {
@@ -574,9 +671,11 @@ class WalletSession internal constructor(
         return current
     }
 
+
     @Synchronized
     fun lock() {
         activeOwnerKeyRotationPermit = null
+        activeWalletLoginChallenges.clear()
         dataEncryptionKey?.fill(0)
         dataEncryptionKey = null
         walletPayload?.let(WalletJson::clearByteArrays)

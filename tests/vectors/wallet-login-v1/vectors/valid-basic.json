@@ -1,0 +1,21 @@
+{
+  "protocol": "decent-wallet-login-v1",
+  "vector_id": "valid-basic",
+  "challenge_preimage": "The decoded bytes of nonce_hex are the fixed test-only 32-byte challenge nonce; challenge is base64url-no-pad(SHA-256(nonce)).",
+  "description": "Public deterministic test material only. The Ed25519 private seed in this fixture is intentionally public and MUST NEVER be used as a real wallet credential.",
+  "profile": "decent-wallet-login-v1",
+  "identity_id": "mailto:alice@example.org",
+  "challenge": "ctu3M2x2eAAj-D2kw1Xy7uqFczsT00d2l5F3kMEikIQ",
+  "nonce_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "public_key_b64url": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "test_private_seed_b64url": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "signed_bytes_utf8": "{\"challenge\":\"ctu3M2x2eAAj-D2kw1Xy7uqFczsT00d2l5F3kMEikIQ\",\"identity_id\":\"mailto:alice@example.org\",\"profile\":\"decent-wallet-login-v1\"}",
+  "signature_b64url": "58H-hSanLm-pv_99yMMEQdjV0Oy5KjQ33PPFYrnbM72587nHD8eHBM9vjjIXUqyQbWFz63FhtjyiDMBea5x3Aw",
+  "proof": {
+    "profile": "decent-wallet-login-v1",
+    "challenge": "ctu3M2x2eAAj-D2kw1Xy7uqFczsT00d2l5F3kMEikIQ",
+    "identity_id": "mailto:alice@example.org",
+    "signature": "58H-hSanLm-pv_99yMMEQdjV0Oy5KjQ33PPFYrnbM72587nHD8eHBM9vjjIXUqyQbWFz63FhtjyiDMBea5x3Aw"
+  },
+  "expected": "accept"
+}
