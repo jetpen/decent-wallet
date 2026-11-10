@@ -4,9 +4,11 @@ import java.math.BigInteger
 import java.nio.file.Files
 import java.util.Base64
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -455,6 +457,64 @@ class AndroidIdentityAdapterTest {
             assertArrayEquals(fixture.successorPublicKey, fixture.wallet.ownerPublicKey)
             assertNull(fixture.wallet.pendingOwnerPublicKey)
         } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun ownerKeyPromotionInvalidatesApprovalBoundToPredecessorKey() {
+        val fixture = createFixture()
+        var vectorBytes: ByteArray? = null
+        var rawContext: ByteArray? = null
+        try {
+            vectorBytes = resource("/wallet-account-disclosure-v1/vectors/valid-signup.json")
+            val root = WalletJson.parse(checkNotNull(vectorBytes), 64 * 1024) as Map<*, *>
+            val context = LinkedHashMap(root["keycloak_context"] as Map<*, *>)
+            val now = System.currentTimeMillis() / 1000
+            context["expires_at"] = BigInteger.valueOf(now + 299)
+            rawContext = WalletJson.canonicalBytes(context)
+            fixture.wallet.setMasterAccountEntity(mapOf("given_name" to "Ada", "email" to "ada@example.test"))
+            val handle = root["transaction_handle"] as String
+            val review = fixture.wallet.reviewAccountDisclosureAt(
+                checkNotNull(rawContext), handle, "https://login.example.test/realms/site", "test:rotation-owner", now,
+            )
+            val pending = fixture.wallet.approveAccountDisclosureAt(
+                review,
+                review.claims.filter { it.required }.map { it.id }.toSet(),
+                now,
+                currentTimeEpochSeconds = { now },
+            ) { true }
+            val publication = prepare(fixture, "approval-invalidated-by-promotion")
+            val permit = fixture.wallet.latchOwnerKeyRotationDispatchIntent(publication)
+            assertThrows(WalletRotationInProgressException::class.java) {
+                fixture.wallet.createAccountLoginProofAt(
+                    pending, "ctu3M2x2eAAj-D2kw1Xy7uqFczsT00d2l5F3kMEikIQ", now,
+                )
+            }
+            fixture.transport.setCurrentEnvelope(fixture.expectedEnvelope)
+            fixture.transport.setRemoteEnvelope(fixture.expectedEnvelope)
+            val result = fixture.adapter.dispatchOwnerKeyRotation(publication, permit)
+            assertEquals(OwnerKeyRotationDispatchStatus.CONFIRMED, result.status)
+            fixture.wallet.finalizeSigningKeyRotation(checkNotNull(result.confirmation))
+            assertThrows(WalletDisclosureRequestException::class.java) {
+                fixture.wallet.approveAccountDisclosureAt(
+                    review,
+                    review.claims.filter { it.required }.map { it.id }.toSet(),
+                    now,
+                    currentTimeEpochSeconds = { now },
+                ) { true }
+            }
+
+            assertNull(fixture.wallet.recoverPendingAccountApprovalAt(pending.approvedAtEpochSeconds + 1))
+            val payload = fixture.wallet.readPayload()
+            try {
+                assertFalse(payload.containsKey("pending_account_disclosure_approval"))
+            } finally {
+                WalletJson.clearByteArrays(payload)
+            }
+        } finally {
+            vectorBytes?.fill(0)
+            rawContext?.fill(0)
             fixture.close()
         }
     }

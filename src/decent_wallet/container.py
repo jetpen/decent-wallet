@@ -14,10 +14,13 @@ import hashlib
 import json
 import os
 import secrets
+import stat
+import sys
 import tempfile
 import time
 import weakref
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Lock, RLock
 from pathlib import Path
@@ -57,6 +60,15 @@ _PENDING_WALLET_SECRETS: dict[object, bytearray] = {}
 _PENDING_PRIVATE_SEED = "pending_private_seed"
 _PENDING_PUBLIC_KEY = "pending_public_key"
 _ROTATION_DISPATCH_INTENT = "rotation_dispatch_intent"
+_MASTER_ACCOUNT_ENTITY = "master_account_entity"
+_PENDING_ACCOUNT_DISCLOSURE = "pending_account_disclosure_v1"
+_DISCLOSURE_CLAIM_KEYS = {
+    "urn:decent:account:v1:given_name": "given_name",
+    "urn:decent:account:v1:family_name": "family_name",
+    "urn:decent:account:v1:email": "email",
+    "urn:decent:account:v1:phone": "phone",
+    "urn:decent:account:v1:locale": "locale",
+}
 _SIGNING_FIELDS = {
     "private_seed",
     "public_key",
@@ -322,6 +334,61 @@ def _encode_value(value: Any) -> dict[str, Any]:
         items.sort(key=lambda pair: pair[0])
         return {"t": "map", "v": items}
     raise InvalidContainer()
+
+
+def _copy_master_account_entity(value: Any) -> dict[str, Any]:
+    """Copy schema-open JSON values into the existing encrypted wallet payload."""
+    active: set[int] = set()
+
+    def copy_json(item: Any, depth: int) -> Any:
+        if depth > 64:
+            raise InvalidContainer()
+        if item is None or type(item) in (bool, int):
+            return item
+        if type(item) is str:
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError:
+                raise InvalidContainer() from None
+            return item
+        if isinstance(item, list):
+            marker = id(item)
+            if marker in active:
+                raise InvalidContainer()
+            active.add(marker)
+            try:
+                return [copy_json(child, depth + 1) for child in item]
+            finally:
+                active.remove(marker)
+        if isinstance(item, Mapping):
+            marker = id(item)
+            if marker in active:
+                raise InvalidContainer()
+            active.add(marker)
+            try:
+                result: dict[str, Any] = {}
+                for key, child in item.items():
+                    if type(key) is not str:
+                        raise InvalidContainer()
+                    try:
+                        key.encode("utf-8")
+                    except UnicodeEncodeError:
+                        raise InvalidContainer() from None
+                    result[key] = copy_json(child, depth + 1)
+                return result
+            finally:
+                active.remove(marker)
+        raise InvalidContainer()
+
+    if not isinstance(value, Mapping):
+        raise InvalidContainer()
+    try:
+        copied = copy_json(value, 0)
+    except RecursionError:
+        raise InvalidContainer() from None
+    if type(copied) is not dict:
+        raise InvalidContainer()
+    return copied
 
 
 def _decode_value(value: Any) -> Any:
@@ -604,6 +671,21 @@ def _atomic_write(path: Path, data: bytes, *, replace: bool = True) -> None:
         raise StorageFailure() from None
 
 
+def _write_verified(path: Path, data: bytes, *, replace: bool = True) -> None:
+    """An acknowledgement alone cannot release a durable-state artifact."""
+    # Preserve the established two-argument call shape for writer adapters and
+    # fault-injection seams; only creation needs the explicit no-replace mode.
+    if replace:
+        _atomic_write(path, data)
+    else:
+        _atomic_write(path, data, replace=False)
+    try:
+        if _read(path) != data:
+            raise StorageOutcomeUnknown()
+    except Exception:
+        raise StorageOutcomeUnknown() from None
+
+
 def _serialize(envelope: dict[str, Any]) -> bytes:
     return _canonical_json(envelope)
 
@@ -743,8 +825,507 @@ def _build_v2_envelope(
     }
 
 
+def _is_active_disclosure_record(record: Any, now: int) -> bool:
+    return (type(record) is dict and type(record.get("expires_at")) is int
+            and _disclosure_expiry(record) > now)
+
+
+def _disclosure_expiry(record: dict[str, Any]) -> int:
+    submission = record.get("submission")
+    if type(submission) is dict:
+        return min(record["expires_at"], submission["expires_at"])
+    return record["expires_at"]
+
+
+def _validate_disclosure_record(record: Any) -> None:
+    fields = {"version", "state", "handle",              "handle_digest", "context", "identity_id", "owner_public_key",
+              "approved_claim_ids", "approved_values", "created_at", "expires_at",
+              "proof_issued", "proof_challenge", "submission"}
+    if type(record) is not dict or set(record) != fields or record.get("version") != 1:
+        raise InvalidContainer()
+    if record.get("state") not in {"approved", "prepared", "ambiguous"}:
+        raise InvalidContainer()
+    if type(record.get("handle")) is not str or type(record.get("handle_digest")) is not str:
+        raise InvalidContainer()
+    try:
+        _decode_disclosure_handle(record["handle"])
+    except Exception:
+        raise InvalidContainer() from None
+    context = record.get("context")
+    context_fields = {"keycloak_issuer", "rp_client_id", "rp_display_name", "rp_origin", "action", "request_id",
+                      "transaction_id", "oidc_nonce", "purpose", "claims", "expires_at"}
+    if type(context) is not dict or set(context) != context_fields:
+        raise InvalidContainer()
+    if type(record.get("approved_claim_ids")) is not list or type(record.get("approved_values")) is not dict:
+        raise InvalidContainer()
+    if set(record["approved_values"]) != set(record["approved_claim_ids"]):
+        raise InvalidContainer()
+    if type(record.get("owner_public_key")) is not bytes or len(record["owner_public_key"]) != 32:
+        raise InvalidContainer()
+    if type(record.get("proof_issued")) is not bool or type(record.get("created_at")) is not int or type(record.get("expires_at")) is not int:
+        raise InvalidContainer()
+    submission = record.get("submission")
+    if submission is not None and (type(submission) is not dict or set(submission) != {"response_uri", "state", "presentation_jws", "body", "expires_at"}
+                                   or type(submission.get("expires_at")) is not int
+                                   or not record["created_at"] < submission["expires_at"] <= record["expires_at"]):
+        raise InvalidContainer()
+
+
+def _strict_disclosure_json(raw: bytes) -> Any:
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+    if type(raw) is not bytes or not raw or len(raw) > 16 * 1024:
+        raise ValueError
+    return json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=pairs,
+                      parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+
+
+def _is_json_media_type(value: Any) -> bool:
+    """Accept only application/json with syntactically valid MIME parameters."""
+    import re
+
+    if type(value) is not str or not value.isascii():
+        return False
+    token = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+    quoted = r'"(?:[\t !#-\[\]-~]|\\[\t -~])*"'
+    pattern = rf"[ \t]*application/json[ \t]*(?:;[ \t]*{token}[ \t]*=[ \t]*(?:{token}|{quoted})[ \t]*)*"
+    return re.fullmatch(pattern, value, flags=re.IGNORECASE) is not None
+
+
+def _sign_account_jws(header: dict[str, Any], payload: dict[str, Any], seed: bytes, jcs: Callable[[Any], bytes]) -> str:
+    private = __import__("cryptography.hazmat.primitives.asymmetric.ed25519", fromlist=["Ed25519PrivateKey"]).Ed25519PrivateKey.from_private_bytes(seed)
+    protected = _b64url_encode(jcs(header))
+    body = _b64url_encode(jcs(payload))
+    signing_input = (protected + "." + body).encode("ascii")
+    return protected + "." + body + "." + _b64url_encode(private.sign(signing_input))
+
+
 def _read_envelope(path: Path) -> dict[str, Any]:
     return _parse_container(_read(path))
+
+
+def _container_path(path: str | os.PathLike[str]) -> Path:
+    # Resolve directory aliases, never a wallet symlink (which atomic replace
+    # would otherwise split into two independently locked container names).
+    target = Path(path)
+    return target.parent.resolve() / target.name
+
+
+def _windows_owned_by_current_user(path: Path | int) -> bool:
+    """Compare a Windows path/descriptor owner SID with the process user."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.GetSecurityInfo.restype = wintypes.DWORD
+    advapi32.GetSecurityInfo.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.EqualSid.restype = wintypes.BOOL
+    advapi32.EqualSid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcessToken.restype = wintypes.BOOL
+    kernel32.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+    kernel32.GetTokenInformation.restype = wintypes.BOOL
+    kernel32.GetTokenInformation.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    owner = ctypes.c_void_p()
+    security_descriptor = ctypes.c_void_p()
+    token = wintypes.HANDLE()
+    token_user_size = wintypes.DWORD()
+    try:
+        if isinstance(path, int):
+            result = advapi32.GetSecurityInfo(
+                wintypes.HANDLE(path), 1, 1, ctypes.byref(owner), None, None, None,
+                ctypes.byref(security_descriptor),
+            )
+        else:
+            result = advapi32.GetNamedSecurityInfoW(
+                str(path), 1, 1, ctypes.byref(owner), None, None, None,
+                ctypes.byref(security_descriptor),
+            )
+        if result != 0:
+            return False
+        if not kernel32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+            return False
+        kernel32.GetTokenInformation(token, 1, None, 0, ctypes.byref(token_user_size))
+        if token_user_size.value == 0:
+            return False
+        token_user = ctypes.create_string_buffer(token_user_size.value)
+        if not kernel32.GetTokenInformation(
+            token, 1, token_user, token_user_size, ctypes.byref(token_user_size)
+        ):
+            return False
+        user_sid = ctypes.cast(token_user, ctypes.POINTER(ctypes.c_void_p))[0]
+        return bool(advapi32.EqualSid(owner, user_sid))
+    except (AttributeError, OSError):
+        return False
+    finally:
+        if token:
+            kernel32.CloseHandle(token)
+        if security_descriptor:
+            kernel32.LocalFree(security_descriptor)
+
+
+def _windows_acl_entries_are_safe(
+    aces: Any,
+    trusted_sids: set[str],
+    *,
+    dacl_present: bool = True,
+    query_succeeded: bool = True,
+) -> bool:
+    """Pure fail-closed decision for normalized Windows DACL entries."""
+    if not query_succeeded or not dacl_present or not trusted_sids:
+        return False
+    try:
+        for ace_type, sid in aces:
+            if ace_type not in ("allow", "deny") or not isinstance(sid, str):
+                return False
+            if sid not in trusted_sids:
+                return False
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _windows_acl_is_safe(path: Path | int) -> bool:
+    """Conservatively reject ACLs that could let an untrusted SID replace a lock."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _AclSizeInformation(ctypes.Structure):
+        _fields_ = [("AceCount", wintypes.DWORD), ("AclBytesInUse", wintypes.DWORD),
+                    ("AclBytesFree", wintypes.DWORD)]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.GetSecurityInfo.restype = wintypes.DWORD
+    advapi32.GetSecurityInfo.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAclInformation.argtypes = (
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD
+    )
+    advapi32.GetAce.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = (ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR))
+    advapi32.CreateWellKnownSid.restype = wintypes.BOOL
+    advapi32.CreateWellKnownSid.argtypes = (
+        wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)
+    )
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcessToken.restype = wintypes.BOOL
+    kernel32.OpenProcessToken.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
+    )
+    kernel32.GetTokenInformation.restype = wintypes.BOOL
+    kernel32.GetTokenInformation.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    descriptor = ctypes.c_void_p()
+    owner = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    token = wintypes.HANDLE()
+    try:
+        if isinstance(path, int):
+            result = advapi32.GetSecurityInfo(wintypes.HANDLE(path), 1, 5,
+                ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
+        else:
+            result = advapi32.GetNamedSecurityInfoW(str(path), 1, 5,
+                ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
+        if result != 0 or not dacl.value:
+            return False
+        size = _AclSizeInformation()
+        if not advapi32.GetAclInformation(dacl, ctypes.byref(size), ctypes.sizeof(size), 2):
+            return False
+        if not kernel32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+            return False
+        needed = wintypes.DWORD()
+        kernel32.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            return False
+        token_user = ctypes.create_string_buffer(needed.value)
+        if not kernel32.GetTokenInformation(token, 1, token_user, needed, ctypes.byref(needed)):
+            return False
+        user_sid = ctypes.cast(token_user, ctypes.POINTER(ctypes.c_void_p))[0]
+        if not owner.value:
+            return False
+        trusted_sids = set()
+
+        def sid_string(sid):
+            value = wintypes.LPWSTR()
+            if not advapi32.ConvertSidToStringSidW(sid, ctypes.byref(value)):
+                raise OSError("SID conversion failed")
+            try:
+                return value.value
+            finally:
+                kernel32.LocalFree(ctypes.cast(value, ctypes.c_void_p))
+
+        trusted_sids.add(sid_string(owner))
+        trusted_sids.add(sid_string(user_sid))
+        well_known_sid_buffers = []
+        for kind in (22, 26):
+            sid_buffer = ctypes.create_string_buffer(68)
+            sid_size = wintypes.DWORD(len(sid_buffer))
+            if not advapi32.CreateWellKnownSid(
+                kind, None, sid_buffer, ctypes.byref(sid_size)
+            ):
+                return False
+            well_known_sid_buffers.append(sid_buffer)
+            trusted_sids.add(sid_string(ctypes.addressof(sid_buffer)))
+        normalized_aces = []
+        for index in range(size.AceCount):
+            ace = ctypes.c_void_p()
+            if not advapi32.GetAce(dacl, index, ctypes.byref(ace)):
+                return False
+            header = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte * 8)).contents
+            ace_type = header[0]
+            if ace_type not in (0, 1):  # standard allow/deny only
+                normalized_aces.append((f"type-{ace_type}", None))
+                continue
+            sid = ctypes.c_void_p(ctypes.addressof(header) + 8)
+            normalized_aces.append(("allow" if ace_type == 0 else "deny", sid_string(sid)))
+        return _windows_acl_entries_are_safe(normalized_aces, trusted_sids)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+    finally:
+        if token:
+            kernel32.CloseHandle(token)
+        if descriptor:
+            kernel32.LocalFree(descriptor)
+
+
+@contextmanager
+def _windows_container_guard(path: Path):
+    """Bounded Windows byte-range lock on a stable, empty per-wallet sidecar."""
+    import errno
+
+    descriptor = None
+    locked = False
+    lock_path = path.with_name("." + path.name + ".lock")
+    try:
+        import msvcrt
+        if not _windows_owned_by_current_user(path.parent) or not _windows_acl_is_safe(path.parent):
+            raise StorageFailure()
+
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOINHERIT", 0)
+        descriptor = os.open(lock_path, flags, 0o600)
+        lock_handle = msvcrt.get_osfhandle(descriptor)
+        if not _windows_owned_by_current_user(lock_handle) or not _windows_acl_is_safe(lock_handle):
+            raise StorageFailure()
+        info = os.fstat(descriptor)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        attributes = getattr(info, "st_file_attributes", 0)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != 0
+                or attributes & reparse):
+            raise StorageFailure()
+        current = os.lstat(lock_path)
+        if ((current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+                or getattr(current, "st_file_attributes", 0) & reparse):
+            raise StorageFailure()
+        deadline = time.monotonic() + 5.0
+        while True:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                locked = True
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise StorageFailure() from None
+                time.sleep(0.01)
+        current = os.lstat(lock_path)
+        if ((current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+                or getattr(current, "st_file_attributes", 0) & reparse):
+            raise StorageFailure()
+        try:
+            target = os.lstat(path)
+        except FileNotFoundError:
+            target = None
+        if target is not None and (
+            not stat.S_ISREG(target.st_mode) or target.st_nlink != 1
+            or getattr(target, "st_file_attributes", 0) & reparse
+        ):
+            raise StorageFailure()
+    except (ImportError, AttributeError, OSError):
+        if locked:
+            try:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        if descriptor is not None:
+            os.close(descriptor)
+        raise StorageFailure() from None
+    except BaseException:
+        if locked:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    try:
+        yield
+    finally:
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            try:
+                os.close(descriptor)
+            finally:
+                raise StorageOutcomeUnknown() from None
+        try:
+            os.close(descriptor)
+        except OSError:
+            raise StorageOutcomeUnknown() from None
+
+
+@contextmanager
+def _posix_container_guard(path: Path):
+    """Bounded POSIX inter-process lock, unchanged across atomic replacement."""
+    descriptor = None
+    try:
+        import fcntl
+        parent = path.parent.stat()
+        if parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) & 0o022:
+            raise StorageFailure()
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+        lock_path = path.with_name("." + path.name + ".lock")
+        descriptor = os.open(lock_path, flags, 0o600)
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                or info.st_size != 0):
+            raise StorageFailure()
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StorageFailure() from None
+                time.sleep(0.01)
+        current = lock_path.lstat()
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise StorageFailure()
+        try:
+            target = path.lstat()
+        except FileNotFoundError:
+            target = None
+        if target is not None and (not stat.S_ISREG(target.st_mode) or target.st_nlink != 1):
+            raise StorageFailure()
+    except (ImportError, AttributeError, OSError):
+        if descriptor is not None:
+            os.close(descriptor)
+        raise StorageFailure() from None
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    try:
+        yield
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            raise StorageOutcomeUnknown() from None
+
+
+@contextmanager
+def _container_guard(path: Path):
+    """Serialize cooperating local processes using a platform-native lock."""
+    if sys.platform == "win32":
+        with _windows_container_guard(path):
+            yield
+    else:
+        with _posix_container_guard(path):
+            yield
+
+
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _decode_disclosure_handle(handle: str) -> bytes:
+    if type(handle) is not str or len(handle) != 43:
+        raise ValueError
+    raw = base64.urlsafe_b64decode(handle + "=")
+    if len(raw) != 32 or _b64url_encode(raw) != handle:
+        raise ValueError
+    return raw
+
+
+def _decode_b64url_exact(value: str, size: int) -> bytes:
+    if type(value) is not str or not value or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for c in value):
+        raise ValueError
+    raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    if len(raw) != size or _b64url_encode(raw) != value:
+        raise ValueError
+    return raw
+
+
+def _disclosure_context_payload(context: Any) -> dict[str, Any]:
+    return {
+        "keycloak_issuer": context.keycloak_issuer, "rp_client_id": context.rp_client_id,
+        "rp_display_name": context.rp_display_name, "rp_origin": context.rp_origin,
+        "action": context.action, "request_id": context.request_id,
+        "transaction_id": context.transaction_id, "oidc_nonce": context.oidc_nonce,
+        "purpose": context.purpose,
+        "claims": [{"id": item.claim_id, "required": item.required} for item in context.claims],
+        "expires_at": context.expires_at,
+    }
+
+
+def _entity_digest(entity: Mapping[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(entity, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _review_fingerprint(review: Any) -> bytes:
+    return hashlib.sha256(_canonical_json(_encode_value({
+        "context": _disclosure_context_payload(review.context),
+        "handle_digest": review.handle_digest, "identity_id": review.identity_id,
+        "owner_public_key": review.owner_public_key, "entity_digest": review.entity_digest,
+        "values": [list(pair) for pair in review.values], "expires_at": review.expires_at,
+    }))).digest()
 
 
 class Wallet:
@@ -768,9 +1349,14 @@ class Wallet:
             self._secret_handle,
         )
         self._payload = dict(payload)
+        if _PENDING_ACCOUNT_DISCLOSURE in self._payload:
+            _validate_disclosure_record(self._payload[_PENDING_ACCOUNT_DISCLOSURE])
         self._install_secret_material()
         self._envelope = envelope
         self._capabilities: set[Any] = set()
+        self._disclosure_epoch = 0
+        self._disclosure_review: Any = None
+        self._disclosure_review_fingerprint: bytes | None = None
         self._inactivity_seconds = inactivity_minutes * 60
         self._last_activity = time.monotonic()
 
@@ -786,11 +1372,18 @@ class Wallet:
     ) -> "Wallet":
         if not isinstance(payload, Mapping) or _SIGNING_FIELDS.intersection(payload):
             raise InvalidContainer()
+        normalized_payload = dict(payload)
+        if _PENDING_ACCOUNT_DISCLOSURE in normalized_payload:
+            raise InvalidContainer()
+        if _MASTER_ACCOUNT_ENTITY in normalized_payload:
+            normalized_payload[_MASTER_ACCOUNT_ENTITY] = _copy_master_account_entity(
+                normalized_payload[_MASTER_ACCOUNT_ENTITY]
+            )
         return cls._create_storage(
             path,
             password,
             confirmation,
-            payload,
+            normalized_payload,
             inactivity_minutes=inactivity_minutes,
         )
 
@@ -808,33 +1401,34 @@ class Wallet:
         _validate_inactivity(inactivity_minutes)
         if not isinstance(payload, Mapping):
             raise InvalidContainer()
-        target = Path(path)
-        created = False
-        dek = bytearray()
-        try:
-            dek = bytearray(secrets.token_bytes(_KEY_LENGTH))
-            salt = secrets.token_bytes(_SALT_LENGTH)
-            kdf = _kdf_header(salt)
-            envelope = _build_v2_envelope(password, bytes(dek), kdf, payload)
-            _atomic_write(target, _serialize(envelope), replace=False)
-            created = True
-            return cls(target, dek, dict(payload), envelope, inactivity_minutes)
-        except WalletError:
-            if created:
-                try:
-                    target.unlink()
-                except OSError:
-                    pass
-            _wipe(dek)
-            raise
-        except Exception:
-            if created:
-                try:
-                    target.unlink()
-                except OSError:
-                    pass
-            _wipe(dek)
-            raise StorageFailure() from None
+        target = _container_path(path)
+        with _container_guard(target):
+            created = False
+            dek = bytearray()
+            try:
+                dek = bytearray(secrets.token_bytes(_KEY_LENGTH))
+                salt = secrets.token_bytes(_SALT_LENGTH)
+                kdf = _kdf_header(salt)
+                envelope = _build_v2_envelope(password, bytes(dek), kdf, payload)
+                _write_verified(target, _serialize(envelope), replace=False)
+                created = True
+                return cls(target, dek, dict(payload), envelope, inactivity_minutes)
+            except WalletError:
+                if created:
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
+                _wipe(dek)
+                raise
+            except Exception:
+                if created:
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
+                _wipe(dek)
+                raise StorageFailure() from None
 
     @classmethod
     def create_with_generated_key(
@@ -870,15 +1464,16 @@ class Wallet:
     ) -> "Wallet":
         _validate_password(password)
         _validate_inactivity(inactivity_minutes)
-        target = Path(path)
-        envelope = _read_envelope(target)
-        try:
-            dek, payload = _unlock_envelope(envelope, password)
-        except UnlockFailed:
-            _record_unlock_failure(target)
-            raise
-        _clear_unlock_failures(target)
-        return cls(target, dek, payload, envelope, inactivity_minutes)
+        target = _container_path(path)
+        with _container_guard(target):
+            envelope = _read_envelope(target)
+            try:
+                dek, payload = _unlock_envelope(envelope, password)
+            except UnlockFailed:
+                _record_unlock_failure(target)
+                raise
+            _clear_unlock_failures(target)
+            return cls(target, dek, payload, envelope, inactivity_minutes)
 
     @classmethod
     def migrate_container(
@@ -891,40 +1486,41 @@ class Wallet:
         """Authenticate and migrate one version-1 container in place to v2."""
         _validate_password(password)
         _validate_inactivity(inactivity_minutes)
-        target = Path(path)
-        envelope = _parse_container(_read(target), expected_version=1)
-        wallet: Wallet | None = None
-        dek: bytearray | None = None
-        try:
+        target = _container_path(path)
+        with _container_guard(target):
+            envelope = _parse_container(_read(target), expected_version=1)
+            wallet: Wallet | None = None
+            dek: bytearray | None = None
             try:
-                dek, payload = _unlock_envelope(envelope, password, version=1)
-            except UnlockFailed:
-                _record_unlock_failure(target)
-                raise
-            _clear_unlock_failures(target)
-            migrated_envelope = _build_v2_envelope(
-                password,
-                bytes(dek),
-                envelope["kdf"],
-                payload,
-            )
-            wallet = cls(
-                target,
-                dek,
-                payload,
-                migrated_envelope,
-                inactivity_minutes,
-            )
-            _atomic_write(target, _serialize(migrated_envelope))
-            return wallet
-        except Exception as error:
-            if wallet is not None:
-                wallet.lock()
-            elif dek is not None:
-                _wipe(dek)
-            if isinstance(error, WalletError):
-                raise
-            raise StorageFailure() from None
+                try:
+                    dek, payload = _unlock_envelope(envelope, password, version=1)
+                except UnlockFailed:
+                    _record_unlock_failure(target)
+                    raise
+                _clear_unlock_failures(target)
+                migrated_envelope = _build_v2_envelope(
+                    password,
+                    bytes(dek),
+                    envelope["kdf"],
+                    payload,
+                )
+                wallet = cls(
+                    target,
+                    dek,
+                    payload,
+                    migrated_envelope,
+                    inactivity_minutes,
+                )
+                _write_verified(target, _serialize(migrated_envelope))
+                return wallet
+            except Exception as error:
+                if wallet is not None:
+                    wallet.lock()
+                elif dek is not None:
+                    _wipe(dek)
+                if isinstance(error, WalletError):
+                    raise
+                raise StorageFailure() from None
 
     @classmethod
     def import_container(
@@ -940,28 +1536,33 @@ class Wallet:
         _validate_inactivity(inactivity_minutes)
         if type(data) is not bytes:
             raise InvalidContainer()
-        target = Path(path)
-        envelope = _parse_container(data)
-        wallet: Wallet | None = None
-        dek: bytearray | None = None
-        try:
+        target = _container_path(path)
+        with _container_guard(target):
+            envelope = _parse_container(data)
+            wallet: Wallet | None = None
+            dek: bytearray | None = None
             try:
-                dek, payload = _unlock_envelope(envelope, password)
-            except UnlockFailed:
-                _record_unlock_failure(target)
-                raise
-            _clear_unlock_failures(target)
-            wallet = cls(target, dek, payload, envelope, inactivity_minutes)
-            _atomic_write(target, data, replace=False)
-            return wallet
-        except Exception as error:
-            if wallet is not None:
-                wallet.lock()
-            elif dek is not None:
-                _wipe(dek)
-            if isinstance(error, WalletError):
-                raise
-            raise StorageFailure() from None
+                try:
+                    dek, payload = _unlock_envelope(envelope, password)
+                except UnlockFailed:
+                    _record_unlock_failure(target)
+                    raise
+                record = payload.get(_PENDING_ACCOUNT_DISCLOSURE)
+                if _is_active_disclosure_record(record, int(time.time())):
+                    _wipe(dek)
+                    raise InvalidContainer()
+                _clear_unlock_failures(target)
+                wallet = cls(target, dek, payload, envelope, inactivity_minutes)
+                _write_verified(target, data, replace=False)
+                return wallet
+            except Exception as error:
+                if wallet is not None:
+                    wallet.lock()
+                elif dek is not None:
+                    _wipe(dek)
+                if isinstance(error, WalletError):
+                    raise
+                raise StorageFailure() from None
 
     def _install_secret_material(self) -> None:
         seed = self._payload.pop("private_seed", None)
@@ -1430,6 +2031,500 @@ class Wallet:
         self._require_unlocked()
         return self._last_activity
 
+    def set_master_account_entity(self, entity: Mapping[str, Any]) -> None:
+        """Atomically replace owner-held entity values inside the v2 payload."""
+        with self._rotation_lock:
+            self._touch()
+            copied_entity = _copy_master_account_entity(entity)
+            updated_payload = dict(self._payload)
+            updated_payload[_MASTER_ACCOUNT_ENTITY] = copied_entity
+            envelope = self._build_envelope(updated_payload)
+            self._persist_envelope(envelope)
+            self._payload = updated_payload
+            self._envelope = envelope
+            self._invalidate_capabilities()
+
+    def get_master_account_entity(self) -> dict[str, Any]:
+        """Return an isolated snapshot of local entity values while unlocked."""
+        with self._rotation_lock:
+            self._touch()
+            return _copy_master_account_entity(
+                self._payload.get(_MASTER_ACCOUNT_ENTITY, {})
+            )
+
+    def review_account_disclosure(self, context: Any, handle: str, identity_id: str) -> Any:
+        """Create an immutable value snapshot for the trusted consent UI."""
+        from .account_disclosure import WalletAccountDisclosureContext, parse_wallet_account_disclosure_context
+        from .account_issuance import AccountDisclosureError, AccountDisclosureReview
+
+        try:
+            if not isinstance(context, WalletAccountDisclosureContext):
+                raise AccountDisclosureError()
+            context = parse_wallet_account_disclosure_context(
+                json.dumps({"profile": "decent-account-disclosure-v1", **_disclosure_context_payload(context)}).encode(),
+                expected_keycloak_issuer=context.keycloak_issuer,
+            )
+            raw_handle = _decode_disclosure_handle(handle)
+            derived = _b64url_encode(hashlib.sha256(handle.encode("ascii")).digest())
+            if context.transaction_id != derived or type(identity_id) is not str or not identity_id:
+                raise AccountDisclosureError()
+            identity_id.encode("utf-8", "strict")
+            with self._rotation_lock:
+                self._touch()
+                self._clear_expired_disclosure(int(time.time()))
+                entity = _copy_master_account_entity(self._payload.get(_MASTER_ACCOUNT_ENTITY, {}))
+                values = []
+                for claim in context.claims:
+                    key = _DISCLOSURE_CLAIM_KEYS.get(claim.claim_id)
+                    if key is None:
+                        raise AccountDisclosureError()
+                    value = entity.get(key)
+                    if value is not None:
+                        if type(value) is not str or not value or len(value.encode("utf-8", "strict")) > 1024:
+                            raise AccountDisclosureError()
+                    if claim.required and value is None:
+                        raise AccountDisclosureError()
+                    values.append((claim.claim_id, value))
+                owner_public_key = self._payload.get("public_key")
+                if type(owner_public_key) is not bytes or len(owner_public_key) != 32:
+                    raise AccountDisclosureError()
+                review = AccountDisclosureReview(
+                    context=context, handle_digest=hashlib.sha256(raw_handle).hexdigest(),
+                    identity_id=identity_id, owner_public_key=owner_public_key,
+                    entity_digest=_entity_digest(entity),
+                    values=tuple(values), expires_at=context.expires_at,
+                )
+                self._disclosure_review = review
+                self._disclosure_review_fingerprint = _review_fingerprint(review)
+                return review
+        except AccountDisclosureError:
+            raise
+        except Exception:
+            raise AccountDisclosureError() from None
+
+    def approve_account_disclosure(self, review: Any, approved_claim_ids: Any, *, consent: Callable[[Any], bool]) -> Any:
+        """Persist one approval after an unlocked, re-entrant consent callback."""
+        from .account_issuance import AccountDisclosureError, AccountDisclosureReview, PendingAccountApproval
+
+        try:
+            if not isinstance(review, AccountDisclosureReview) or not callable(consent):
+                raise AccountDisclosureError()
+            instant = int(time.time())
+            if type(instant) is not int:
+                raise AccountDisclosureError()
+            approved = tuple(approved_claim_ids)
+            requested = tuple(claim_id for claim_id, _ in review.values)
+            required = {claim.claim_id for claim in review.context.claims if claim.required}
+            if (len(set(approved)) != len(approved) or not required <= set(approved)
+                    or not set(approved) <= set(requested) or not approved):
+                raise AccountDisclosureError()
+            snapshot_values = dict(review.values)
+            if any(snapshot_values[cid] is None for cid in approved):
+                raise AccountDisclosureError()
+            with self._rotation_lock:
+                self._touch()
+                self._clear_expired_disclosure(instant)
+                if review is not self._disclosure_review or _review_fingerprint(review) != self._disclosure_review_fingerprint:
+                    raise AccountDisclosureError()
+                if _PENDING_ACCOUNT_DISCLOSURE in self._payload:
+                    raise AccountDisclosureError()
+                epoch = self._disclosure_epoch
+                entity = _copy_master_account_entity(self._payload.get(_MASTER_ACCOUNT_ENTITY, {}))
+                digest = _entity_digest(entity)
+                if digest != review.entity_digest or self._payload.get("public_key") != review.owner_public_key or review.expires_at <= instant:
+                    raise AccountDisclosureError()
+                for claim in review.context.claims:
+                    entity_key = _DISCLOSURE_CLAIM_KEYS.get(claim.claim_id)
+                    if entity_key is None or snapshot_values.get(claim.claim_id) != entity.get(entity_key):
+                        raise AccountDisclosureError()
+            try:
+                consented = consent(review) is True
+            except Exception:
+                raise AccountDisclosureError() from None
+            if not consented:
+                raise AccountDisclosureError()
+            with self._rotation_lock:
+                self._touch()
+                recheck_time = int(time.time())
+                if type(recheck_time) is not int:
+                    raise AccountDisclosureError()
+                self._clear_expired_disclosure(recheck_time)
+                if (epoch != self._disclosure_epoch or review.expires_at <= recheck_time
+                        or review is not self._disclosure_review
+                        or _review_fingerprint(review) != self._disclosure_review_fingerprint):
+                    raise AccountDisclosureError()
+                entity = _copy_master_account_entity(self._payload.get(_MASTER_ACCOUNT_ENTITY, {}))
+                digest = _entity_digest(entity)
+                if digest != review.entity_digest or self._payload.get("public_key") != review.owner_public_key or _PENDING_ACCOUNT_DISCLOSURE in self._payload:
+                    raise AccountDisclosureError()
+                created = recheck_time
+                expiry = min(review.expires_at, created + 300)
+                record = {
+                    "version": 1, "state": "approved", "handle": _b64url_encode(secrets.token_bytes(32)),
+                    "handle_digest": review.handle_digest, "context": _disclosure_context_payload(review.context),
+                    "identity_id": review.identity_id, "owner_public_key": review.owner_public_key,
+                    "approved_claim_ids": list(approved),
+                    "approved_values": {cid: snapshot_values[cid] for cid in approved},
+                    "created_at": created, "expires_at": expiry, "proof_issued": False,
+                    "proof_challenge": None, "submission": None,
+                }
+                updated = dict(self._payload)
+                updated[_PENDING_ACCOUNT_DISCLOSURE] = record
+                envelope = self._build_envelope(updated)
+                commit_time = int(time.time())
+                if type(commit_time) is not int or commit_time < created or commit_time >= expiry:
+                    raise AccountDisclosureError()
+                self._persist_envelope(envelope)
+                self._payload, self._envelope = updated, envelope
+                self._disclosure_review = None
+                self._disclosure_review_fingerprint = None
+                release_time = int(time.time())
+                if type(release_time) is not int or release_time < commit_time or release_time >= expiry:
+                    try:
+                        self._discard_disclosure(PendingAccountApproval(record["handle"], expiry))
+                    except Exception:
+                        self.lock()
+                        raise AccountDisclosureError() from None
+                    raise AccountDisclosureError()
+                return PendingAccountApproval(record["handle"], expiry)
+        except AccountDisclosureError:
+            raise
+        except WalletError:
+            raise
+        except Exception:
+            raise AccountDisclosureError() from None
+
+    def create_account_login_proof(self, pending: Any, *, challenge: str) -> Any:
+        """Issue the unchanged four-member wallet-login proof exactly once."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from .account_issuance import AccountDisclosureError, PendingAccountApproval, WalletLoginProofRequest
+        from .account_presentation import _jcs
+
+        try:
+            if not isinstance(pending, PendingAccountApproval):
+                raise AccountDisclosureError()
+            _decode_b64url_exact(challenge, 32)
+            with self._rotation_lock:
+                self._touch()
+                self._ensure_rotation_dispatch_not_latched()
+                instant = int(time.time())
+                if type(instant) is not int:
+                    raise AccountDisclosureError()
+                self._clear_expired_disclosure(instant)
+                record = self._disclosure_record(pending)
+                if record["expires_at"] <= instant or record["state"] != "approved" or record["proof_issued"]:
+                    raise AccountDisclosureError()
+                seed = _WALLET_SECRETS.get(self._secret_handle)
+                if seed is None or self._payload.get("public_key") != record["owner_public_key"]:
+                    self._discard_disclosure(pending)
+                    raise AccountDisclosureError()
+                proof_body = {"profile": "decent-wallet-login-v1", "challenge": challenge, "identity_id": record["identity_id"]}
+                signature = Ed25519PrivateKey.from_private_bytes(bytes(seed)).sign(_jcs(proof_body))
+                proof = {**proof_body, "signature": _b64url_encode(signature)}
+                updated_record = dict(record)
+                updated_record["proof_issued"] = True
+                updated_record["proof_challenge"] = challenge
+                updated = dict(self._payload)
+                updated[_PENDING_ACCOUNT_DISCLOSURE] = updated_record
+                envelope = self._build_envelope(updated)
+                commit_time = int(time.time())
+                if type(commit_time) is not int or commit_time < instant or commit_time >= record["expires_at"]:
+                    try:
+                        self._discard_disclosure(pending)
+                    except Exception:
+                        self.lock()
+                        raise AccountDisclosureError() from None
+                    raise AccountDisclosureError()
+                self._persist_envelope(envelope)
+                self._payload, self._envelope = updated, envelope
+                release_time = int(time.time())
+                if type(release_time) is not int or release_time < commit_time or release_time >= record["expires_at"]:
+                    try:
+                        self._discard_disclosure(pending)
+                    except Exception:
+                        self.lock()
+                        raise AccountDisclosureError() from None
+                    raise AccountDisclosureError()
+                return WalletLoginProofRequest(proof)
+        except AccountDisclosureError:
+            raise
+        except WalletError:
+            raise
+        except Exception:
+            raise AccountDisclosureError() from None
+
+    def prepare_account_presentation(self, pending: Any, *, binding_jws: str, keycloak_jwks: dict[str, Any], outer_request: dict[str, Any], request_object: str, registration: Any) -> Any:
+        """Re-verify raw OIDC binding and signed RP request, then persist exact dual JWS bytes."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+        from .account_disclosure import WalletAccountDisclosureContext, RequestedAccountClaim, verify_owner_key_binding
+        from .account_issuance import AccountDisclosureError, AccountPresentationSubmission, PendingAccountApproval
+        from .oid4vp_request import TrustedRPRegistration, verify_oid4vp_authorization_request
+        from .account_presentation import _jcs
+
+        invalidate_pending = True
+        try:
+            if not isinstance(pending, PendingAccountApproval) or not isinstance(registration, TrustedRPRegistration):
+                raise AccountDisclosureError()
+            instant = int(time.time())
+            with self._rotation_lock:
+                self._touch()
+                self._ensure_rotation_dispatch_not_latched()
+                record = self._disclosure_record(pending)
+                if record["expires_at"] <= instant:
+                    self._clear_expired_disclosure(instant)
+                    raise AccountDisclosureError()
+                if record["state"] != "approved" or not record["proof_issued"]:
+                    invalidate_pending = False
+                    raise AccountDisclosureError()
+                context_raw = record["context"]
+                context = WalletAccountDisclosureContext(
+                    context_raw["keycloak_issuer"], context_raw["rp_client_id"], context_raw["rp_display_name"],
+                    context_raw["rp_origin"], context_raw["action"], context_raw["request_id"],
+                    context_raw["transaction_id"], context_raw["oidc_nonce"], context_raw["purpose"],
+                    tuple(RequestedAccountClaim(c["id"], c["required"]) for c in context_raw["claims"]),
+                    context_raw["expires_at"],
+                )
+                identity = record["identity_id"]
+                binding = verify_owner_key_binding(binding_jws, keycloak_jwks, context, expected_identity_id=identity, now=instant)
+                seed = _WALLET_SECRETS.get(self._secret_handle)
+                pub = self._payload.get("public_key")
+                if seed is None:
+                    raise AccountDisclosureError()
+                derived_pub = Ed25519PrivateKey.from_private_bytes(bytes(seed)).public_key().public_bytes(
+                    serialization.Encoding.Raw, serialization.PublicFormat.Raw
+                )
+                binding_pub = base64.urlsafe_b64decode(binding.owner_key.x + "=" * (-len(binding.owner_key.x) % 4))
+                if pub != derived_pub or pub != record["owner_public_key"] or binding_pub != derived_pub:
+                    raise AccountDisclosureError()
+                request = verify_oid4vp_authorization_request(
+                    outer_request, request_object=request_object, registration=registration,
+                    context=context, owner_key_binding_jws=binding_jws, verified_binding=binding, now=instant,
+                )
+                claims = dict(record["approved_values"])
+                if set(claims) != set(record["approved_claim_ids"]):
+                    raise AccountDisclosureError()
+                for requested in context.claims:
+                    if requested.required and requested.claim_id not in claims:
+                        raise AccountDisclosureError()
+                issued_at = instant
+                expires_at = min(record["expires_at"], binding.expires_at, request.expires_at, issued_at + 300)
+                if expires_at <= issued_at:
+                    raise AccountDisclosureError()
+                thumb = binding.owner_key_thumbprint
+                credential = {
+                    "profile": "decent-account-disclosure-v1", "credential_type": "decent_account_assertion_v1",
+                    "iss": identity, "sub": identity, "iat": issued_at, "exp": expires_at,
+                    "jti": _b64url_encode(secrets.token_bytes(32)), "action": context.action,
+                    "rp_oidc_client_id": context.rp_client_id, "request_id": context.request_id,
+                    "transaction_id": context.transaction_id, "purpose": context.purpose,
+                    "owner_key_thumbprint": thumb, "owner_binding_jti": binding.jti, "claims": claims,
+                }
+                cred_header = {"alg": "EdDSA", "kid": thumb, "typ": "decent-account-credential+jwt"}
+                credential_jws = _sign_account_jws(cred_header, credential, bytes(seed), _jcs)
+                vp = {
+                    "profile": "decent-account-disclosure-v1", "iss": identity, "sub": identity,
+                    "aud": request.client_id, "nonce": request.nonce, "iat": issued_at,
+                    "exp": expires_at, "jti": _b64url_encode(secrets.token_bytes(32)),
+                    "vp": {"type": ["decent_account_presentation_v1"], "verifiableCredential": [credential_jws]},
+                }
+                vp_header = {"alg": "EdDSA", "kid": thumb, "typ": "decent-account-presentation+jwt"}
+                presentation_jws = _sign_account_jws(vp_header, vp, bytes(seed), _jcs)
+                if len(presentation_jws.encode("utf-8")) > 16 * 1024:
+                    raise AccountDisclosureError()
+                from .account_presentation import verify_account_presentation
+                verify_account_presentation(
+                    presentation_jws, context=context, binding=binding, request=request,
+                    approved_claim_ids=record["approved_claim_ids"], approval_expires_at=record["expires_at"], now=instant,
+                )
+                import urllib.parse
+                vp_token_json = json.dumps({"account": [presentation_jws]}, ensure_ascii=False, separators=(",", ":"))
+                submission_body = urllib.parse.urlencode((
+                    ("state", request.state), ("vp_token", vp_token_json),
+                )).encode("ascii")
+                submission = {"response_uri": request.response_uri, "state": request.state,
+                              "presentation_jws": presentation_jws, "body": submission_body.decode("ascii"),
+                              "expires_at": expires_at}
+                updated_record = dict(record)
+                updated_record["state"] = "prepared"
+                updated_record["submission"] = submission
+                updated = dict(self._payload)
+                updated[_PENDING_ACCOUNT_DISCLOSURE] = updated_record
+                envelope = self._build_envelope(updated)
+                commit_time = int(time.time())
+                if type(commit_time) is not int or commit_time < instant or commit_time >= expires_at:
+                    raise AccountDisclosureError()
+                self._persist_envelope(envelope)
+                self._payload, self._envelope = updated, envelope
+                release_time = int(time.time())
+                if type(release_time) is not int or release_time < commit_time or release_time >= expires_at:
+                    raise AccountDisclosureError()
+                return AccountPresentationSubmission(pending, request.response_uri, request.state, presentation_jws, submission_body)
+        except AccountDisclosureError:
+            with self._rotation_lock:
+                try:
+                    if invalidate_pending and self.is_unlocked and isinstance(pending, PendingAccountApproval):
+                        self._discard_disclosure(pending)
+                except Exception:
+                    self.lock()
+            raise
+        except WalletError:
+            raise
+        except Exception:
+            with self._rotation_lock:
+                try:
+                    if invalidate_pending and self.is_unlocked and isinstance(pending, PendingAccountApproval):
+                        self._discard_disclosure(pending)
+                except Exception:
+                    self.lock()
+            raise AccountDisclosureError() from None
+
+    def recover_account_presentation_retry(self) -> Any:
+        """Explicitly classify an interrupted prepared send as ambiguous.
+
+        Unlock plus this invocation authorizes recovery of *only* the already
+        committed exact submission, even if the host lost its pending handle.
+        It never recovers a login proof or creates a second presentation.
+        """
+        from .account_issuance import AccountDisclosureError, PendingAccountApproval, PresentationDeliveryOutcome
+
+        with self._rotation_lock:
+            self._touch()
+            self._ensure_rotation_dispatch_not_latched()
+            self._clear_expired_disclosure(int(time.time()))
+            record = self._payload.get(_PENDING_ACCOUNT_DISCLOSURE)
+            if type(record) is not dict or record["state"] not in {"prepared", "ambiguous"}:
+                raise AccountDisclosureError()
+            pending = PendingAccountApproval(record["handle"], record["expires_at"])
+            if self.public_key != record["owner_public_key"]:
+                self._discard_disclosure(pending)
+                raise AccountDisclosureError()
+            # Persist/validate the conservative transition before any retry bytes
+            # escape. No file guard is held here: finish/get acquire it in order.
+            self.finish_account_presentation(pending, PresentationDeliveryOutcome.AMBIGUOUS)
+            return self.get_account_presentation_retry(pending)
+
+    def get_account_presentation_retry(self, pending: Any) -> Any:
+        """Return only the immutable exact submission after an ambiguous send."""
+        from .account_issuance import AccountDisclosureError, AccountPresentationSubmission, PendingAccountApproval
+        try:
+            with self._rotation_lock:
+                self._touch()
+                self._ensure_rotation_dispatch_not_latched()
+                self._clear_expired_disclosure(int(time.time()))
+                record = self._disclosure_record(pending)
+                if self.public_key != record["owner_public_key"]:
+                    self._discard_disclosure(pending)
+                    raise AccountDisclosureError()
+                try:
+                    with _container_guard(self._path):
+                        self._assert_disk_current()
+                        record = self._disclosure_record(pending)
+                        if _disclosure_expiry(record) <= int(time.time()) or record["state"] != "ambiguous" or not record["submission"]:
+                            raise AccountDisclosureError()
+                        if self.public_key != record["owner_public_key"]:
+                            raise AccountDisclosureError()
+                        saved = record["submission"]
+                        return AccountPresentationSubmission(pending, saved["response_uri"], saved["state"], saved["presentation_jws"], saved["body"].encode("ascii"))
+                except WalletError:
+                    self.lock()
+                    raise
+        except (AccountDisclosureError, WalletError):
+            raise
+        except Exception:
+            raise AccountDisclosureError() from None
+
+    def finish_account_presentation(self, pending: Any, outcome: Any, *, status_code: int | None = None, content_type: str | None = None, response_body: bytes | None = None) -> None:
+        """Finalize, retain exact bytes only for ambiguous sends, or consume accepted result."""
+        import json
+        from .account_issuance import AccountDisclosureError, PresentationDeliveryOutcome
+        try:
+            outcome = PresentationDeliveryOutcome(outcome)
+            with self._rotation_lock:
+                self._touch()
+                self._clear_expired_disclosure(int(time.time()))
+                record = self._disclosure_record(pending)
+                if record["state"] not in {"prepared", "ambiguous"} or record["expires_at"] <= int(time.time()):
+                    raise AccountDisclosureError()
+                if outcome is PresentationDeliveryOutcome.ACCEPTED:
+                    if type(status_code) is not int or status_code != 200 or not _is_json_media_type(content_type) or type(response_body) is not bytes:
+                        raise AccountDisclosureError()
+                    response = _strict_disclosure_json(response_body)
+                    uri = response.get("redirect_uri") if type(response) is dict else None
+                    if type(uri) is not str or not uri:
+                        raise AccountDisclosureError()
+                    record_context = record["context"]
+                    parsed = __import__("urllib.parse", fromlist=["urlsplit", "parse_qs"]).urlsplit(uri)
+                    parse_qs = __import__("urllib.parse", fromlist=["parse_qs"]).parse_qs
+                    fragment = parse_qs(parsed.fragment, keep_blank_values=True, strict_parsing=True)
+                    origin = f"{parsed.scheme}://{parsed.netloc}"
+                    if (origin != record_context["rp_origin"] or parsed.query or set(fragment) != {"response_code"}
+                            or len(fragment["response_code"]) != 1):
+                        raise AccountDisclosureError()
+                    _decode_b64url_exact(fragment["response_code"][0], 32)
+                updated = dict(self._payload)
+                if outcome is PresentationDeliveryOutcome.AMBIGUOUS:
+                    changed = dict(record)
+                    changed["state"] = "ambiguous"
+                    updated[_PENDING_ACCOUNT_DISCLOSURE] = changed
+                else:
+                    updated.pop(_PENDING_ACCOUNT_DISCLOSURE, None)
+                envelope = self._build_envelope(updated)
+                try:
+                    self._persist_envelope(envelope)
+                except WalletError:
+                    self.lock()
+                    raise
+                self._payload, self._envelope = updated, envelope
+        except (AccountDisclosureError, WalletError):
+            raise
+        except Exception:
+            raise AccountDisclosureError() from None
+
+    def cancel_account_disclosure(self, pending: Any) -> None:
+        from .account_issuance import AccountDisclosureError
+        with self._rotation_lock:
+            self._touch()
+            try:
+                self._disclosure_record(pending)
+            except Exception:
+                raise AccountDisclosureError() from None
+            try:
+                self._discard_disclosure(pending)
+            except Exception:
+                self.lock()
+                raise AccountDisclosureError() from None
+
+    def _discard_disclosure(self, pending: Any) -> None:
+        self._disclosure_record(pending)
+        updated = dict(self._payload)
+        updated.pop(_PENDING_ACCOUNT_DISCLOSURE, None)
+        envelope = self._build_envelope(updated)
+        self._persist_envelope(envelope)
+        self._payload, self._envelope = updated, envelope
+
+    def _disclosure_record(self, pending: Any) -> dict[str, Any]:
+        record = self._payload.get(_PENDING_ACCOUNT_DISCLOSURE)
+        if (type(record) is not dict or record.get("handle") != getattr(pending, "handle", None)
+                or record.get("expires_at") != getattr(pending, "expires_at", None)):
+            raise ValueError
+        return record
+
+    def _clear_expired_disclosure(self, now: int) -> None:
+        record = self._payload.get(_PENDING_ACCOUNT_DISCLOSURE)
+        if type(record) is dict and type(record.get("expires_at")) is int and _disclosure_expiry(record) <= now:
+            try:
+                updated = dict(self._payload)
+                updated.pop(_PENDING_ACCOUNT_DISCLOSURE, None)
+                envelope = self._build_envelope(updated)
+                self._persist_envelope(envelope)
+                self._payload, self._envelope = updated, envelope
+            except Exception:
+                # A failed expiry invalidation must not leave the expired approval
+                # usable if this process's wall clock later moves backward.
+                self.lock()
+                raise
+
     def update_payload(self, payload: Mapping[str, Any]) -> None:
         """Replace wallet-local content and atomically persist it."""
         with self._rotation_lock:
@@ -1437,9 +2532,20 @@ class Wallet:
 
     def _update_payload(self, payload: Mapping[str, Any]) -> None:
         self._touch()
-        if not isinstance(payload, Mapping) or _SIGNING_FIELDS.intersection(payload):
+        if (
+            not isinstance(payload, Mapping)
+            or _SIGNING_FIELDS.intersection(payload)
+            or _MASTER_ACCOUNT_ENTITY in payload
+            or _PENDING_ACCOUNT_DISCLOSURE in payload
+        ):
             raise InvalidContainer()
         updated_payload = dict(payload)
+        if _MASTER_ACCOUNT_ENTITY in self._payload:
+            updated_payload[_MASTER_ACCOUNT_ENTITY] = self._payload[
+                _MASTER_ACCOUNT_ENTITY
+            ]
+        if _PENDING_ACCOUNT_DISCLOSURE in self._payload:
+            updated_payload[_PENDING_ACCOUNT_DISCLOSURE] = self._payload[_PENDING_ACCOUNT_DISCLOSURE]
         if self._secret_handle in _WALLET_SECRETS:
             updated_payload["public_key"] = self._payload["public_key"]
         if self._secret_handle in _PENDING_WALLET_SECRETS:
@@ -1461,6 +2567,10 @@ class Wallet:
 
     def _export_container(self) -> bytes:
         self._touch()
+        self._clear_expired_disclosure(int(time.time()))
+        if _is_active_disclosure_record(self._payload.get(_PENDING_ACCOUNT_DISCLOSURE), int(time.time())):
+            from .account_issuance import AccountDisclosureError
+            raise AccountDisclosureError()
         raw = _read(self._path)
         envelope = _parse_container(raw)
         if envelope != self._envelope:
@@ -1501,11 +2611,29 @@ class Wallet:
         self._envelope = envelope
 
     def _persist_envelope(self, envelope: dict[str, Any]) -> None:
+        known_failure = False
         try:
-            _atomic_write(self._path, _serialize(envelope))
-        except StorageOutcomeUnknown:
-            self.lock()
+            with _container_guard(self._path):
+                self._assert_disk_current()
+                data = _serialize(envelope)
+                try:
+                    _write_verified(self._path, data)
+                except StorageFailure:
+                    known_failure = True
+                    raise
+        except WalletError:
+            if not known_failure:
+                self.lock()
             raise
+
+    def _assert_disk_current(self) -> None:
+        """Call only while holding the stable container guard."""
+        try:
+            if _read_envelope(self._path) != self._envelope:
+                raise StorageFailure()
+        except Exception:
+            self.lock()
+            raise StorageFailure() from None
 
     def _invalidate_capabilities(self) -> None:
         for capability in tuple(self._capabilities):
@@ -1517,6 +2645,9 @@ class Wallet:
             self._lock()
 
     def _lock(self) -> None:
+        self._disclosure_epoch += 1
+        self._disclosure_review = None
+        self._disclosure_review_fingerprint = None
         self._invalidate_capabilities()
         self._secret_finalizer.detach()
         seed = _WALLET_SECRETS.pop(self._secret_handle, None)

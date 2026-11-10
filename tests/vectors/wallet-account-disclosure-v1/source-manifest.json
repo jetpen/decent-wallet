@@ -1,0 +1,15 @@
+{
+  "source_repository": "https://github.com/jetpen/decent-ecosystem",
+  "source_commit": "b861b8c7a088dd21c79e064c8dbb52a0e0e96eb8",
+  "source_path": "docs/protocol/wallet-account-disclosure/v1/",
+  "files": {
+    "PROFILE.md": "1f65b64769f4c1c8ef46e0686286c4a3bf0258db7636ccb06a775e6ef57be7b3",
+    "schemas/profile.schema.json": "8da5af579e1623b528d8ae091115c82fd20464792ea4e9455e2c84bbc803214f",
+    "vectors/negative.json": "2a9c39db831b93f82f9ff6f922786f00917c566248d65bf985a73ca7f102bb02",
+    "vectors/valid-extensions-ignored.json": "e11092775632de67d9717eb1faea6b3cf3ab4d2e8c88db4d18e8cb4f8330d977",
+    "vectors/valid-request-iss-ignored.json": "d5fd2a2d7e9589c34773f2ba2efd0dcf1b0817881f712ae3176b221e97fe4a78",
+    "vectors/valid-signup-optional-omitted.json": "29ef0b88528c1b687647cf9bce8433cc4261f546fd8dc3bfde8c77035abdb9f1",
+    "vectors/valid-signup-recovery.json": "b2ba3a71d184793f8f508210302772b08965ef3bb1ffd7a531dfcb4178eb5c43",
+    "vectors/valid-signup.json": "fcd39b7955eec6d315494a65c03b2759475d1bb107460290aff50a6effb0989a"
+  }
+}
