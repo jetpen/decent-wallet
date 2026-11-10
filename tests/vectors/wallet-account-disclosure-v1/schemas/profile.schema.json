@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://decent.example/protocol/wallet-account-disclosure/v1/profile.schema.json",
+  "title": "Decent Wallet Account Disclosure v1 profile schemas",
+  "$defs": {
+    "requestClaim": {
+      "type": "object",
+      "properties": {
+        "id": {"enum": ["urn:decent:account:v1:given_name", "urn:decent:account:v1:family_name", "urn:decent:account:v1:email", "urn:decent:account:v1:phone", "urn:decent:account:v1:locale"]},
+        "required": {"type": "boolean"}
+      },
+      "required": ["id", "required"],
+      "additionalProperties": false
+    },
+    "claims": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/requestClaim"},
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "allOf": [
+        {"contains": {"properties": {"id": {"const": "urn:decent:account:v1:given_name"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"id": {"const": "urn:decent:account:v1:family_name"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"id": {"const": "urn:decent:account:v1:email"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"id": {"const": "urn:decent:account:v1:phone"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"id": {"const": "urn:decent:account:v1:locale"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"required": {"const": true}}, "required": ["required"]}, "minContains": 1}
+      ]
+    },
+    "accountClaims": {
+      "type": "object",
+      "properties": {
+        "urn:decent:account:v1:given_name": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "urn:decent:account:v1:family_name": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "urn:decent:account:v1:email": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "urn:decent:account:v1:phone": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "urn:decent:account:v1:locale": {"type": "string", "minLength": 1, "maxLength": 1024}
+      },
+      "minProperties": 1,
+      "maxProperties": 16,
+      "additionalProperties": false
+    },
+    "accountRequest": {
+      "type": "object",
+      "properties": {
+        "profile": {"const": "decent-account-disclosure-v1"},
+        "request_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$"},
+        "purpose": {"type": "string", "minLength": 1, "maxLength": 160},
+        "claims": {"$ref": "#/$defs/claims"}
+      },
+      "required": ["profile", "request_id", "purpose", "claims"],
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "profile": {"const": "decent-account-disclosure-v1"},
+        "keycloak_issuer": {"type": "string", "format": "uri"},
+        "rp_client_id": {"type": "string", "minLength": 1},
+        "rp_display_name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "rp_origin": {"type": "string", "format": "uri"},
+        "action": {"enum": ["signup", "signup_recovery"]},
+        "request_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$"},
+        "transaction_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "oidc_nonce": {"type": "string", "minLength": 22, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+        "purpose": {"type": "string", "minLength": 1, "maxLength": 160},
+        "claims": {"$ref": "#/$defs/claims"},
+        "expires_at": {"type": "integer", "minimum": 1}
+      },
+      "required": ["profile", "keycloak_issuer", "rp_client_id", "rp_display_name", "rp_origin", "action", "request_id", "transaction_id", "oidc_nonce", "purpose", "claims", "expires_at"],
+      "additionalProperties": false
+    },
+    "ownerJwk": {
+      "type": "object",
+      "properties": {
+        "kty": {"const": "OKP"},
+        "crv": {"const": "Ed25519"},
+        "x": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}
+      },
+      "required": ["kty", "crv", "x"],
+      "additionalProperties": false
+    },
+    "binding": {
+      "type": "object",
+      "properties": {
+        "v": {"const": 1},
+        "iss": {"type": "string", "format": "uri"},
+        "aud": {"type": "string", "minLength": 1},
+        "sub": {"type": "string", "minLength": 1},
+        "identity_id": {"type": "string", "minLength": 1},
+        "owner_key": {"$ref": "#/$defs/ownerJwk"},
+        "owner_key_thumbprint": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "action": {"enum": ["signup", "signup_recovery"]},
+        "transaction_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "request_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$"},
+        "oidc_nonce": {"type": "string", "minLength": 22, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+        "iat": {"type": "integer", "minimum": 1},
+        "exp": {"type": "integer", "minimum": 1},
+        "jti": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}
+      },
+      "required": ["v", "iss", "aud", "sub", "identity_id", "owner_key", "owner_key_thumbprint", "action", "transaction_id", "request_id", "oidc_nonce", "iat", "exp", "jti"],
+      "additionalProperties": false
+    },
+    "dcqlCredential": {
+      "type": "object",
+      "properties": {
+        "id": {"const": "account"},
+        "format": {"const": "decent_account_jwt_v1"},
+        "multiple": {"const": false},
+        "meta": {"type": "object", "additionalProperties": true},
+        "trusted_authorities": false,
+        "require_cryptographic_holder_binding": {"const": true},
+        "claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "values": false,
+              "intent_to_retain": false,
+              "id": {"enum": ["given_name", "family_name", "email", "phone", "locale"]},
+              "path": {
+                "type": "array",
+                "prefixItems": [{"const": "claims"}, {"enum": ["urn:decent:account:v1:given_name", "urn:decent:account:v1:family_name", "urn:decent:account:v1:email", "urn:decent:account:v1:phone", "urn:decent:account:v1:locale"]}],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": ["id", "path"],
+            "additionalProperties": true
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "claim_sets": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {"enum": ["given_name", "family_name", "email", "phone", "locale"]},
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": true
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        }
+      },
+      "required": ["id", "format", "multiple", "meta", "require_cryptographic_holder_binding", "claims", "claim_sets"],
+      "additionalProperties": true
+    },
+    "accountExtension": {
+      "type": "object",
+      "properties": {
+        "profile": {"const": "decent-account-disclosure-v1"},
+        "rp_oidc_client_id": {"type": "string", "minLength": 1},
+        "action": {"enum": ["signup", "signup_recovery"]},
+        "request_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$"},
+        "transaction_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "purpose": {"type": "string", "minLength": 1, "maxLength": 160},
+        "owner_key_binding": {"type": "string", "minLength": 1},
+        "claims": {"$ref": "#/$defs/claims"}
+      },
+      "required": ["profile", "rp_oidc_client_id", "action", "request_id", "transaction_id", "purpose", "owner_key_binding", "claims"],
+      "additionalProperties": false
+    },
+    "oid4vpRequest": {
+      "type": "object",
+      "properties": {
+        "iss": {"$comment": "Receiver-only allowance: senders MUST omit iss; Wallets MUST ignore it when present (OpenID4VP 1.0 section 5)."},
+        "transaction_data": false,
+        "scope": false,
+        "redirect_uri": false,
+        "request": false,
+        "request_uri": false,
+        "request_uri_method": false,
+        "aud": {"const": "https://self-issued.me/v2"},
+        "client_id": {"type": "string", "pattern": "^x509_san_dns:[a-z0-9.-]+$"},
+        "response_type": {"const": "vp_token"},
+        "response_mode": {"const": "direct_post"},
+        "response_uri": {"type": "string", "format": "uri"},
+        "dcql_query": {"type": "object", "properties": {"credential_sets": false, "credentials": {"type": "array", "items": {"$ref": "#/$defs/dcqlCredential"}, "minItems": 1, "maxItems": 1}}, "required": ["credentials"], "additionalProperties": true},
+        "nonce": {"type": "string", "minLength": 43, "maxLength": 128, "pattern": "^[A-Za-z0-9_.~-]+$"},
+        "state": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$"},
+        "iat": {"type": "integer", "minimum": 1},
+        "exp": {"type": "integer", "minimum": 1},
+        "jti": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "client_metadata": {"type": "object", "properties": {"vp_formats_supported": {"type": "object", "properties": {"decent_account_jwt_v1": {"type": "object", "properties": {"alg_values": {"const": ["EdDSA"]}}, "required": ["alg_values"], "additionalProperties": false}}, "required": ["decent_account_jwt_v1"], "additionalProperties": false}}, "required": ["vp_formats_supported"], "additionalProperties": true},
+        "decent_account": {"$ref": "#/$defs/accountExtension"}
+      },
+      "required": ["aud", "client_id", "response_type", "response_mode", "response_uri", "dcql_query", "nonce", "state", "iat", "exp", "jti", "client_metadata", "decent_account"],
+      "$comment": "Receiver envelope ignores unknown standard-transport parameters; nested custom payloads remain closed.",
+      "additionalProperties": true
+    },
+    "vpTokenResponse": {
+      "type": "object",
+      "properties": {
+        "error": false,
+        "state": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$"},
+        "vp_token": {"type": "object", "properties": {"account": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"}, "minItems": 1, "maxItems": 1}}, "required": ["account"], "additionalProperties": false}
+      },
+      "required": ["state", "vp_token"],
+      "additionalProperties": true
+    },
+    "accountCredential": {
+      "type": "object",
+      "properties": {
+        "profile": {"const": "decent-account-disclosure-v1"},
+        "credential_type": {"const": "decent_account_assertion_v1"},
+        "iss": {"type": "string", "minLength": 1},
+        "sub": {"type": "string", "minLength": 1},
+        "iat": {"type": "integer", "minimum": 1},
+        "exp": {"type": "integer", "minimum": 1},
+        "jti": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "action": {"enum": ["signup", "signup_recovery"]},
+        "rp_oidc_client_id": {"type": "string", "minLength": 1},
+        "request_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$"},
+        "transaction_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "purpose": {"type": "string", "minLength": 1, "maxLength": 160},
+        "owner_key_thumbprint": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "owner_binding_jti": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "claims": {"$ref": "#/$defs/accountClaims"}
+      },
+      "required": ["profile", "credential_type", "iss", "sub", "iat", "exp", "jti", "action", "rp_oidc_client_id", "request_id", "transaction_id", "purpose", "owner_key_thumbprint", "owner_binding_jti", "claims"],
+      "additionalProperties": false
+    },
+    "presentation": {
+      "type": "object",
+      "properties": {
+        "profile": {"const": "decent-account-disclosure-v1"},
+        "iss": {"type": "string", "minLength": 1},
+        "sub": {"type": "string", "minLength": 1},
+        "aud": {"type": "string", "pattern": "^x509_san_dns:[a-z0-9.-]+$"},
+        "nonce": {"type": "string", "minLength": 43, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+        "iat": {"type": "integer", "minimum": 1},
+        "exp": {"type": "integer", "minimum": 1},
+        "jti": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "vp": {
+          "type": "object",
+          "properties": {
+            "type": {"const": ["decent_account_presentation_v1"]},
+            "verifiableCredential": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "maxItems": 1}
+          },
+          "required": ["type", "verifiableCredential"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["profile", "iss", "sub", "aud", "nonce", "iat", "exp", "jti", "vp"],
+      "additionalProperties": false
+    }
+  }
+}

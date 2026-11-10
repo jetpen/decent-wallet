@@ -15,6 +15,28 @@ from .container import (
     StorageFailure,
     StorageOutcomeUnknown,
 )
+from .account_disclosure import (
+    Ed25519OwnerPublicKey,
+    RequestedAccountClaim,
+    VerifiedOwnerKeyBinding,
+    WalletAccountDisclosureContext,
+    WalletDisclosureRequestError,
+    parse_wallet_account_disclosure_context,
+    verify_owner_key_binding,
+)
+from .account_issuance import (
+    AccountDisclosureError,
+    AccountDisclosureReview,
+    PendingAccountApproval,
+    WalletLoginProofRequest,
+    AccountPresentationSubmission,
+    PresentationDeliveryOutcome,
+)
+from .account_presentation import (
+    AccountPresentationError,
+    VerifiedAccountPresentation,
+    verify_account_presentation,
+)
 from .signer import (
     InvalidSigningInput,
     KeyGenerationError,
@@ -65,6 +87,22 @@ __all__ = [
     "UnsupportedFormat",
     "StorageFailure",
     "StorageOutcomeUnknown",
+    "RequestedAccountClaim",
+    "Ed25519OwnerPublicKey",
+    "VerifiedOwnerKeyBinding",
+    "WalletAccountDisclosureContext",
+    "WalletDisclosureRequestError",
+    "parse_wallet_account_disclosure_context",
+    "verify_owner_key_binding",
+    "AccountDisclosureError",
+    "AccountDisclosureReview",
+    "PendingAccountApproval",
+    "WalletLoginProofRequest",
+    "AccountPresentationSubmission",
+    "PresentationDeliveryOutcome",
+    "AccountPresentationError",
+    "VerifiedAccountPresentation",
+    "verify_account_presentation",
     "InvalidSigningInput",
     "KeyGenerationError",
     "SignerCapability",

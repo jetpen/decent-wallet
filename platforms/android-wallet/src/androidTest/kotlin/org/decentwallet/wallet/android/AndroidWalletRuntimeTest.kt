@@ -27,6 +27,145 @@ class AndroidWalletRuntimeTest {
     }
 
     @Test
+    fun presentationVerifierNarrowsBigIntegerAtApi26WithoutLongValueExact() {
+        assertEquals(Long.MIN_VALUE, WalletAccountPresentationVerifier.exactLong(BigInteger.valueOf(Long.MIN_VALUE)))
+        assertEquals(Long.MAX_VALUE, WalletAccountPresentationVerifier.exactLong(BigInteger.valueOf(Long.MAX_VALUE)))
+        assertThrows(WalletDisclosureRequestException::class.java) {
+            WalletAccountPresentationVerifier.exactLong(BigInteger.valueOf(Long.MIN_VALUE).subtract(BigInteger.ONE))
+        }
+        assertThrows(WalletDisclosureRequestException::class.java) {
+            WalletAccountPresentationVerifier.exactLong(BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.ONE))
+        }
+    }
+
+    @Test
+    fun ownerBindingVerifierUsesSupportedAndroidCryptoProviders() {
+        val now = 1_800_000_001L
+        val ownerX = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 3 })
+        val jti = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 7 })
+        val thumbJson = "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"$ownerX\"}"
+        val thumbprint = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+            java.security.MessageDigest.getInstance("SHA-256").digest(thumbJson.toByteArray(Charsets.US_ASCII)),
+        )
+        val context = WalletAccountDisclosureContext(
+            keycloakIssuer = "https://login.example.test/realm",
+            rpClientId = "client",
+            rpDisplayName = "Example",
+            rpOrigin = "https://rp.example.test",
+            action = "signup",
+            requestId = "request-id",
+            transactionId = "transaction-id",
+            oidcNonce = "nonce",
+            purpose = "Runtime crypto provider test",
+            claims = emptyList(),
+            expiresAtEpochSeconds = 1_800_000_300L,
+        )
+        val payload = mapOf(
+            "v" to 1,
+            "iss" to context.keycloakIssuer,
+            "aud" to context.rpClientId,
+            "sub" to "subject",
+            "identity_id" to "mailto:test@example.test",
+            "owner_key" to mapOf("kty" to "OKP", "crv" to "Ed25519", "x" to ownerX),
+            "owner_key_thumbprint" to thumbprint,
+            "action" to context.action,
+            "transaction_id" to context.transactionId,
+            "request_id" to context.requestId,
+            "oidc_nonce" to context.oidcNonce,
+            "iat" to now,
+            "exp" to context.expiresAtEpochSeconds,
+            "jti" to jti,
+        )
+        val rsa = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        val rsaPublic = rsa.public as java.security.interfaces.RSAPublicKey
+        fun unsigned(value: BigInteger): String {
+            val bytes = value.toByteArray().let { if (it.first() == 0.toByte()) it.copyOfRange(1, it.size) else it }
+            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        }
+        val jwks = mapOf(
+            "keys" to listOf(
+                mapOf(
+                    "kid" to "runtime-key",
+                    "kty" to "RSA",
+                    "use" to "sig",
+                    "alg" to "RS256",
+                    "n" to unsigned(rsaPublic.modulus),
+                    "e" to unsigned(rsaPublic.publicExponent),
+                ),
+            ),
+        )
+        val encoder = java.util.Base64.getUrlEncoder().withoutPadding()
+        val header = encoder.encodeToString(
+            WalletJson.canonicalBytes(mapOf("alg" to "RS256", "kid" to "runtime-key", "typ" to "decent-owner-key-binding+jwt")),
+        )
+        val body = encoder.encodeToString(WalletJson.canonicalBytes(payload))
+        val signingInput = "$header.$body"
+        val signer = java.security.Signature.getInstance("SHA256withRSA")
+        signer.initSign(rsa.private)
+        signer.update(signingInput.toByteArray(Charsets.US_ASCII))
+        val compact = "$signingInput.${encoder.encodeToString(signer.sign())}"
+
+        val result = WalletOwnerKeyBindingVerifier.verify(
+            compact,
+            jwks,
+            context,
+            "mailto:test@example.test",
+            now,
+        )
+
+        assertEquals("subject", result.subject)
+        assertEquals(ownerX, result.ownerKey.x)
+        assertEquals(thumbprint, result.ownerKeyThumbprint)
+    }
+
+    @Test
+    fun requestObjectVerifierUsesAndroidX509AndEcdsaProviders() {
+        val vector = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("wallet-account-disclosure-v1/vectors/valid-signup.json").use { it.readBytes() }
+        try {
+            val root = WalletJson.parse(vector, 64 * 1024) as Map<*, *>
+            val now = (root["validation_time"] as BigInteger).toLong()
+            val context = WalletAccountDisclosureContextParser.parse(
+                WalletJson.canonicalBytes(root["keycloak_context"]),
+                root["transaction_handle"] as String,
+                "https://login.example.test/realms/site",
+                now,
+            )
+            val ownerBindingJws = root["owner_key_binding_jws"] as String
+            val binding = WalletOwnerKeyBindingVerifier.verify(
+                ownerBindingJws,
+                root["keycloak_jwks"] as Map<*, *>,
+                context,
+                "mailto:ada@example.test",
+                now,
+            )
+            val certificate = root["rp_certificate"] as Map<*, *>
+            val registration = TrustedWalletRelyingPartyRegistration(
+                root["oid4vp_client_id"] as String,
+                "site.example.test",
+                context.rpOrigin,
+                "https://site.example.test/oid4vp/response",
+                certificate["trust_anchor_sha256"] as String,
+                context.rpClientId,
+            )
+            val verified = WalletOid4vpRequestVerifier.verify(
+                root["oid4vp_authorization_parameters"] as Map<*, *>,
+                root["oid4vp_request_jws"] as String,
+                registration,
+                context,
+                ownerBindingJws,
+                binding,
+                now,
+            )
+            assertEquals("x509_san_dns:site.example.test", verified.clientId)
+            assertEquals("signup", verified.action)
+            assertEquals(1_800_000_300L, verified.expiresAtEpochSeconds)
+        } finally {
+            vector.fill(0)
+        }
+    }
+
+    @Test
     fun productionLifecycleMatchesVectorAndPreservesEncryptedBytes() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val assets = instrumentation.context.assets
@@ -454,13 +593,14 @@ class AndroidWalletRuntimeTest {
         val firstBytes = createRaceWallet(directory.resolve("first-source.dw"), password, "first")
         val secondBytes = createRaceWallet(directory.resolve("second-source.dw"), password, "second")
         val destination = directory.resolve("wallet.dw")
+        val requestedServices = mutableSetOf<String>()
         try {
             Files.write(directory.resolve("input-first.dw"), firstBytes)
             Files.write(directory.resolve("input-second.dw"), secondBytes)
             val firstIntent = importRaceIntent(context, ImportRaceWriterOneService::class.java, directory, destination, "first", password)
             val secondIntent = importRaceIntent(context, ImportRaceWriterTwoService::class.java, directory, destination, "second", password)
-            context.startService(firstIntent)
-            context.startService(secondIntent)
+            if (context.startService(firstIntent) != null) requestedServices.add("first")
+            if (context.startService(secondIntent) != null) requestedServices.add("second")
 
             val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(90)
             val firstResult = directory.resolve("result-first.txt")
@@ -505,10 +645,137 @@ class AndroidWalletRuntimeTest {
                 stored.fill(0)
             }
         } finally {
-            context.stopService(importRaceIntent(context, ImportRaceWriterOneService::class.java, directory, destination, "first", password))
-            context.stopService(importRaceIntent(context, ImportRaceWriterTwoService::class.java, directory, destination, "second", password))
+            val stopped = stopRaceServices(context, directory, destination, password, requestedServices)
             firstBytes.fill(0)
             secondBytes.fill(0)
+            assertTrue("race workers must stop before deleting shared state", stopped)
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    @Test
+    fun concurrentApprovedProofRequestsInSeparateProcessesReleaseOnlyOneProofOnAndroid() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.context
+        val password = "public-test-only: cross-process-proof-race"
+        val challenge = "ctu3M2x2eAAj-D2kw1Xy7uqFczsT00d2l5F3kMEikIQ"
+        val directory = Files.createTempDirectory(context.cacheDir.toPath(), "cross-process-proof-race-")
+        val walletPath = directory.resolve("wallet.dw")
+        val vector = context.assets.open("wallet-account-disclosure-v1/vectors/valid-signup.json")
+            .use { it.readBytes() }
+        val root = WalletJson.parse(vector, 64 * 1024) as Map<*, *>
+        val rawRequest = LinkedHashMap(root["keycloak_context"] as Map<*, *>)
+        val now = System.currentTimeMillis() / 1000
+        rawRequest["expires_at"] = BigInteger.valueOf(now + 299)
+        val rawContext = WalletJson.canonicalBytes(rawRequest)
+        val handle = root["transaction_handle"] as String
+        var pending: PendingAccountApproval? = null
+        val requestedServices = mutableSetOf<String>()
+        try {
+            val wallet = AndroidWallet.createWithGeneratedKey(walletPath, password, password)
+            try {
+                wallet.setMasterAccountEntity(mapOf("given_name" to "Ada", "email" to "ada@example.test"))
+                val review = wallet.reviewAccountDisclosureAt(
+                    rawContext,
+                    handle,
+                    "https://login.example.test/realms/site",
+                    "test:android-disclosure-owner",
+                    now,
+                )
+                pending = wallet.approveAccountDisclosureAt(
+                    review,
+                    review.claims.filter { it.required }.map { it.id }.toSet(),
+                    now,
+                    currentTimeEpochSeconds = { now },
+                ) { true }
+            } finally {
+                wallet.close()
+            }
+
+            val firstIntent = importRaceIntent(
+                context, ImportRaceWriterOneService::class.java, directory, walletPath, "first", password,
+            ).putExtra(ImportRaceWriterService.EXTRA_OPERATION, "proof")
+                .putExtra(ImportRaceWriterService.EXTRA_CHALLENGE, challenge)
+            val secondIntent = importRaceIntent(
+                context, ImportRaceWriterTwoService::class.java, directory, walletPath, "second", password,
+            ).putExtra(ImportRaceWriterService.EXTRA_OPERATION, "proof")
+                .putExtra(ImportRaceWriterService.EXTRA_CHALLENGE, challenge)
+            if (context.startService(firstIntent) != null) requestedServices.add("first")
+            if (context.startService(secondIntent) != null) requestedServices.add("second")
+
+            awaitMarker(directory.resolve("ready-first"))
+            awaitMarker(directory.resolve("ready-second"))
+            awaitMarker(directory.resolve("attempting-replace-first"))
+            awaitMarker(directory.resolve("attempting-replace-second"))
+            val comparedDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30)
+            while (!Files.exists(directory.resolve("compared-first")) &&
+                !Files.exists(directory.resolve("compared-second")) && System.nanoTime() < comparedDeadline
+            ) {
+                Thread.sleep(10)
+            }
+            assertTrue(
+                "a writer must pause inside the compared revision transaction",
+                Files.exists(directory.resolve("compared-first")) || Files.exists(directory.resolve("compared-second")),
+            )
+            val lockPath = directory.resolve(AtomicWalletFiles.INSTALL_LOCK_FILE_NAME)
+            val lockWasHeld = FileChannel.open(
+                lockPath,
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.WRITE,
+            ).use { channel ->
+                val probe = channel.tryLock()
+                if (probe == null) {
+                    false
+                } else {
+                    probe.release()
+                    true
+                }
+            }
+            assertFalse("the OS lock must remain held across revision check and replacement", lockWasHeld)
+            Files.write(directory.resolve("release-replace-first"), byteArrayOf(1))
+            Files.write(directory.resolve("release-replace-second"), byteArrayOf(1))
+
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(90)
+            val firstResult = directory.resolve("result-first.txt")
+            val secondResult = directory.resolve("result-second.txt")
+            while ((!Files.exists(firstResult) || !Files.exists(secondResult)) && System.nanoTime() < deadline) {
+                Thread.sleep(50)
+            }
+            assertTrue(Files.exists(directory.resolve("ready-first")))
+            assertTrue(Files.exists(directory.resolve("ready-second")))
+            assertTrue(Files.exists(firstResult) && Files.exists(secondResult))
+            val firstOutcome = String(Files.readAllBytes(firstResult), Charsets.UTF_8).split(":", limit = 3)
+            val secondOutcome = String(Files.readAllBytes(secondResult), Charsets.UTF_8).split(":", limit = 3)
+            assertNotEquals("proof contenders must be separate processes", firstOutcome[0], secondOutcome[0])
+            val outcomes = listOf(firstOutcome, secondOutcome)
+            assertEquals(listOf("STORAGE_FAILURE", "SUCCESS"), outcomes.map { it[1] }.sorted())
+            assertEquals(
+                WalletInvalidContainerException::class.java.name,
+                outcomes.single { it[1] == "STORAGE_FAILURE" }.getOrNull(2),
+            )
+
+            AndroidWallet.open(walletPath, password).use { reopened ->
+                val recovered = reopened.recoverPendingAccountApprovalAt(System.currentTimeMillis() / 1000)
+                assertEquals(checkNotNull(pending).handle, checkNotNull(recovered).handle)
+                val payload = reopened.readPayload()
+                try {
+                    val approval = payload["pending_account_disclosure_approval"] as Map<*, *>
+                    assertEquals(true, approval["proof_issued"])
+                    assertEquals(challenge, approval["proof_challenge"])
+                } finally {
+                    WalletJson.clearByteArrays(payload)
+                }
+                assertThrows(WalletDisclosureRequestException::class.java) {
+                    reopened.createAccountLoginProof(checkNotNull(pending), challenge)
+                }
+            }
+        } finally {
+            Files.write(directory.resolve("release-replace-first"), byteArrayOf(1))
+            Files.write(directory.resolve("release-replace-second"), byteArrayOf(1))
+            val stopped = stopRaceServices(context, directory, walletPath, password, requestedServices)
+            vector.fill(0)
+            rawContext.fill(0)
+            assertTrue("proof workers must stop before deleting shared state", stopped)
             Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
         }
     }
@@ -528,6 +795,33 @@ class AndroidWalletRuntimeTest {
         putExtra(ImportRaceWriterService.EXTRA_DESTINATION, destination.toString())
         putExtra(ImportRaceWriterService.EXTRA_CONTENDER, contender)
         putExtra(ImportRaceWriterService.EXTRA_PASSWORD, password)
+    }
+
+    private fun awaitMarker(path: java.nio.file.Path) {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30)
+        while (!Files.exists(path) && System.nanoTime() < deadline) {
+            Thread.sleep(10)
+        }
+        assertTrue("missing coordination marker: ${path.fileName}", Files.exists(path))
+    }
+
+    private fun stopRaceServices(
+        context: android.content.Context,
+        directory: java.nio.file.Path,
+        destination: java.nio.file.Path,
+        password: String,
+        requestedServices: Set<String>,
+    ): Boolean {
+        Files.write(directory.resolve("release-replace-first"), byteArrayOf(1))
+        Files.write(directory.resolve("release-replace-second"), byteArrayOf(1))
+        context.stopService(importRaceIntent(context, ImportRaceWriterOneService::class.java, directory, destination, "first", password))
+        context.stopService(importRaceIntent(context, ImportRaceWriterTwoService::class.java, directory, destination, "second", password))
+        val stopped = requestedServices.map { directory.resolve("service-stopped-$it") }
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20)
+        while (stopped.any { !Files.exists(it) } && System.nanoTime() < deadline) {
+            Thread.sleep(20)
+        }
+        return stopped.all { Files.exists(it) }
     }
 
     @Test

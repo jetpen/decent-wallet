@@ -19,6 +19,7 @@ import kotlin.concurrent.withLock
 internal object AtomicWalletFiles {
     private val testDirectorySync = ThreadLocal<Pair<Path, (Path) -> Unit>>()
     private val testBeforeCreateInstall = ThreadLocal<Pair<Path, (Path) -> Unit>>()
+    private val testBeforeReplaceInstall = ThreadLocal<Pair<Path, (Path) -> Unit>>()
 
     /** Scoped internal test seam for an external writer racing first installation. */
     internal fun <T> withBeforeCreateInstallForTest(
@@ -32,6 +33,21 @@ internal object AtomicWalletFiles {
             action()
         } finally {
             if (prior == null) testBeforeCreateInstall.remove() else testBeforeCreateInstall.set(prior)
+        }
+    }
+
+    /** Scoped internal test seam; never a public API or process-wide fault switch. */
+    internal fun <T> withBeforeReplaceInstallForTest(
+        path: Path,
+        beforeInstall: (Path) -> Unit,
+        action: () -> T,
+    ): T {
+        val prior = testBeforeReplaceInstall.get()
+        testBeforeReplaceInstall.set(path.toAbsolutePath().normalize() to beforeInstall)
+        return try {
+            action()
+        } finally {
+            if (prior == null) testBeforeReplaceInstall.remove() else testBeforeReplaceInstall.set(prior)
         }
     }
 
@@ -97,7 +113,7 @@ internal object AtomicWalletFiles {
             if (Files.exists(target, NOFOLLOW_LINKS)) throw WalletStorageException()
             val beforeInstall = testBeforeCreateInstall.get()
             if (beforeInstall != null && beforeInstall.first == parent) beforeInstall.second(target)
-            withCreateInstallLock(parent) {
+            withDirectoryMutationLock(parent) {
                 if (Files.exists(target, NOFOLLOW_LINKS)) throw WalletStorageException()
                 Files.move(checkNotNull(staged), target)
                 staged = null
@@ -136,8 +152,14 @@ internal object AtomicWalletFiles {
         bytes: ByteArray,
         expectedOriginal: ByteArray,
         directorySync: (Path) -> Unit,
-    ) = withPathLock(path) {
-        replaceLocked(path, bytes, expectedOriginal, directorySync)
+    ) {
+        val target = path.toAbsolutePath().normalize()
+        val parent = target.parent ?: throw WalletStorageException()
+        withPathLock(path) {
+            withDirectoryMutationLock(parent) {
+                replaceLocked(path, bytes, expectedOriginal, directorySync)
+            }
+        }
     }
 
     private fun replaceLocked(
@@ -155,6 +177,10 @@ internal object AtomicWalletFiles {
             throw WalletInvalidContainerException()
         }
         current.fill(0)
+        val beforeInstall = testBeforeReplaceInstall.get()
+        if (beforeInstall != null && beforeInstall.first == path.toAbsolutePath().normalize()) {
+            beforeInstall.second(target)
+        }
         var staged: Path? = null
         var installed = false
         try {
@@ -271,12 +297,12 @@ internal object AtomicWalletFiles {
     internal const val INSTALL_LOCK_FILE_NAME = ".decent-wallet-install.lock"
 
     private val pathLocks = ConcurrentHashMap<String, ReentrantLock>()
-    private val installDirectoryLocks = ConcurrentHashMap<String, ReentrantLock>()
+    private val directoryMutationLocks = ConcurrentHashMap<String, ReentrantLock>()
 
-    private fun <T> withCreateInstallLock(parent: Path, action: () -> T): T {
+    private fun <T> withDirectoryMutationLock(parent: Path, action: () -> T): T {
         val directory = parent.toAbsolutePath().normalize()
         val key = directory.toString()
-        return installDirectoryLocks.computeIfAbsent(key) { ReentrantLock() }.withLock {
+        return directoryMutationLocks.computeIfAbsent(key) { ReentrantLock() }.withLock {
             val lockPath = directory.resolve(INSTALL_LOCK_FILE_NAME)
             FileChannel.open(lockPath, CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
                 channel.lock().use {
