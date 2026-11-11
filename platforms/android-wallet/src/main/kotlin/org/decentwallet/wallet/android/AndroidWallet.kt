@@ -168,6 +168,28 @@ private const val MASTER_ACCOUNT_ENTITY_KEY = "master_account_entity"
 private const val PENDING_ACCOUNT_APPROVAL_KEY = "pending_account_disclosure_approval"
 private const val MASTER_ACCOUNT_ENTITY_MAX_DEPTH = 64
 
+internal fun decodeNativeContinuationCapability(
+    encodedCapability: String,
+    decoder: (String) -> ByteArray,
+): ByteArray {
+    if (encodedCapability.length != 43) throw WalletDisclosureRequestException()
+    val capabilityBytes = try {
+        decoder(encodedCapability)
+    } catch (_: Exception) {
+        throw WalletDisclosureRequestException()
+    }
+    try {
+        if (capabilityBytes.size != 32 ||
+            Base64.getUrlEncoder().withoutPadding().encodeToString(capabilityBytes) != encodedCapability
+        ) throw WalletDisclosureRequestException()
+        return capabilityBytes
+    } catch (failure: Exception) {
+        capabilityBytes.fill(0)
+        if (failure is WalletDisclosureRequestException) throw failure
+        throw WalletDisclosureRequestException()
+    }
+}
+
 private fun copyMasterAccountEntity(values: Map<*, *>): MutableMap<String, Any?> {
     val active = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
 
@@ -920,6 +942,108 @@ class WalletSession internal constructor(
         } finally {
             ownerKeySnapshot.fill(0)
         }
+    }
+
+    /** Proposal-only Issue #53 persistence; this is not an adopted protocol-conformance API. */
+    fun installNativeContinuationCapability(
+        pending: PendingAccountApproval,
+        encodedCapability: String,
+        expiresAtEpochSeconds: Long,
+    ) = synchronized(this) {
+        ensureUnlocked()
+        val capabilityBytes = decodeNativeContinuationCapability(encodedCapability) {
+            Base64.getUrlDecoder().decode(it)
+        }
+        try {
+            val now = System.currentTimeMillis() / 1000
+            if (now < 1 || now > Long.MAX_VALUE - 300 || expiresAtEpochSeconds <= now) {
+                throw WalletDisclosureRequestException()
+            }
+            val payload = checkNotNull(walletPayload)
+            val record = pendingApprovalRecord(payload) ?: throw WalletDisclosureRequestException()
+            val approval = pendingApprovalToDto(record)
+            val presentation = record["presentation"] as? Map<*, *>
+            if (approval.handle != pending.handle ||
+                approval.expiresAtEpochSeconds != pending.expiresAtEpochSeconds ||
+                approval.approvedAtEpochSeconds != pending.approvedAtEpochSeconds ||
+                approval.expiresAtEpochSeconds <= now || record["proof_issued"] != true ||
+                presentation?.get("state") != "approved" || record.containsKey("native_continuation") ||
+                expiresAtEpochSeconds > minOf(approval.expiresAtEpochSeconds, now + 300)
+            ) throw WalletDisclosureRequestException()
+            @Suppress("UNCHECKED_CAST")
+            val candidate = WalletJson.copyPayload(payload) as MutableMap<String, Any?>
+            try {
+                @Suppress("UNCHECKED_CAST")
+                val updatedRecord = candidate[PENDING_ACCOUNT_APPROVAL_KEY] as MutableMap<String, Any?>
+                updatedRecord["native_continuation"] = linkedMapOf(
+                    "capability" to capabilityBytes.copyOf(),
+                    "expires_at" to BigInteger.valueOf(expiresAtEpochSeconds),
+                )
+                persistPayloadCandidate(candidate)
+            } catch (failure: Exception) {
+                WalletJson.clearByteArrays(candidate)
+                candidate.clear()
+                throw failure
+            }
+        } catch (failure: WalletContainerException) {
+            throw failure
+        } catch (_: Exception) {
+            throw WalletDisclosureRequestException()
+        } finally {
+            capabilityBytes.fill(0)
+        }
+    }
+
+    fun nativeContinuationCapability(pending: PendingAccountApproval): NativeContinuationCapability? = synchronized(this) {
+        ensureUnlocked()
+        val current = AtomicWalletFiles.read(path)
+        val currentRevisionMatches = try { current.contentEquals(checkNotNull(rawContainer)) }
+        finally { current.fill(0) }
+        if (!currentRevisionMatches) {
+            lock()
+            throw WalletInvalidContainerException()
+        }
+        val now = System.currentTimeMillis() / 1000
+        val payload = checkNotNull(walletPayload)
+        val record = pendingApprovalRecord(payload) ?: throw WalletDisclosureRequestException()
+        val approval = pendingApprovalToDto(record)
+        val presentation = record["presentation"] as? Map<*, *>
+        if (approval.handle != pending.handle ||
+            approval.expiresAtEpochSeconds != pending.expiresAtEpochSeconds ||
+            approval.approvedAtEpochSeconds != pending.approvedAtEpochSeconds ||
+            approval.expiresAtEpochSeconds <= now || record["proof_issued"] != true ||
+            presentation?.get("state") != "approved"
+        ) throw WalletDisclosureRequestException()
+        val saved = record["native_continuation"] as? Map<*, *> ?: return@synchronized null
+        val expiresAt = when (val raw = saved["expires_at"]) {
+            is BigInteger -> raw.toLong().also { if (BigInteger.valueOf(it) != raw) throw WalletDisclosureRequestException() }
+            is Int -> raw.toLong()
+            is Long -> raw
+            else -> throw WalletDisclosureRequestException()
+        }
+        val bytes = saved["capability"] as? ByteArray ?: throw WalletDisclosureRequestException()
+        if (expiresAt <= now) {
+            @Suppress("UNCHECKED_CAST")
+            val candidate = WalletJson.copyPayload(payload) as MutableMap<String, Any?>
+            var detachedCapability: ByteArray? = null
+            try {
+                val updated = candidate[PENDING_ACCOUNT_APPROVAL_KEY] as MutableMap<String, Any?>
+                val continuation = updated.remove("native_continuation") as? Map<*, *>
+                detachedCapability = continuation?.get("capability") as? ByteArray
+                persistPayloadCandidate(candidate)
+            } catch (failure: Exception) {
+                WalletJson.clearByteArrays(candidate)
+                candidate.clear()
+                throw failure
+            } finally {
+                detachedCapability?.fill(0)
+            }
+            return@synchronized null
+        }
+        val remainingSeconds = expiresAt - now
+        val monotonicNow = System.nanoTime()
+        val monotonicExpiry = monotonicNow + remainingSeconds * 1_000_000_000L
+        NativeContinuationCapability(expiresAt, monotonicExpiry, bytes)
     }
 
     fun createAccountLoginProof(
@@ -1715,7 +1839,11 @@ private fun parsePendingAccountApproval(value: Any?): PendingAccountApproval {
         "version", "handle", "approved_at", "expires_at", "owner_public_key", "proof_issued",
         "proof_challenge", "review",
     )
-    if ((record.keys != baseKeys && record.keys != baseKeys + "presentation") ||
+    val keysWithPresentation = baseKeys + "presentation"
+    val keysWithContinuation = baseKeys + "native_continuation"
+    val keysWithBoth = keysWithPresentation + "native_continuation"
+    if ((record.keys != baseKeys && record.keys != keysWithPresentation &&
+            record.keys != keysWithContinuation && record.keys != keysWithBoth) ||
         record["version"] != BigInteger.ONE && record["version"] != 1
     ) throw WalletDisclosureRequestException()
     if (record.containsKey("presentation")) {
@@ -1794,6 +1922,17 @@ private fun parsePendingAccountApproval(value: Any?): PendingAccountApproval {
         throw WalletDisclosureRequestException()
     }
     val presentation = record["presentation"] as? Map<*, *>
+    if (record.containsKey("native_continuation")) {
+        val continuation = record["native_continuation"] as? Map<*, *> ?: throw WalletDisclosureRequestException()
+        if (continuation.keys != setOf("capability", "expires_at") || !proofIssued ||
+            presentation?.get("state") != "approved"
+        ) throw WalletDisclosureRequestException()
+        val capability = continuation["capability"] as? ByteArray ?: throw WalletDisclosureRequestException()
+        val capabilityExpiry = exactLong(continuation["expires_at"])
+        if (capability.size != 32 || capabilityExpiry <= approvedAt ||
+            capabilityExpiry > minOf(expiresAt, approvedAt + 300)
+        ) throw WalletDisclosureRequestException()
+    }
     if (presentation != null && presentation["state"] != "approved") {
         val submission = presentation["submission"] as Map<*, *>
         val presentationExpiry = exactLong(submission["expires_at"])

@@ -102,3 +102,15 @@ are outside this guarantee. Locking cannot revoke bytes already returned to a
 caller, and encrypted deletion is not physical erasure. Container wire version 2
 and all shared fixtures remain unchanged; pending state is private encrypted
 payload data, not a new transport profile.
+
+## Proposal-only Android native continuation capability
+
+The Android wallet library has an isolated, non-conformant implementation slice for the native-continuation proposal in ecosystem PR #53. The proposal has not been incorporated into the normative profile; this API is not evidence of consumer conformance, and app/UI/network polling remain unimplemented.
+
+After the wallet has issued the one-use login proof, a client that received the proposal's capability may call `WalletSession.installNativeContinuationCapability(pending, encodedCapability, expiresAtEpochSeconds)`. This persistence API does not authenticate the provider response or establish the provider's proof-acceptance timestamp; a future transport client must authenticate the configured provider and validate the exact response and proof-relative expiry before invoking it. The method accepts only a canonical base64url-no-pad encoding of exactly 32 bytes, for the exact active pending approval with proof already issued. It persists the bytes inside the existing authenticated encrypted wallet-container v2 pending record—without a new key, file, or envelope—and bounds expiry to the approval expiry and 300 seconds from installation. Duplicate installation and stale/invalid/expired approvals fail with a value-free wallet error.
+
+After reopen, `nativeContinuationCapability(pending)` returns a closeable `NativeContinuationCapability` while it remains valid. Callers may obtain an owned byte copy with `copyCapabilityBytes()` and must wipe that copy when finished; the wallet cannot revoke copies already returned. The object checks an elapsed-time deadline on each access and wipes its internal copy on first post-expiry access; callers must also close it to wipe the internal copy sooner. Expired persisted capability state is durably removed before the getter returns `null`. The containing pending approval remains subject to existing export/import and lock rules.
+
+Android runtime qualification and independent human security/privacy review remain open; this proposal-only slice is not qualified for deployment or conformance.
+
+This slice does not implement proposal opt-in/context validation, proof-response HTTP parsing, capability polling, RP Request Object retrieval, or Android app handoff. Do not treat it as normative signup-continuation support until ecosystem #51 adopts the amendment and the remaining client/provider/RP acceptance gates are verified.

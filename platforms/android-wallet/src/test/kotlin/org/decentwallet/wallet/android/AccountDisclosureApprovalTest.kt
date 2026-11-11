@@ -15,6 +15,210 @@ import java.util.concurrent.TimeUnit
 
 class AccountDisclosureApprovalTest {
     @Test
+    fun nativeContinuationCapabilityPersistsOnlyAfterProofAndRecoversRedactedAfterReopen() {
+        val testFixture = fixture()
+        try {
+            val pending = approveAtFixtureTime(
+                testFixture, testFixture.review, testFixture.review.claims.filter { it.required }.map { it.id }.toSet(),
+            ) { true }
+            val capability = "Q".repeat(43)
+            val beforeProofAttempt = Files.readAllBytes(testFixture.path)
+            try {
+                assertThrows(WalletDisclosureRequestException::class.java) {
+                    testFixture.wallet.installNativeContinuationCapability(
+                        pending, capability, pending.approvedAtEpochSeconds + 120,
+                    )
+                }
+                assertContainerUnchanged(testFixture.path, beforeProofAttempt)
+            } finally {
+                beforeProofAttempt.fill(0)
+            }
+            testFixture.wallet.createAccountLoginProof(
+                pending, "ctu3M2x2eAAj-D2kw1Xy7uqFczsT00d2l5F3kMEikIQ",
+            )
+            testFixture.wallet.installNativeContinuationCapability(
+                pending, capability, System.currentTimeMillis() / 1000 + 120,
+            )
+            testFixture.wallet.lock()
+            val reopened = AndroidWallet.open(testFixture.path, testFixture.password)
+            try {
+                val stored = reopened.nativeContinuationCapability(pending)
+                assertNotNull(stored)
+                stored!!.use {
+                    val copy = it.copyCapabilityBytes()
+                    try {
+                        assertTrue(copy.contentEquals(java.util.Base64.getUrlDecoder().decode(capability)))
+                    } finally {
+                        copy.fill(0)
+                    }
+                    assertTrue(it.expiresAtEpochSeconds <= pending.expiresAtEpochSeconds)
+                    assertFalse(it.toString().contains(capability))
+                    it.close()
+                    assertThrows(IllegalStateException::class.java) { it.copyCapabilityBytes() }
+                }
+                val fileBytes = Files.readAllBytes(testFixture.path)
+                try {
+                    assertFalse(String(fileBytes, Charsets.ISO_8859_1).contains(capability))
+                    val rawCapability = java.util.Base64.getUrlDecoder().decode(capability)
+                    try {
+                        assertFalse(containsBytes(fileBytes, rawCapability))
+                    } finally {
+                        rawCapability.fill(0)
+                    }
+                    val envelope = WalletJson.parse(fileBytes, fileBytes.size) as Map<*, *>
+                    assertEquals(BigInteger.valueOf(2), envelope["version"])
+                } finally {
+                    fileBytes.fill(0)
+                }
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            testFixture.close()
+        }
+    }
+
+    @Test
+    fun nativeContinuationRejectsMalformedStaleDuplicateAndOutOfWindowWritesWithoutMutation() {
+        val testFixture = fixture()
+        try {
+            val pending = approveAtFixtureTime(
+                testFixture, testFixture.review, testFixture.review.claims.filter { it.required }.map { it.id }.toSet(),
+            ) { true }
+            val secret = "M".repeat(43)
+            testFixture.wallet.createAccountLoginProof(
+                pending, "ctu3M2x2eAAj-D2kw1Xy7uqFczsT00d2l5F3kMEikIQ",
+            )
+            val baseline = Files.readAllBytes(testFixture.path)
+            try {
+                val overlongCapability = "Q".repeat(44_000)
+                var decoderCalled = false
+                assertThrows(WalletDisclosureRequestException::class.java) {
+                    decodeNativeContinuationCapability(overlongCapability) {
+                        decoderCalled = true
+                        java.util.Base64.getUrlDecoder().decode(it)
+                    }
+                }
+                assertFalse("overlong input must be rejected before decoding", decoderCalled)
+                assertThrows(WalletDisclosureRequestException::class.java) {
+                    testFixture.wallet.installNativeContinuationCapability(
+                        pending, overlongCapability, System.currentTimeMillis() / 1000 + 60,
+                    )
+                }
+                assertContainerUnchanged(testFixture.path, baseline)
+                val invalid = listOf(
+                    "not-base64url",
+                    "Q".repeat(43) + "=",
+                    java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(31)),
+                )
+                for (candidate in invalid) {
+                    val error = assertThrows(WalletDisclosureRequestException::class.java) {
+                        testFixture.wallet.installNativeContinuationCapability(
+                            pending, candidate, System.currentTimeMillis() / 1000 + 60,
+                        )
+                    }
+                    assertFalse(error.toString().contains(candidate))
+                    assertContainerUnchanged(testFixture.path, baseline)
+                }
+                val now = System.currentTimeMillis() / 1000
+                for (expiry in listOf(now, now + 301, pending.expiresAtEpochSeconds + 1)) {
+                    assertThrows(WalletDisclosureRequestException::class.java) {
+                        testFixture.wallet.installNativeContinuationCapability(pending, secret, expiry)
+                    }
+                    assertContainerUnchanged(testFixture.path, baseline)
+                }
+                val wrongHandle = PendingAccountApproval(
+                    "A".repeat(43), pending.expiresAtEpochSeconds, pending.approvedAtEpochSeconds,
+                )
+                assertThrows(WalletDisclosureRequestException::class.java) {
+                    testFixture.wallet.installNativeContinuationCapability(wrongHandle, secret, now + 60)
+                }
+                val wrongTime = PendingAccountApproval(
+                    pending.handle, pending.expiresAtEpochSeconds, pending.approvedAtEpochSeconds + 1,
+                )
+                assertThrows(WalletDisclosureRequestException::class.java) {
+                    testFixture.wallet.installNativeContinuationCapability(wrongTime, secret, now + 60)
+                }
+                assertContainerUnchanged(testFixture.path, baseline)
+
+                testFixture.wallet.installNativeContinuationCapability(pending, secret, now + 60)
+                val installedBytes = Files.readAllBytes(testFixture.path)
+                try {
+                    assertThrows(WalletDisclosureRequestException::class.java) {
+                        testFixture.wallet.installNativeContinuationCapability(pending, secret, now + 90)
+                    }
+                    assertContainerUnchanged(testFixture.path, installedBytes)
+                    testFixture.wallet.lock()
+                    assertThrows(WalletLockedException::class.java) {
+                        testFixture.wallet.nativeContinuationCapability(pending)
+                    }
+                } finally {
+                    installedBytes.fill(0)
+                }
+            } finally {
+                baseline.fill(0)
+            }
+        } finally {
+            testFixture.close()
+        }
+    }
+
+    @Test
+    fun expiredNativeContinuationIsClearedDurablyBeforeRecoveryReturnsIt() {
+        val testFixture = fixture()
+        try {
+            val absoluteExpiry = System.currentTimeMillis() / 1000 + 1
+            val boundaryCapability = NativeContinuationCapability(
+                absoluteExpiry,
+                System.nanoTime() + TimeUnit.HOURS.toNanos(1),
+                byteArrayOf(1, 2, 3, 4),
+            )
+            while (System.currentTimeMillis() / 1000 < absoluteExpiry) Thread.sleep(25)
+            assertThrows(IllegalStateException::class.java) { boundaryCapability.copyCapabilityBytes() }
+            assertThrows(IllegalStateException::class.java) { boundaryCapability.copyCapabilityBytes() }
+            val ownedBytes = NativeContinuationCapability::class.java.getDeclaredField("ownedBytes")
+            ownedBytes.isAccessible = true
+            assertNull(ownedBytes.get(boundaryCapability))
+
+            val pending = approveAtFixtureTime(
+                testFixture, testFixture.review, testFixture.review.claims.filter { it.required }.map { it.id }.toSet(),
+            ) { true }
+            testFixture.wallet.createAccountLoginProof(
+                pending, "ctu3M2x2eAAj-D2kw1Xy7uqFczsT00d2l5F3kMEikIQ",
+            )
+            val expiry = System.currentTimeMillis() / 1000 + 2
+            testFixture.wallet.installNativeContinuationCapability(pending, "Q".repeat(43), expiry)
+            val alreadyOpen = testFixture.wallet.nativeContinuationCapability(pending)
+            assertNotNull(alreadyOpen)
+            val waitUntil = expiry + 1
+            while (System.currentTimeMillis() / 1000 < waitUntil) Thread.sleep(100)
+            try {
+                assertThrows(IllegalStateException::class.java) { alreadyOpen!!.copyCapabilityBytes() }
+                assertThrows(IllegalStateException::class.java) { alreadyOpen!!.copyCapabilityBytes() }
+            } finally {
+                alreadyOpen!!.close()
+            }
+            testFixture.wallet.lock()
+
+            val reopened = AndroidWallet.open(testFixture.path, testFixture.password)
+            try {
+                assertNull(reopened.nativeContinuationCapability(pending))
+                val payload = reopened.readPayload()
+                try {
+                    val record = payload["pending_account_disclosure_approval"] as Map<*, *>
+                    assertFalse(record.containsKey("native_continuation"))
+                } finally {
+                    WalletJson.clearByteArrays(payload)
+                }
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            testFixture.close()
+        }
+    }
+
+    @Test
     fun approvalPersistsExactSelectionAndRecoversAfterLockWithoutReconsent() {
         val testFixture = fixture()
         try {
@@ -517,6 +721,30 @@ class AccountDisclosureApprovalTest {
             assertFalse((review["selected_claims"] as List<*>).any { it.toString().contains("ada@example.test") })
         } finally {
             WalletJson.clearByteArrays(payload)
+        }
+    }
+
+    private fun containsBytes(haystack: ByteArray, needle: ByteArray): Boolean {
+        if (needle.isEmpty() || needle.size > haystack.size) return false
+        for (offset in 0..haystack.size - needle.size) {
+            var matches = true
+            for (index in needle.indices) {
+                if (haystack[offset + index] != needle[index]) {
+                    matches = false
+                    break
+                }
+            }
+            if (matches) return true
+        }
+        return false
+    }
+
+    private fun assertContainerUnchanged(path: java.nio.file.Path, expected: ByteArray) {
+        val actual = Files.readAllBytes(path)
+        try {
+            assertTrue(expected.contentEquals(actual))
+        } finally {
+            actual.fill(0)
         }
     }
 

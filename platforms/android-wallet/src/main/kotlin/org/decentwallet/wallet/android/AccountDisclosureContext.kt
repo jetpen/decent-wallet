@@ -55,6 +55,36 @@ class PendingAccountApproval internal constructor(
     override fun toString(): String = "PendingAccountApproval()"
 }
 
+class NativeContinuationCapability internal constructor(
+    val expiresAtEpochSeconds: Long,
+    private val monotonicExpiryNanos: Long,
+    capabilityBytes: ByteArray,
+) : AutoCloseable {
+    private var ownedBytes: ByteArray? = capabilityBytes.copyOf()
+
+    @Synchronized
+    fun copyCapabilityBytes(): ByteArray {
+        val bytes = ownedBytes ?: throw IllegalStateException("capability unavailable")
+        if (
+            System.currentTimeMillis() / 1000 >= expiresAtEpochSeconds ||
+            System.nanoTime() - monotonicExpiryNanos >= 0
+        ) {
+            bytes.fill(0)
+            ownedBytes = null
+            throw IllegalStateException("capability unavailable")
+        }
+        return bytes.copyOf()
+    }
+
+    @Synchronized
+    override fun close() {
+        ownedBytes?.fill(0)
+        ownedBytes = null
+    }
+
+    override fun toString(): String = "NativeContinuationCapability()"
+}
+
 enum class PresentationDeliveryOutcome {
     AMBIGUOUS,
     ACCEPTED,
