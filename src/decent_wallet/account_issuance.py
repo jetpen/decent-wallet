@@ -67,21 +67,22 @@ class NativeContinuationCapability:
         """Absolute Unix expiry for the locally stored capability copy."""
         return self._expires_at
 
+    def _wipe_capability_bytes(self) -> None:
+        for index in range(len(self._bytes)):
+            self._bytes[index] = 0
+        self._closed = True
+
     def copy_capability_bytes(self) -> bytearray:
         with self._lock:
             if (self._closed or int(time.time()) >= self._expires_at
                     or time.monotonic() >= self._deadline):
-                for index in range(len(self._bytes)):
-                    self._bytes[index] = 0
-                self._closed = True
+                self._wipe_capability_bytes()
                 raise ValueError("native continuation capability unavailable")
             return bytearray(self._bytes)
 
     def close(self) -> None:
         with self._lock:
-            for index in range(len(self._bytes)):
-                self._bytes[index] = 0
-            self._closed = True
+            self._wipe_capability_bytes()
 
     def __enter__(self) -> "NativeContinuationCapability":
         return self

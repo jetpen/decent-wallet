@@ -203,7 +203,10 @@ def test_native_continuation_survives_prepared_and_ambiguous_states_then_consume
     now = int(container_module.time.time())
     capability_hash = base64.urlsafe_b64encode(__import__("hashlib").sha256(b"p" * 32).digest()).decode().rstrip("=")
     binding, jwks, outer, request, registration = continuation_artifacts(
-        context, wallet.public_key, now, capability_hash=capability_hash,
+        context, wallet.public_key, now,
+        request_expires_at=pending.expires_at,
+        capability_hash=capability_hash,
+        binding_expires_at=pending.expires_at,
     )
     submission = wallet.prepare_account_presentation(
         pending, binding_jws=binding, keycloak_jwks=jwks, outer_request=outer,
