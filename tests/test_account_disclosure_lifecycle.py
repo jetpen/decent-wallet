@@ -31,7 +31,7 @@ def deterministic_clock(monkeypatch):
     monkeypatch.setattr("decent_wallet.container.time.time", lambda: 1_800_000_001)
 
 
-def context_for_handle(expires_at=1_900_000_000):
+def context_for_handle(expires_at=1_900_000_000, native=False):
     raw = {
         "profile": "decent-account-disclosure-v1",
         "keycloak_issuer": ISSUER,
@@ -46,12 +46,15 @@ def context_for_handle(expires_at=1_900_000_000):
         "claims": [{"id": GIVEN, "required": True}, {"id": EMAIL, "required": False}],
         "expires_at": expires_at,
     }
+    if native:
+        raw["decent_native_continuation"] = True
     return parse_wallet_account_disclosure_context(
         json.dumps(raw).encode(), expected_keycloak_issuer=ISSUER
     )
 
 
-def continuation_artifacts(context, owner_public_key, now, request_expires_at=None):
+def continuation_artifacts(context, owner_public_key, now, request_expires_at=None, capability_hash=None,
+                           binding_expires_at=None):
     from decent_wallet.account_presentation import _jcs
     from decent_wallet.oid4vp_request import TrustedRPRegistration
 
@@ -65,9 +68,12 @@ def continuation_artifacts(context, owner_public_key, now, request_expires_at=No
         "v": 1, "iss": context.keycloak_issuer, "aud": context.rp_client_id, "sub": "kc-subject",
         "identity_id": IDENTITY_ID, "owner_key": owner, "owner_key_thumbprint": thumb,
         "action": context.action, "transaction_id": context.transaction_id, "request_id": context.request_id,
-        "oidc_nonce": context.oidc_nonce, "iat": now, "exp": min(context.expires_at, now + 300),
+        "oidc_nonce": context.oidc_nonce, "iat": now,
+        "exp": min(context.expires_at, now + 300) if binding_expires_at is None else min(context.expires_at, binding_expires_at),
         "jti": enc(b"b" * 32),
     }
+    if capability_hash is not None:
+        binding_payload["continuation_capability_hash"] = capability_hash
     h = enc(b'{"alg":"RS256","kid":"kc-key","typ":"decent-owner-key-binding+jwt"}')
     p = enc(json.dumps(binding_payload, separators=(",", ":")).encode())
     signed = f"{h}.{p}".encode()
@@ -156,7 +162,7 @@ def test_expired_disclosure_uses_trusted_public_clock(tmp_path, monkeypatch):
         wallet.approve_account_disclosure(review, [GIVEN], consent=lambda _review: True)
 
 
-def _approved_wallet(tmp_path, entity=None):
+def _approved_wallet(tmp_path, entity=None, native=False):
     vector = json.loads(LOGIN_VECTOR.read_text())
     wallet = Wallet._create_storage(
         tmp_path / "wallet.json", "correct horse battery", "correct horse battery",
@@ -164,7 +170,7 @@ def _approved_wallet(tmp_path, entity=None):
          "public_key": base64.urlsafe_b64decode(vector["public_key_b64url"] + "=")},
     )
     wallet.set_master_account_entity(entity if entity is not None else {"given_name": "Ada", "email": "ada@example.test"})
-    context = context_for_handle()
+    context = context_for_handle(native=native)
     review = wallet.review_account_disclosure(context, HANDLE, IDENTITY_ID)
     pending = wallet.approve_account_disclosure(review, [GIVEN], consent=lambda _review: True)
     return wallet, pending, context

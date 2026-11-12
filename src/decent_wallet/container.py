@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -841,7 +842,8 @@ def _validate_disclosure_record(record: Any) -> None:
     fields = {"version", "state", "handle",              "handle_digest", "context", "identity_id", "owner_public_key",
               "approved_claim_ids", "approved_values", "created_at", "expires_at",
               "proof_issued", "proof_challenge", "submission"}
-    if type(record) is not dict or set(record) != fields or record.get("version") != 1:
+    if (type(record) is not dict or set(record) not in (fields, fields | {"native_continuation"})
+            or type(record.get("version")) is not int or record["version"] != 1):
         raise InvalidContainer()
     if record.get("state") not in {"approved", "prepared", "ambiguous"}:
         raise InvalidContainer()
@@ -854,7 +856,9 @@ def _validate_disclosure_record(record: Any) -> None:
     context = record.get("context")
     context_fields = {"keycloak_issuer", "rp_client_id", "rp_display_name", "rp_origin", "action", "request_id",
                       "transaction_id", "oidc_nonce", "purpose", "claims", "expires_at"}
-    if type(context) is not dict or set(context) != context_fields:
+    if type(context) is not dict or set(context) not in (context_fields, context_fields | {"decent_native_continuation"}):
+        raise InvalidContainer()
+    if "decent_native_continuation" in context and context["decent_native_continuation"] is not True:
         raise InvalidContainer()
     if type(record.get("approved_claim_ids")) is not list or type(record.get("approved_values")) is not dict:
         raise InvalidContainer()
@@ -864,6 +868,18 @@ def _validate_disclosure_record(record: Any) -> None:
         raise InvalidContainer()
     if type(record.get("proof_issued")) is not bool or type(record.get("created_at")) is not int or type(record.get("expires_at")) is not int:
         raise InvalidContainer()
+    if "native_continuation" in record:
+        continuation = record["native_continuation"]
+        if (context.get("decent_native_continuation") is not True
+                or not record["proof_issued"] or type(continuation) is not dict
+                or set(continuation) != {"capability", "expires_at"}
+                or type(continuation.get("capability")) is not bytes
+                or len(continuation["capability"]) != 32
+                or type(continuation.get("expires_at")) is not int
+                or continuation["expires_at"] <= record["created_at"]
+                or continuation["expires_at"] > record["expires_at"]
+                or continuation["expires_at"] > record["created_at"] + 300):
+            raise InvalidContainer()
     submission = record.get("submission")
     if submission is not None and (type(submission) is not dict or set(submission) != {"response_uri", "state", "presentation_jws", "body", "expires_at"}
                                    or type(submission.get("expires_at")) is not int
@@ -1303,7 +1319,7 @@ def _decode_b64url_exact(value: str, size: int) -> bytes:
 
 
 def _disclosure_context_payload(context: Any) -> dict[str, Any]:
-    return {
+    value = {
         "keycloak_issuer": context.keycloak_issuer, "rp_client_id": context.rp_client_id,
         "rp_display_name": context.rp_display_name, "rp_origin": context.rp_origin,
         "action": context.action, "request_id": context.request_id,
@@ -1312,6 +1328,9 @@ def _disclosure_context_payload(context: Any) -> dict[str, Any]:
         "claims": [{"id": item.claim_id, "required": item.required} for item in context.claims],
         "expires_at": context.expires_at,
     }
+    if getattr(context, "decent_native_continuation", False) is True:
+        value["decent_native_continuation"] = True
+    return value
 
 
 def _entity_digest(entity: Mapping[str, Any]) -> str:
@@ -2253,6 +2272,83 @@ class Wallet:
         except Exception:
             raise AccountDisclosureError() from None
 
+    def install_native_continuation_capability(self, pending: Any, encoded_capability: str, expires_at: int) -> None:
+        """Persist a locally validated capability; transport authentication is caller-owned."""
+        from .account_issuance import AccountDisclosureError, PendingAccountApproval
+
+        value = bytearray()
+        try:
+            if (type(pending) is not PendingAccountApproval or type(encoded_capability) is not str
+                    or len(encoded_capability) != 43 or type(expires_at) is not int):
+                raise AccountDisclosureError()
+            value.extend(_decode_b64url_exact(encoded_capability, 32))
+            with self._rotation_lock:
+                self._touch()
+                self._ensure_rotation_dispatch_not_latched()
+                instant = int(time.time())
+                self._clear_expired_disclosure(instant)
+                record = self._disclosure_record(pending)
+                if (record["context"].get("decent_native_continuation") is not True
+                        or record["state"] != "approved" or not record["proof_issued"]
+                        or "native_continuation" in record or expires_at <= instant
+                        or expires_at > instant + 300 or expires_at > record["expires_at"]):
+                    raise AccountDisclosureError()
+                updated_record = dict(record)
+                updated_record["native_continuation"] = {
+                    "capability": bytes(value), "expires_at": expires_at
+                }
+                updated = dict(self._payload)
+                updated[_PENDING_ACCOUNT_DISCLOSURE] = updated_record
+                envelope = self._build_envelope(updated)
+                self._persist_envelope(envelope)
+                self._payload, self._envelope = updated, envelope
+        except AccountDisclosureError:
+            raise
+        except WalletError:
+            raise
+        except Exception:
+            raise AccountDisclosureError() from None
+        finally:
+            _wipe(value)
+
+    def native_continuation_capability(self, pending: Any) -> Any:
+        """Return a closeable local copy, durably removing an expired stored value."""
+        from .account_issuance import AccountDisclosureError, NativeContinuationCapability
+        try:
+            with self._rotation_lock:
+                self._touch()
+                self._ensure_rotation_dispatch_not_latched()
+                instant = int(time.time())
+                self._clear_expired_disclosure(instant)
+                with _container_guard(self._path):
+                    self._assert_disk_current()
+                    record = self._disclosure_record(pending)
+                    continuation = record.get("native_continuation")
+                    if continuation is None:
+                        return None
+                    if continuation["expires_at"] <= instant:
+                        updated_record = dict(record)
+                        updated_record.pop("native_continuation", None)
+                        updated = dict(self._payload)
+                        updated[_PENDING_ACCOUNT_DISCLOSURE] = updated_record
+                        envelope = self._build_envelope(updated)
+                    else:
+                        return NativeContinuationCapability(
+                            continuation["capability"], continuation["expires_at"]
+                        )
+                # Do not reacquire the container guard recursively; persistence
+                # re-enters it and performs its own disk-revision check.
+                self._persist_envelope(envelope)
+                self._payload, self._envelope = updated, envelope
+                return None
+        except WalletError:
+            raise
+        except Exception:
+            if not self.is_unlocked:
+                raise
+            raise AccountDisclosureError() from None
+
+
     def prepare_account_presentation(self, pending: Any, *, binding_jws: str, keycloak_jwks: dict[str, Any], outer_request: dict[str, Any], request_object: str, registration: Any) -> Any:
         """Re-verify raw OIDC binding and signed RP request, then persist exact dual JWS bytes."""
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -2283,10 +2379,22 @@ class Wallet:
                     context_raw["rp_origin"], context_raw["action"], context_raw["request_id"],
                     context_raw["transaction_id"], context_raw["oidc_nonce"], context_raw["purpose"],
                     tuple(RequestedAccountClaim(c["id"], c["required"]) for c in context_raw["claims"]),
-                    context_raw["expires_at"],
+                    context_raw["expires_at"], context_raw.get("decent_native_continuation", False),
                 )
                 identity = record["identity_id"]
                 binding = verify_owner_key_binding(binding_jws, keycloak_jwks, context, expected_identity_id=identity, now=instant)
+                continuation = record.get("native_continuation")
+                capability_expires_at = record["expires_at"]
+                if context.decent_native_continuation:
+                    if type(continuation) is not dict or continuation["expires_at"] <= instant:
+                        raise AccountDisclosureError()
+                    capability_digest = _b64url_encode(hashlib.sha256(continuation["capability"]).digest())
+                    if binding.continuation_capability_hash is None or not hmac.compare_digest(
+                            binding.continuation_capability_hash, capability_digest):
+                        raise AccountDisclosureError()
+                    capability_expires_at = continuation["expires_at"]
+                elif continuation is not None or binding.continuation_capability_hash is not None:
+                    raise AccountDisclosureError()
                 seed = _WALLET_SECRETS.get(self._secret_handle)
                 pub = self._payload.get("public_key")
                 if seed is None:
@@ -2301,6 +2409,12 @@ class Wallet:
                     outer_request, request_object=request_object, registration=registration,
                     context=context, owner_key_binding_jws=binding_jws, verified_binding=binding, now=instant,
                 )
+                if context.decent_native_continuation and (
+                    binding.expires_at > capability_expires_at
+                    or request.expires_at > capability_expires_at
+                    or request.expires_at > binding.expires_at
+                ):
+                    raise AccountDisclosureError()
                 claims = dict(record["approved_values"])
                 if set(claims) != set(record["approved_claim_ids"]):
                     raise AccountDisclosureError()
@@ -2308,7 +2422,8 @@ class Wallet:
                     if requested.required and requested.claim_id not in claims:
                         raise AccountDisclosureError()
                 issued_at = instant
-                expires_at = min(record["expires_at"], binding.expires_at, request.expires_at, issued_at + 300)
+                expires_at = min(record["expires_at"], binding.expires_at, request.expires_at,
+                                 capability_expires_at, issued_at + 300)
                 if expires_at <= issued_at:
                     raise AccountDisclosureError()
                 thumb = binding.owner_key_thumbprint
@@ -2348,6 +2463,8 @@ class Wallet:
                 updated_record = dict(record)
                 updated_record["state"] = "prepared"
                 updated_record["submission"] = submission
+                if context.decent_native_continuation:
+                    updated_record.pop("native_continuation", None)
                 updated = dict(self._payload)
                 updated[_PENDING_ACCOUNT_DISCLOSURE] = updated_record
                 envelope = self._build_envelope(updated)
@@ -2504,9 +2621,13 @@ class Wallet:
         self._payload, self._envelope = updated, envelope
 
     def _disclosure_record(self, pending: Any) -> dict[str, Any]:
+        from .account_issuance import PendingAccountApproval
+
         record = self._payload.get(_PENDING_ACCOUNT_DISCLOSURE)
-        if (type(record) is not dict or record.get("handle") != getattr(pending, "handle", None)
-                or record.get("expires_at") != getattr(pending, "expires_at", None)):
+        if (type(pending) is not PendingAccountApproval or type(pending.handle) is not str
+                or type(pending.expires_at) is not int or type(record) is not dict
+                or type(record.get("handle")) is not str or type(record.get("expires_at")) is not int
+                or record["handle"] != pending.handle or record["expires_at"] != pending.expires_at):
             raise ValueError
         return record
 
