@@ -78,6 +78,7 @@ class WalletAccountDisclosureContext:
     purpose: str
     claims: tuple[RequestedAccountClaim, ...]
     expires_at: int
+    decent_native_continuation: bool = False
 
 
 def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -222,7 +223,10 @@ def parse_wallet_account_disclosure_context(
 ) -> WalletAccountDisclosureContext:
     """Parse the closed context object; caller must fetch it from trusted HTTPS Keycloak."""
     context = _decode_context_json(raw)
-    if type(context) is not dict or set(context) != _CONTEXT_KEYS:
+    if type(context) is not dict or set(context) not in (_CONTEXT_KEYS, _CONTEXT_KEYS | {"decent_native_continuation"}):
+        raise WalletDisclosureRequestError()
+    native_marker = context.get("decent_native_continuation", False)
+    if type(native_marker) is not bool or ("decent_native_continuation" in context and native_marker is not True):
         raise WalletDisclosureRequestError()
     if context["profile"] != PROFILE_ID:
         raise WalletDisclosureRequestError()
@@ -282,6 +286,7 @@ def parse_wallet_account_disclosure_context(
         purpose=purpose,
         claims=claims,
         expires_at=expires_at,
+        decent_native_continuation=native_marker,
     )
 
 
@@ -308,6 +313,7 @@ class VerifiedOwnerKeyBinding:
     expires_at: int
     jti: str
     compact_jws_sha256: str
+    continuation_capability_hash: str | None = None
 
 
 _BINDING_KEYS = frozenset({"v", "iss", "aud", "sub", "identity_id", "owner_key", "owner_key_thumbprint", "action", "transaction_id", "request_id", "oidc_nonce", "iat", "exp", "jti"})
@@ -382,7 +388,18 @@ def verify_owner_key_binding(compact_jws: str, issuer_jwks: dict[str, Any], pend
             raise WalletDisclosureRequestError()
         public_key.verify(sig, (parts[0] + "." + parts[1]).encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
         payload = _binding_json(praw)
-        if type(payload) is not dict or set(payload) != _BINDING_KEYS or type(payload["v"]) is not int or payload["v"] != 1:
+        payload_keys = set(payload) if type(payload) is dict else set()
+        if (type(payload) is not dict or payload_keys not in (_BINDING_KEYS, _BINDING_KEYS | {"continuation_capability_hash"})
+                or type(payload["v"]) is not int or payload["v"] != 1):
+            raise WalletDisclosureRequestError()
+        capability_hash = None
+        if "continuation_capability_hash" in payload:
+            if not pending_context.decent_native_continuation:
+                raise WalletDisclosureRequestError()
+            capability_hash = _text(payload["continuation_capability_hash"], maximum=43)
+            if len(_decode_b64url(capability_hash, minimum_bytes=32, maximum_bytes=32)) != 32:
+                raise WalletDisclosureRequestError()
+        elif pending_context.decent_native_continuation:
             raise WalletDisclosureRequestError()
         owner = payload["owner_key"]
         if type(owner) is not dict or set(owner) != {"kty", "crv", "x"} or owner["kty"] != "OKP" or owner["crv"] != "Ed25519":
@@ -406,7 +423,7 @@ def verify_owner_key_binding(compact_jws: str, issuer_jwks: dict[str, Any], pend
         iat, exp = payload["iat"], payload["exp"]
         if type(iat) is not int or type(exp) is not int or exp <= iat or exp - iat > 300 or iat > now + 60 or now >= exp or exp > pending_context.expires_at:
             raise WalletDisclosureRequestError()
-        return VerifiedOwnerKeyBinding(payload["iss"], payload["aud"], payload["sub"], payload["identity_id"], Ed25519OwnerPublicKey("OKP", "Ed25519", x), thumb, payload["action"], payload["transaction_id"], payload["request_id"], payload["oidc_nonce"], iat, exp, payload["jti"], hashlib.sha256(token.encode("utf-8")).hexdigest())
+        return VerifiedOwnerKeyBinding(payload["iss"], payload["aud"], payload["sub"], payload["identity_id"], Ed25519OwnerPublicKey("OKP", "Ed25519", x), thumb, payload["action"], payload["transaction_id"], payload["request_id"], payload["oidc_nonce"], iat, exp, payload["jti"], hashlib.sha256(token.encode("utf-8")).hexdigest(), capability_hash)
     except WalletDisclosureRequestError:
         raise
     except Exception:

@@ -1,8 +1,10 @@
 """Narrow value objects for wallet-owned account-disclosure issuance."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
+from threading import Lock
 from typing import Any
 
 
@@ -45,6 +47,51 @@ class WalletLoginProofRequest:
 
     def __repr__(self) -> str:
         return "WalletLoginProofRequest()"
+
+
+class NativeContinuationCapability:
+    """Closeable owner of a capability copy; callers must wipe their own copies."""
+
+    __slots__ = ("_bytes", "_expires_at", "_deadline", "_closed", "_lock")
+
+    def __init__(self, value: bytes, expires_at: int) -> None:
+        self._bytes = bytearray(value)
+        self._expires_at = expires_at
+        remaining = max(0, expires_at - int(time.time()))
+        self._deadline = time.monotonic() + remaining
+        self._closed = False
+        self._lock = Lock()
+
+    @property
+    def expires_at(self) -> int:
+        """Absolute Unix expiry for the locally stored capability copy."""
+        return self._expires_at
+
+    def _wipe_capability_bytes(self) -> None:
+        for index in range(len(self._bytes)):
+            self._bytes[index] = 0
+        self._closed = True
+
+    def copy_capability_bytes(self) -> bytearray:
+        with self._lock:
+            if (self._closed or int(time.time()) >= self._expires_at
+                    or time.monotonic() >= self._deadline):
+                self._wipe_capability_bytes()
+                raise ValueError("native continuation capability unavailable")
+            return bytearray(self._bytes)
+
+    def close(self) -> None:
+        with self._lock:
+            self._wipe_capability_bytes()
+
+    def __enter__(self) -> "NativeContinuationCapability":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        return "NativeContinuationCapability()"
 
 
 @dataclass(frozen=True, slots=True, repr=False)

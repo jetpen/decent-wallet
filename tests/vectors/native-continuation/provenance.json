@@ -1,0 +1,8 @@
+{
+  "upstream_repository": "https://github.com/jetpen/decent-ecosystem",
+  "upstream_commit": "4545d5de8856a576828fb00c17413e9b49d1ad1f",
+  "source_path": "docs/protocol/wallet-account-disclosure/v1/vectors/continuation_vectors.native.json",
+  "local_path": "tests/vectors/native-continuation/continuation_vectors.native.json",
+  "sha256": "edb30ca38740c06df8342c7f928e30422e9478dc1ef8ff82b3edf00b050bf2f3",
+  "size_bytes": 1395928
+}
