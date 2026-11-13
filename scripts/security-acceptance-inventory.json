@@ -695,6 +695,7 @@
     "org.decentwallet.wallet.android.AccountDisclosurePresentationTest::staleSessionCannotRetryAfterAnotherSessionCancelsApproval",
     "org.decentwallet.wallet.android.AccountDisclosurePresentationTest::submissionCloseWipesAndDisablesRetainedBodyBytes",
     "org.decentwallet.wallet.android.AccountDisclosurePresentationTest::trustedSignedArtifactsForDifferentPendingContextInvalidateApproval",
+    "org.decentwallet.wallet.android.AccountDisclosurePresentationTest::unverifiableHttp200AcceptanceIsDurablyNonRetriableAfterReopen",
     "org.decentwallet.wallet.android.AccountDisclosurePresentationTest::walletOwnedBindingAdapterRejectsMissingAndDuplicateEmbeddedFields",
     "org.decentwallet.wallet.android.AccountDisclosurePresentationVectorTest::acceptsAllSharedPositivePresentationVectorsAndExactClaims",
     "org.decentwallet.wallet.android.AccountDisclosurePresentationVectorTest::rejectsAllSharedPresentationStageNegativeVectors",
