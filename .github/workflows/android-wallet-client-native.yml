@@ -49,6 +49,7 @@ jobs:
       - name: Run pinned app/core host tests, Android-test compilation, and lint
         run: >-
           ./gradlew --no-daemon --dependency-verification=strict
+          -PwalletLoginHost=login.example.com -PwalletLoginPort=443
           :apps:android-wallet-client:testDebugUnitTest
           :platforms:android-wallet:testDebugUnitTest
           :apps:android-wallet-client:compileDebugAndroidTestKotlin
