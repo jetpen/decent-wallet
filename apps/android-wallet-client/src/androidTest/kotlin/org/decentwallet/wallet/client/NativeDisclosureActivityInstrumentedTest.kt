@@ -237,6 +237,26 @@ class NativeDisclosureActivityInstrumentedTest {
                                 }
                                 assertEquals("one owner tap must make one retry", 8, activeFixture.server.requestCount)
                                 assertNoRequest(activeFixture.server)
+                                scenario.close()
+                                session.close()
+                                session = AndroidWallet.open(walletFile.toPath(), walletPassword)
+                                DebugWalletLoginApplication.clear()
+                                DebugWalletLoginApplication.install(WalletLoginIdentity(session, identityId), activeFixture.trust)
+                                ActivityScenario.launch<WalletLoginActivity>(intent(context, activeFixture.transactionPath)).use { afterAcceptance ->
+                                    waitUntil(afterAcceptance) { texts ->
+                                        texts.any { it.contains("may have accepted this disclosure") } &&
+                                            texts.any { it.contains("Check with the relying party") } &&
+                                            texts.any { it.contains("cannot be retried") }
+                                    }
+                                    afterAcceptance.onActivity { activity ->
+                                        assertTrue(
+                                            "reopened accepted disclosure exposed a retry control",
+                                            WalletLoginTestViews.texts(activity.window.decorView).none { it == "Retry saved presentation" },
+                                        )
+                                    }
+                                    assertEquals("reopen must not automatically POST after acceptance", 8, activeFixture.server.requestCount)
+                                    assertNoRequest(activeFixture.server)
+                                }
                             } else {
                                 waitUntil(reopened) { texts -> texts.any { it.contains("verified acceptance") } }
                                 assertEquals("each explicit owner action must produce only one retry", 8, activeFixture.server.requestCount)

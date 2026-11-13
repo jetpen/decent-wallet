@@ -96,6 +96,16 @@ class WalletLoginActivity : Activity() {
         pending: PendingAccountApproval,
         trust: NativeDisclosureTrustConfig?,
     ) {
+        val acceptanceUncertain = try {
+            identity.session.isAccountPresentationAcceptanceUncertain(pending)
+        } catch (_: Exception) {
+            showMessage("A saved wallet request could not be safely recovered. No proof or presentation was sent.")
+            return
+        }
+        if (acceptanceUncertain) {
+            showMessage("The relying party may have accepted this disclosure, but its receipt could not be verified. Check with the relying party; this saved disclosure cannot be retried.")
+            return
+        }
         val registration = trust?.relyingPartyRegistration
         if (!identity.session.isUnlocked || registration == null) {
             showMessage("A saved disclosure is waiting, but configured relying-party trust is unavailable. No presentation was sent.")
