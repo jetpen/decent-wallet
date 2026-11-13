@@ -1,0 +1,55 @@
+name: Android wallet client native
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/android-wallet-client-native.yml"
+      - "apps/android-wallet-client/**"
+      - "platforms/android-wallet/**"
+      - "gradle/**"
+      - "settings.gradle.kts"
+      - "build.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradle.lockfile"
+      - "gradle/verification-metadata.xml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/android-wallet-client-native.yml"
+      - "apps/android-wallet-client/**"
+      - "platforms/android-wallet/**"
+      - "gradle/**"
+      - "settings.gradle.kts"
+      - "build.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradle.lockfile"
+      - "gradle/verification-metadata.xml"
+
+permissions:
+  contents: read
+
+jobs:
+  android-wallet-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out wallet
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up JDK 21
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: "platform-tools platforms;android-37 build-tools;35.0.0"
+      - name: Run pinned app/core host tests, Android-test compilation, and lint
+        run: >-
+          ./gradlew --no-daemon --dependency-verification=strict
+          :apps:android-wallet-client:testDebugUnitTest
+          :platforms:android-wallet:testDebugUnitTest
+          :apps:android-wallet-client:compileDebugAndroidTestKotlin
+          :apps:android-wallet-client:lintDebug
