@@ -190,6 +190,44 @@ class AccountDisclosurePresentationTest {
     }
 
     @Test
+    fun unverifiableHttp200AcceptanceIsDurablyNonRetriableAfterReopen() {
+        val fixture = fixture()
+        var submission: AccountPresentationSubmission? = null
+        var reopened: WalletSession? = null
+        try {
+            submission = fixture.wallet.prepareAccountPresentationAt(
+                fixture.pending, fixture.bindingJws, fixture.issuerJwks, fixture.outerRequest,
+                fixture.requestObject, fixture.registration, fixture.now,
+                currentTimeEpochSeconds = { fixture.now },
+            )
+            val invalidReceipt = "{}".toByteArray(StandardCharsets.UTF_8)
+            try {
+                assertThrows(WalletDisclosureRequestException::class.java) {
+                    fixture.wallet.finishAccountPresentationAt(
+                        fixture.pending, PresentationDeliveryOutcome.ACCEPTED, 200,
+                        "application/json", invalidReceipt, fixture.now,
+                    )
+                }
+            } finally { invalidReceipt.fill(0) }
+            assertTrue(fixture.wallet.isAccountPresentationAcceptanceUncertain(fixture.pending))
+            assertThrows(WalletDisclosureRequestException::class.java) {
+                fixture.wallet.getAccountPresentationRetryAt(fixture.pending, fixture.registration, fixture.now)
+            }
+            fixture.wallet.lock()
+            reopened = AndroidWallet.open(fixture.directory.resolve("wallet.dw"), TEST_PASSWORD)
+            val recovered = requireNotNull(reopened.recoverPendingAccountApprovalAt(fixture.now))
+            assertTrue(reopened.isAccountPresentationAcceptanceUncertain(recovered))
+            assertThrows(WalletDisclosureRequestException::class.java) {
+                reopened.getAccountPresentationRetryAt(recovered, fixture.registration, fixture.now)
+            }
+        } finally {
+            reopened?.close()
+            submission?.close()
+            fixture.close()
+        }
+    }
+
+    @Test
     fun directPostAcceptanceConsumesOnlyOnValidatedResponseEvidence() {
         val fixture = fixture()
         var submission: AccountPresentationSubmission? = null
@@ -202,19 +240,6 @@ class AccountDisclosurePresentationTest {
             val code = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { it.toByte() })
             val body = """{"redirect_uri":"https://site.example.test/response#response_code=$code"}"""
                 .toByteArray(StandardCharsets.UTF_8)
-            assertThrows(WalletDisclosureRequestException::class.java) {
-                fixture.wallet.finishAccountPresentationAt(
-                    fixture.pending, PresentationDeliveryOutcome.ACCEPTED, 200,
-                    "application/json; charset", body, fixture.now,
-                )
-            }
-            assertThrows(WalletDisclosureRequestException::class.java) {
-                fixture.wallet.finishAccountPresentationAt(
-                    fixture.pending, PresentationDeliveryOutcome.ACCEPTED, 200,
-                    "application/json", """{"redirect_uri":"https://attacker.example/response#response_code=$code"}"""
-                        .toByteArray(StandardCharsets.UTF_8), fixture.now,
-                )
-            }
             val payloadBeforeAcceptance = fixture.wallet.readPayload()
             try {
                 assertTrue(payloadBeforeAcceptance.containsKey("pending_account_disclosure_approval"))

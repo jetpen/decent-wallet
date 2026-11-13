@@ -10,6 +10,9 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import org.decentwallet.wallet.android.AccountPresentationSubmission
+import org.decentwallet.wallet.android.PendingAccountApproval
+import org.decentwallet.wallet.android.PresentationDeliveryOutcome
 import org.decentwallet.wallet.android.WalletLoginProofRequest
 import org.decentwallet.wallet.android.WalletSession
 import java.util.concurrent.Executors
@@ -35,19 +38,38 @@ class WalletLoginActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showMessage("Preparing wallet login…")
+        val host = application as? WalletLoginHost
+        val identity = try { host?.acquireWalletLoginIdentity(this) } catch (_: Exception) { null }
+        if (identity == null || !identity.session.isUnlocked || identity.identityId.isBlank()) {
+            val validIntent = try {
+                WalletLoginTransactionUrl.parse(intent?.dataString.orEmpty(), BuildConfig.WALLET_LOGIN_ORIGIN)
+                true
+            } catch (_: Exception) { false }
+            showMessage(if (validIntent) "An already-unlocked wallet is required. No proof was sent."
+                else "This wallet login request is invalid or not trusted. No proof was sent.")
+            return
+        }
+        val trust = try { host?.nativeDisclosureTrust(this) } catch (_: Exception) { null }
+
+        // Resolve durable one-use state before even parsing or contacting the current intent.
+        // Any recovered approval takes exclusive ownership of this Activity launch.
+        val recovered = try {
+            identity.session.recoverPendingAccountApproval()
+        } catch (_: Exception) {
+            showMessage("A saved wallet request could not be safely recovered. No proof or presentation was sent.")
+            return
+        }
+        if (recovered != null) {
+            showRecoveredApproval(identity, recovered, trust)
+            return
+        }
+
         val transaction = try {
             WalletLoginTransactionUrl.parse(intent?.dataString.orEmpty(), BuildConfig.WALLET_LOGIN_ORIGIN)
         } catch (_: Exception) {
             showMessage("This wallet login request is invalid or not trusted. No proof was sent.")
             return
         }
-        val identity = try { (application as? WalletLoginHost)?.acquireWalletLoginIdentity(this) } catch (_: Exception) { null }
-        if (identity == null || !identity.session.isUnlocked || identity.identityId.isBlank()) {
-            showMessage("An already-unlocked wallet is required. No proof was sent.")
-            return
-        }
-        val host = application as? WalletLoginHost
-        val trust = try { host?.nativeDisclosureTrust(this) } catch (_: Exception) { null }
         worker.execute {
             val start = try {
                 NativeDisclosureWorkflow(AndroidNativeDisclosureOperations(NativeDisclosureHttpClient(this), trust, NativeWalletLoginHttpClient(this)))
@@ -68,6 +90,163 @@ class WalletLoginActivity : Activity() {
             }
         }
     }
+
+    private fun showRecoveredApproval(
+        identity: WalletLoginIdentity,
+        pending: PendingAccountApproval,
+        trust: NativeDisclosureTrustConfig?,
+    ) {
+        val acceptanceUncertain = try {
+            identity.session.isAccountPresentationAcceptanceUncertain(pending)
+        } catch (_: Exception) {
+            showMessage("A saved wallet request could not be safely recovered. No proof or presentation was sent.")
+            return
+        }
+        if (acceptanceUncertain) {
+            showMessage("The relying party may have accepted this disclosure, but its receipt could not be verified. Check with the relying party; this saved disclosure cannot be retried.")
+            return
+        }
+        val registration = trust?.relyingPartyRegistration
+        if (!identity.session.isUnlocked || registration == null) {
+            showMessage("A saved disclosure is waiting, but configured relying-party trust is unavailable. No presentation was sent.")
+            return
+        }
+        // Confirm retryability for this exact static registration without disclosing the stored
+        // JWS or body. The returned object is immediately wiped and never reaches the UI.
+        try {
+            identity.session.getAccountPresentationRetry(pending, registration).use { }
+        } catch (_: Exception) {
+            showMessage("A saved wallet request cannot be retried with the configured relying-party trust. No presentation was sent.")
+            return
+        }
+
+        val layout = column()
+        addText(layout, "Saved account presentation")
+        addText(layout, "Configured relying-party origin: ${registration.origin}")
+        addText(layout, "Delivery may be ambiguous. The saved submission may already have reached this relying party.")
+        addText(layout, "No new proof or consent will be requested. Resending is optional and requires your explicit action.")
+        val status = TextView(this).apply { textSize = 16f; setPadding(0, 12, 0, 12) }
+        layout.addView(status)
+        val retry = Button(this).apply { text = "Retry saved presentation" }
+        retry.setOnClickListener {
+            if (terminal || !retry.isEnabled) return@setOnClickListener
+            retry.isEnabled = false
+            worker.execute {
+                val result = retrySavedPresentation(identity.session, pending, trust)
+                main.post {
+                    if (isFinishing || isDestroyed) return@post
+                    status.text = result.message
+                    retry.isEnabled = result.retryAvailable
+                    if (result.accepted || !result.retryAvailable) terminal = true
+                }
+            }
+        }
+        layout.addView(retry)
+        install(layout)
+    }
+
+    private fun retrySavedPresentation(
+        wallet: WalletSession,
+        pending: PendingAccountApproval,
+        trust: NativeDisclosureTrustConfig,
+    ): RecoveryRetryResult {
+        var submission: AccountPresentationSubmission? = null
+        var response: PresentationHttpResult? = null
+        var postAttempted = false
+        var finishAttempted = false
+        var ambiguousFinishSucceeded = false
+        try {
+            if (!wallet.isUnlocked) throw IllegalStateException()
+            submission = wallet.getAccountPresentationRetry(pending, trust.relyingPartyRegistration)
+            val body = submission.body
+            try {
+                // This is the sole POST attempt for this explicit tap. The transport validates
+                // the URI against static RP trust and disables redirects/connection retries.
+                postAttempted = true
+                response = NativeDisclosureHttpClient(this).submitPresentationOnce(
+                    submission.responseUri,
+                    trust.relyingPartyRegistration.origin,
+                    body,
+                )
+            } finally {
+                body.fill(0)
+            }
+
+            val result = checkNotNull(response)
+            val mediaType = result.contentType?.substringBefore(';')?.trim()
+            if (result.statusCode == 200 && mediaType.equals("application/json", ignoreCase = true)) {
+                finishAttempted = true
+                try {
+                    wallet.finishAccountPresentation(
+                        pending,
+                        PresentationDeliveryOutcome.ACCEPTED,
+                        result.statusCode,
+                        result.contentType,
+                        result.body,
+                    )
+                    return RecoveryRetryResult(
+                        accepted = true,
+                        retryAvailable = false,
+                        message = "The relying party verified acceptance. The saved presentation was consumed.",
+                    )
+                } catch (_: Exception) {
+                    // The transition may have committed before throwing. Never issue a second
+                    // terminal transition or invite a retry with an unknown durable outcome.
+                    return RecoveryRetryResult(
+                        accepted = false,
+                        retryAvailable = false,
+                        message = "Acceptance could not be safely confirmed. Check the relying party before taking further action.",
+                    )
+                }
+            }
+
+            finishAttempted = true
+            if (result.statusCode >= 500) {
+                wallet.finishAccountPresentation(pending, PresentationDeliveryOutcome.AMBIGUOUS)
+                ambiguousFinishSucceeded = true
+                return RecoveryRetryResult(
+                    accepted = false,
+                    retryAvailable = true,
+                    message = "Delivery remains ambiguous. The exact saved presentation is unchanged; retry only by choosing the button again.",
+                )
+            }
+            wallet.finishAccountPresentation(pending, PresentationDeliveryOutcome.DEFINITIVE_FAILURE)
+            return RecoveryRetryResult(
+                accepted = false,
+                retryAvailable = false,
+                message = "The relying party rejected the presentation. The saved request was consumed and cannot be retried.",
+            )
+        } catch (_: Exception) {
+            if (postAttempted && !finishAttempted) {
+                finishAttempted = true
+                try {
+                    wallet.finishAccountPresentation(pending, PresentationDeliveryOutcome.AMBIGUOUS)
+                    ambiguousFinishSucceeded = true
+                } catch (_: Exception) {
+                    // A terminal write may have committed despite the exception; do not retry it.
+                }
+            }
+            val retryAvailable = !postAttempted || ambiguousFinishSucceeded
+            return RecoveryRetryResult(
+                accepted = false,
+                retryAvailable = retryAvailable,
+                message = if (retryAvailable && postAttempted) {
+                    "Delivery could not be confirmed. The exact saved presentation remains available; retry only by choosing the button again."
+                } else {
+                    "Delivery could not be safely confirmed. Check the relying party before taking further action."
+                },
+            )
+        } finally {
+            response?.close()
+            submission?.close()
+        }
+    }
+
+    private data class RecoveryRetryResult(
+        val accepted: Boolean,
+        val retryAvailable: Boolean,
+        val message: String,
+    )
 
     private fun showNativeConsent(transaction: WalletLoginTransactionUrl, identity: WalletLoginIdentity, consent: NativeDisclosureReview) {
         val review = consent.review

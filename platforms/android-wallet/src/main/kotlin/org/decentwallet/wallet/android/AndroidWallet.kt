@@ -1532,6 +1532,18 @@ class WalletSession internal constructor(
         pending, outcome, statusCode, contentType, responseBody, System.currentTimeMillis() / 1000,
     )
 
+    /** True when HTTP acceptance was observed but its receipt could not be verified. */
+    fun isAccountPresentationAcceptanceUncertain(pending: PendingAccountApproval): Boolean = synchronized(this) {
+        ensureUnlocked()
+        val record = pendingApprovalRecord(checkNotNull(walletPayload)) ?: return@synchronized false
+        val approval = parsePendingAccountApproval(record)
+        if (approval.handle != pending.handle || approval.expiresAtEpochSeconds != pending.expiresAtEpochSeconds ||
+            approval.approvedAtEpochSeconds != pending.approvedAtEpochSeconds
+        ) throw WalletDisclosureRequestException()
+        val presentation = record["presentation"] as? Map<*, *> ?: return@synchronized false
+        presentation["state"] == "acceptance_uncertain"
+    }
+
     internal fun finishAccountPresentationAt(
         pending: PendingAccountApproval,
         outcome: PresentationDeliveryOutcome,
@@ -1549,7 +1561,7 @@ class WalletSession internal constructor(
             throw WalletInvalidContainerException()
         }
         clearExpiredPendingApproval(nowEpochSeconds)
-        val payload = checkNotNull(walletPayload)
+        var payload = checkNotNull(walletPayload)
         val record = pendingApprovalRecord(payload) ?: throw WalletDisclosureRequestException()
         val approval = parsePendingAccountApproval(record)
         if (approval.handle != pending.handle || approval.expiresAtEpochSeconds != pending.expiresAtEpochSeconds ||
@@ -1570,12 +1582,29 @@ class WalletSession internal constructor(
         if (submissionExpiry <= nowEpochSeconds) throw WalletDisclosureRequestException()
 
         if (outcome == PresentationDeliveryOutcome.ACCEPTED) {
-            if (statusCode != 200 || !isJsonMediaType(contentType) || responseBody == null ||
-                responseBody.isEmpty() || responseBody.size > MAX_DIRECT_POST_RESPONSE_BYTES
-            ) throw WalletDisclosureRequestException()
-            val responseSnapshot = responseBody.copyOf()
-            try { validateDirectPostAcceptance(responseSnapshot, record) }
-            finally { responseSnapshot.fill(0) }
+            if (statusCode != 200) throw WalletDisclosureRequestException()
+            val receiptFailure = try {
+                if (!isJsonMediaType(contentType) || responseBody == null ||
+                    responseBody.isEmpty() || responseBody.size > MAX_DIRECT_POST_RESPONSE_BYTES
+                ) throw WalletDisclosureRequestException()
+                val responseSnapshot = responseBody.copyOf()
+                try { validateDirectPostAcceptance(responseSnapshot, record) }
+                finally { responseSnapshot.fill(0) }
+                null
+            } catch (failure: WalletDisclosureRequestException) {
+                failure
+            }
+            // Persist non-retryability before any terminal cleanup. Even if the
+            // following consumption write fails, a verified 200 cannot reopen as retryable.
+            @Suppress("UNCHECKED_CAST")
+            val candidate = WalletJson.copyPayload(payload) as MutableMap<String, Any?>
+            val updated = candidate["pending_account_disclosure_approval"] as MutableMap<String, Any?>
+            val updatedPresentation = (updated["presentation"] as Map<*, *>).toMutableMap()
+            updatedPresentation["state"] = "acceptance_uncertain"
+            updated["presentation"] = updatedPresentation
+            persistPayloadCandidate(candidate)
+            payload = checkNotNull(walletPayload)
+            receiptFailure?.let { throw it }
         } else if (statusCode != null || contentType != null || responseBody != null) {
             throw WalletDisclosureRequestException()
         }
@@ -1931,7 +1960,7 @@ private fun parsePendingAccountApproval(value: Any?): PendingAccountApproval {
         if (presentation.keys != setOf("state", "submission")) throw WalletDisclosureRequestException()
         when (presentation["state"]) {
             "approved" -> if (presentation["submission"] != null) throw WalletDisclosureRequestException()
-            "prepared", "ambiguous" -> {
+            "prepared", "ambiguous", "acceptance_uncertain" -> {
                 val submission = presentation["submission"] as? Map<*, *> ?: throw WalletDisclosureRequestException()
                 if (submission.keys != setOf("client_id", "response_uri", "state", "presentation_jws", "body", "expires_at") ||
                     submission["client_id"] !is String || submission["response_uri"] !is String || submission["state"] !is String ||
