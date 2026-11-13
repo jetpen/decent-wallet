@@ -33,6 +33,12 @@ android {
     }
     kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_1_8) } }
     testOptions { animationsDisabled = true }
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDir(rootProject.file("tests/vectors/native-continuation"))
+            assets.srcDir(rootProject.file("tests/vectors/wallet-account-disclosure-v1/vectors"))
+        }
+    }
     packaging {
         resources {
             excludes += "META-INF/INDEX.LIST"
@@ -55,6 +61,7 @@ dependencies {
     androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     androidTestImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
     androidTestImplementation("junit:junit:4.13.2")
+    androidTestImplementation("org.bouncycastle:bcpkix-jdk18on:1.86")
 }
 
 dependencyLocking { lockAllConfigurations() }
