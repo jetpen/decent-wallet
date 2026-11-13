@@ -72,7 +72,22 @@ class NativeDisclosureActivityInstrumentedTest {
         runNativeSignup(bindingTransactionMismatch = false, exerciseRecovery = true)
     }
 
-    private fun runNativeSignup(bindingTransactionMismatch: Boolean, exerciseRecovery: Boolean = false) {
+    @Test
+    fun definitiveRetryResponseConsumesSavedPresentation() {
+        runNativeSignup(bindingTransactionMismatch = false, exerciseRecovery = true, definitiveRetry = true)
+    }
+
+    @Test
+    fun acceptanceFinalizationFailureDoesNotInviteAnotherRetry() {
+        runNativeSignup(bindingTransactionMismatch = false, exerciseRecovery = true, finalizationFailure = true)
+    }
+
+    private fun runNativeSignup(
+        bindingTransactionMismatch: Boolean,
+        exerciseRecovery: Boolean = false,
+        definitiveRetry: Boolean = false,
+        finalizationFailure: Boolean = false,
+    ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val walletFile = File(context.cacheDir, "wallet-native-activity-${UUID.randomUUID()}.wallet")
@@ -174,7 +189,9 @@ class NativeDisclosureActivityInstrumentedTest {
                         DebugWalletLoginApplication.clear()
                         DebugWalletLoginApplication.install(WalletLoginIdentity(session, identityId), activeFixture.trust)
                         activeFixture.enqueueAmbiguousRetry()
-                        activeFixture.enqueueAcceptedRetry()
+                        if (definitiveRetry) activeFixture.enqueueDefinitiveRetry()
+                        else if (finalizationFailure) activeFixture.enqueueUnverifiableAcceptanceRetry()
+                        else activeFixture.enqueueAcceptedRetry()
                         ActivityScenario.launch<WalletLoginActivity>(intent(context, activeFixture.transactionPath)).use { reopened ->
                             waitUntil(reopened) { texts ->
                                 texts.any { it.contains("Delivery may be ambiguous") } &&
@@ -199,35 +216,54 @@ class NativeDisclosureActivityInstrumentedTest {
                             reopened.onActivity { activity ->
                                 WalletLoginTestViews.button(activity.window.decorView, "Retry saved presentation").performClick()
                             }
-                            val acceptedRetry = request(activeFixture.server)
-                            assertEquals("POST", acceptedRetry.method)
-                            assertEquals(activeFixture.responsePath, acceptedRetry.path)
-                            val acceptedRetryBody = acceptedRetry.body.readByteArray()
-                            try { assertTrue("second retry changed the persisted submission bytes", preparedBody.contentEquals(acceptedRetryBody)) }
-                            finally { acceptedRetryBody.fill(0) }
-                            waitUntil(reopened) { texts -> texts.any { it.contains("verified acceptance") } }
-                            assertEquals("each explicit owner action must produce only one retry", 8, activeFixture.server.requestCount)
-                            assertEquals(null, session.recoverPendingAccountApproval())
-                            assertNoRequest(activeFixture.server)
-                        }
-                        scenario.close()
-                        activeFixture.enqueueNormalLoginRelaunch()
-                        ActivityScenario.launch<WalletLoginActivity>(intent(context, activeFixture.transactionPath)).use { relaunched ->
-                            waitUntil(relaunched) { texts -> texts.any { it == "Wallet login request" } }
-                            val relaunchRequests = mutableListOf<RecordedRequest>()
-                            val quietDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-                            while (System.nanoTime() < quietDeadline) {
-                                val next = activeFixture.server.takeRequest(250, TimeUnit.MILLISECONDS) ?: break
-                                relaunchRequests += next
+                            val terminalRetry = request(activeFixture.server)
+                            assertEquals("POST", terminalRetry.method)
+                            assertEquals(activeFixture.responsePath, terminalRetry.path)
+                            val terminalRetryBody = terminalRetry.body.readByteArray()
+                            try { assertTrue("terminal retry changed the persisted submission bytes", preparedBody.contentEquals(terminalRetryBody)) }
+                            finally { terminalRetryBody.fill(0) }
+                            if (definitiveRetry) {
+                                waitUntil(reopened) { texts -> texts.any { it.contains("rejected the presentation") } }
+                                reopened.onActivity { activity ->
+                                    assertTrue("definitive response left retry enabled", !WalletLoginTestViews.button(activity.window.decorView, "Retry saved presentation").isEnabled)
+                                }
+                                assertEquals(null, session.recoverPendingAccountApproval())
+                                assertEquals("each explicit owner action must produce only one retry", 8, activeFixture.server.requestCount)
+                                assertNoRequest(activeFixture.server)
+                            } else if (finalizationFailure) {
+                                waitUntil(reopened) { texts -> texts.any { it.contains("could not be safely confirmed") } }
+                                reopened.onActivity { activity ->
+                                    assertTrue("unknown finalization outcome left retry enabled", !WalletLoginTestViews.button(activity.window.decorView, "Retry saved presentation").isEnabled)
+                                }
+                                assertEquals("one owner tap must make one retry", 8, activeFixture.server.requestCount)
+                                assertNoRequest(activeFixture.server)
+                            } else {
+                                waitUntil(reopened) { texts -> texts.any { it.contains("verified acceptance") } }
+                                assertEquals("each explicit owner action must produce only one retry", 8, activeFixture.server.requestCount)
+                                assertEquals(null, session.recoverPendingAccountApproval())
+                                assertNoRequest(activeFixture.server)
                             }
-                            assertTrue("consumed state should allow the current transaction flow to start", relaunchRequests.any {
-                                it.method == "GET" && it.path == "${activeFixture.transactionPath}/disclosure-context"
-                            })
-                            assertTrue("current login-only flow should fetch only its challenge", relaunchRequests.any {
-                                it.method == "GET" && it.path == activeFixture.transactionPath
-                            })
-                            assertTrue("consumed presentation was replayed after relaunch", relaunchRequests.all { it.method == "GET" })
-                            assertEquals(null, session.recoverPendingAccountApproval())
+                        }
+                        if (!finalizationFailure) {
+                            scenario.close()
+                            activeFixture.enqueueNormalLoginRelaunch()
+                            ActivityScenario.launch<WalletLoginActivity>(intent(context, activeFixture.transactionPath)).use { relaunched ->
+                                waitUntil(relaunched) { texts -> texts.any { it == "Wallet login request" } }
+                                val relaunchRequests = mutableListOf<RecordedRequest>()
+                                val quietDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                                while (System.nanoTime() < quietDeadline) {
+                                    val next = activeFixture.server.takeRequest(250, TimeUnit.MILLISECONDS) ?: break
+                                    relaunchRequests += next
+                                }
+                                assertTrue("consumed state should allow the current transaction flow to start", relaunchRequests.any {
+                                    it.method == "GET" && it.path == "${activeFixture.transactionPath}/disclosure-context"
+                                })
+                                assertTrue("current login-only flow should fetch only its challenge", relaunchRequests.any {
+                                    it.method == "GET" && it.path == activeFixture.transactionPath
+                                })
+                                assertTrue("consumed presentation was replayed after relaunch", relaunchRequests.all { it.method == "GET" })
+                                assertEquals(null, session.recoverPendingAccountApproval())
+                            }
                         }
                     } finally {
                         preparedBody.fill(0)
@@ -473,6 +509,14 @@ class NativeDisclosureActivityInstrumentedTest {
 
         fun enqueueAmbiguousRetry() {
             server.enqueue(response(503, "{}", "application/json"))
+        }
+
+        fun enqueueDefinitiveRetry() {
+            server.enqueue(response(400, "{}", "application/json"))
+        }
+
+        fun enqueueUnverifiableAcceptanceRetry() {
+            server.enqueue(response(200, "{}", "application/json"))
         }
 
         fun enqueueAcceptedRetry() {

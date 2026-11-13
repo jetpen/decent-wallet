@@ -126,12 +126,8 @@ class WalletLoginActivity : Activity() {
                 main.post {
                     if (isFinishing || isDestroyed) return@post
                     status.text = result.message
-                    if (result.accepted) {
-                        terminal = true
-                        retry.isEnabled = false
-                    } else {
-                        retry.isEnabled = true
-                    }
+                    retry.isEnabled = result.retryAvailable
+                    if (result.accepted || !result.retryAvailable) terminal = true
                 }
             }
         }
@@ -147,6 +143,8 @@ class WalletLoginActivity : Activity() {
         var submission: AccountPresentationSubmission? = null
         var response: PresentationHttpResult? = null
         var postAttempted = false
+        var finishAttempted = false
+        var ambiguousFinishSucceeded = false
         try {
             if (!wallet.isUnlocked) throw IllegalStateException()
             submission = wallet.getAccountPresentationRetry(pending, trust.relyingPartyRegistration)
@@ -165,9 +163,9 @@ class WalletLoginActivity : Activity() {
             }
 
             val result = checkNotNull(response)
-            if (result.statusCode == 200 && result.contentType?.substringBefore(';')?.trim()
-                    .equals("application/json", ignoreCase = true)
-            ) {
+            val mediaType = result.contentType?.substringBefore(';')?.trim()
+            if (result.statusCode == 200 && mediaType.equals("application/json", ignoreCase = true)) {
+                finishAttempted = true
                 try {
                     wallet.finishAccountPresentation(
                         pending,
@@ -176,27 +174,69 @@ class WalletLoginActivity : Activity() {
                         result.contentType,
                         result.body,
                     )
-                    return RecoveryRetryResult(true, "The relying party verified acceptance. The saved presentation was consumed.")
+                    return RecoveryRetryResult(
+                        accepted = true,
+                        retryAvailable = false,
+                        message = "The relying party verified acceptance. The saved presentation was consumed.",
+                    )
                 } catch (_: Exception) {
-                    // A response core cannot verify is not an acceptance; retain exact bytes.
-                    wallet.finishAccountPresentation(pending, PresentationDeliveryOutcome.AMBIGUOUS)
-                    return RecoveryRetryResult(false, "Acceptance could not be verified. The saved presentation remains available for an explicit retry.")
+                    // The transition may have committed before throwing. Never issue a second
+                    // terminal transition or invite a retry with an unknown durable outcome.
+                    return RecoveryRetryResult(
+                        accepted = false,
+                        retryAvailable = false,
+                        message = "Acceptance could not be safely confirmed. Check the relying party before taking further action.",
+                    )
                 }
             }
-            wallet.finishAccountPresentation(pending, PresentationDeliveryOutcome.AMBIGUOUS)
-            return RecoveryRetryResult(false, "Delivery remains ambiguous. The exact saved presentation is unchanged; retry only by choosing the button again.")
-        } catch (_: Exception) {
-            if (postAttempted) {
-                try { wallet.finishAccountPresentation(pending, PresentationDeliveryOutcome.AMBIGUOUS) } catch (_: Exception) { }
+
+            finishAttempted = true
+            if (result.statusCode >= 500) {
+                wallet.finishAccountPresentation(pending, PresentationDeliveryOutcome.AMBIGUOUS)
+                ambiguousFinishSucceeded = true
+                return RecoveryRetryResult(
+                    accepted = false,
+                    retryAvailable = true,
+                    message = "Delivery remains ambiguous. The exact saved presentation is unchanged; retry only by choosing the button again.",
+                )
             }
-            return RecoveryRetryResult(false, "Delivery could not be confirmed. No automatic retry was made; choose the button to try again.")
+            wallet.finishAccountPresentation(pending, PresentationDeliveryOutcome.DEFINITIVE_FAILURE)
+            return RecoveryRetryResult(
+                accepted = false,
+                retryAvailable = false,
+                message = "The relying party rejected the presentation. The saved request was consumed and cannot be retried.",
+            )
+        } catch (_: Exception) {
+            if (postAttempted && !finishAttempted) {
+                finishAttempted = true
+                try {
+                    wallet.finishAccountPresentation(pending, PresentationDeliveryOutcome.AMBIGUOUS)
+                    ambiguousFinishSucceeded = true
+                } catch (_: Exception) {
+                    // A terminal write may have committed despite the exception; do not retry it.
+                }
+            }
+            val retryAvailable = !postAttempted || ambiguousFinishSucceeded
+            return RecoveryRetryResult(
+                accepted = false,
+                retryAvailable = retryAvailable,
+                message = if (retryAvailable && postAttempted) {
+                    "Delivery could not be confirmed. The exact saved presentation remains available; retry only by choosing the button again."
+                } else {
+                    "Delivery could not be safely confirmed. Check the relying party before taking further action."
+                },
+            )
         } finally {
             response?.close()
             submission?.close()
         }
     }
 
-    private data class RecoveryRetryResult(val accepted: Boolean, val message: String)
+    private data class RecoveryRetryResult(
+        val accepted: Boolean,
+        val retryAvailable: Boolean,
+        val message: String,
+    )
 
     private fun showNativeConsent(transaction: WalletLoginTransactionUrl, identity: WalletLoginIdentity, consent: NativeDisclosureReview) {
         val review = consent.review
