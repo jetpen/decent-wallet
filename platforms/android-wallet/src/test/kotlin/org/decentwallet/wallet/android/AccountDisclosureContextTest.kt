@@ -134,6 +134,46 @@ class AccountDisclosureContextTest {
     }
 
     @Test
+    fun nativeOptInContextRequiresLiteralTrueAndBrowserContextRemainsAccepted() {
+        val root = readVector("valid-signup.json")
+        val context = LinkedHashMap(root["keycloak_context"] as Map<*, *>)
+        val handle = root["transaction_handle"] as String
+        val now = (root["validation_time"] as java.math.BigInteger).longValueExact()
+        val directory = Files.createTempDirectory("wallet-android-native-context-")
+        val password = "a sufficiently long test password"
+        val wallet = AndroidWallet.createWithGeneratedKey(directory.resolve("wallet.dw"), password, password)
+        try {
+            wallet.setMasterAccountEntity(entity)
+            val browserContext = WalletJson.canonicalBytes(context)
+            assertEquals(false, wallet.reviewAccountDisclosureAt(browserContext, handle, issuer, identityId, now)
+                .nativeContinuationEnabled)
+
+            context["decent_native_continuation"] = true
+            val nativeContext = WalletJson.canonicalBytes(context)
+            assertEquals(true, wallet.reviewAccountDisclosureAt(nativeContext, handle, issuer, identityId, now)
+                .nativeContinuationEnabled)
+
+            for (invalidMarker in listOf(false, null, "true", 1)) {
+                context["decent_native_continuation"] = invalidMarker
+                assertThrows(WalletDisclosureRequestException::class.java) {
+                    wallet.reviewAccountDisclosureAt(WalletJson.canonicalBytes(context), handle, issuer, identityId, now)
+                }
+            }
+            context.remove("decent_native_continuation")
+            context["action"] = "login"
+            context["decent_native_continuation"] = true
+            assertThrows(WalletDisclosureRequestException::class.java) {
+                wallet.reviewAccountDisclosureAt(WalletJson.canonicalBytes(context), handle, issuer, identityId, now)
+            }
+            browserContext.fill(0)
+            nativeContext.fill(0)
+        } finally {
+            wallet.close()
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    @Test
     fun requiredMissingOrMalformedEntityValuesRejectAndOptionalMissingIsUnavailable() {
         val root = readVector("valid-signup.json")
         val context = root["keycloak_context"] as Map<*, *>

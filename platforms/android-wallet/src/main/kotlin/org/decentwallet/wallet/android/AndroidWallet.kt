@@ -5,6 +5,7 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.security.SecureRandom
+import java.security.MessageDigest
 import java.util.Base64
 
 object AndroidWallet {
@@ -776,6 +777,15 @@ class WalletSession internal constructor(
         rawContext, transactionHandle, expectedKeycloakIssuer, identityId, System.currentTimeMillis() / 1000,
     )
 
+    /** Persists an explicit claim selection after affirmative owner consent. */
+    fun approveAccountDisclosure(
+        review: AccountDisclosureReview,
+        approvedClaimIds: Set<String>,
+        consent: (AccountDisclosureReview) -> Boolean,
+    ): PendingAccountApproval = approveAccountDisclosureAt(
+        review, approvedClaimIds, System.currentTimeMillis() / 1000, consent = consent,
+    )
+
     internal fun reviewAccountDisclosureAt(
         rawContext: ByteArray,
         transactionHandle: String,
@@ -831,6 +841,7 @@ class WalletSession internal constructor(
                     context.keycloakIssuer, context.rpClientId, context.rpDisplayName,
                     context.rpOrigin, context.action, context.requestId, context.transactionId,
                     context.oidcNonce, context.purpose, claims, identityId, context.expiresAtEpochSeconds,
+                    context.nativeContinuationEnabled,
                 ).also { latestDisclosureReview = it }
             } catch (failure: WalletDisclosureRequestException) {
                 throw failure
@@ -1144,6 +1155,36 @@ class WalletSession internal constructor(
         currentTimeEpochSeconds = { System.currentTimeMillis() / 1000 },
     )
 
+    /**
+     * Native-friendly overload: extracts the untrusted binding from the Request Object inside the
+     * wallet, then delegates to the same signature, context, hash, and presentation verification path.
+     */
+    fun prepareAccountPresentation(
+        pending: PendingAccountApproval,
+        issuerJwks: Map<*, *>,
+        outerAuthorizationParameters: Map<*, *>,
+        requestObjectJws: String,
+        registration: TrustedWalletRelyingPartyRegistration,
+    ): AccountPresentationSubmission {
+        val embeddedBinding = try {
+            WalletOid4vpRequestVerifier.extractUntrustedOwnerKeyBinding(requestObjectJws)
+        } catch (_: Exception) {
+            // Malformed/missing binding is a failed continuation and burns this approval, like any
+            // authenticated context mismatch reached by the full verifier below.
+            try {
+                cancelAccountDisclosureApproval(pending)
+            } catch (failure: WalletContainerException) {
+                throw failure
+            } catch (_: Exception) {
+                throw WalletDisclosureRequestException()
+            }
+            throw WalletDisclosureRequestException()
+        }
+        return prepareAccountPresentation(
+            pending, embeddedBinding, issuerJwks, outerAuthorizationParameters, requestObjectJws, registration,
+        )
+    }
+
     internal fun prepareAccountPresentationAt(
         pending: PendingAccountApproval,
         ownerKeyBindingJws: String,
@@ -1198,11 +1239,34 @@ class WalletSession internal constructor(
                         is Int -> expiry.toLong()
                         else -> throw WalletDisclosureRequestException()
                     },
+                    nativeContinuationEnabled = review["native_continuation_enabled"] == true,
                 )
                 val binding = WalletOwnerKeyBindingVerifier.verify(
                     ownerKeyBindingJws, issuerJwks, context, review["identity_id"] as String, nowEpochSeconds,
                 )
-                if (record["proof_challenge"] != binding.oidcNonce || binding.oidcNonce != context.oidcNonce) {
+                val nativeCapability = record["native_continuation"] as? Map<*, *>
+                if (context.nativeContinuationEnabled) {
+                    val capability = nativeCapability?.get("capability") as? ByteArray
+                        ?: throw WalletDisclosureRequestException()
+                    val capabilityExpiry = when (val expiry = nativeCapability["expires_at"]) {
+                        is BigInteger -> expiry.toLong()
+                        is Long -> expiry
+                        is Int -> expiry.toLong()
+                        else -> throw WalletDisclosureRequestException()
+                    }
+                    val digest = MessageDigest.getInstance("SHA-256").digest(capability)
+                    val expectedHash = Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+                    digest.fill(0)
+                    if (capabilityExpiry <= nowEpochSeconds ||
+                        !MessageDigest.isEqual(
+                            expectedHash.toByteArray(StandardCharsets.US_ASCII),
+                            (binding.continuationCapabilityHash ?: "").toByteArray(StandardCharsets.US_ASCII),
+                        )
+                    ) throw WalletDisclosureRequestException()
+                } else if (nativeCapability != null || binding.continuationCapabilityHash != null) {
+                    throw WalletDisclosureRequestException()
+                }
+                if (binding.oidcNonce != context.oidcNonce) {
                     throw WalletDisclosureRequestException()
                 }
                 val keyPair = requireActiveKeyPair(payload)
@@ -1245,6 +1309,14 @@ class WalletSession internal constructor(
                         approval.expiresAtEpochSeconds,
                         binding.expiresAtEpochSeconds,
                         request.expiresAtEpochSeconds,
+                        nativeCapability?.let { native ->
+                            when (val expiry = native["expires_at"]) {
+                                is BigInteger -> expiry.toLong()
+                                is Long -> expiry
+                                is Int -> expiry.toLong()
+                                else -> throw WalletDisclosureRequestException()
+                            }
+                        } ?: Long.MAX_VALUE,
                         nowEpochSeconds + 300,
                     )
                     if (expiry <= nowEpochSeconds) throw WalletDisclosureRequestException()
@@ -1612,6 +1684,7 @@ class WalletSession internal constructor(
             "purpose" to review.purpose,
             "identity_id" to review.identityId,
             "request_expires_at" to review.expiresAtEpochSeconds,
+            "native_continuation_enabled" to review.nativeContinuationEnabled,
             "claims" to review.claims.map { mapOf("id" to it.id, "required" to it.required) },
             "selected_claim_ids" to selected.sorted(),
             "selected_claims" to review.claims.filter { it.id in selected }.map {
@@ -1906,14 +1979,16 @@ private fun parsePendingAccountApproval(value: Any?): PendingAccountApproval {
         challengeBytes.fill(0)
     }
     val review = record["review"] as? Map<*, *> ?: throw WalletDisclosureRequestException()
-    val reviewKeys = setOf(
+    val baseReviewKeys = setOf(
         "keycloak_issuer", "rp_client_id", "rp_display_name", "rp_origin", "action", "request_id",
         "transaction_id", "oidc_nonce", "purpose", "identity_id", "request_expires_at", "claims",
         "selected_claim_ids", "selected_claims",
     )
-    val stringFields = reviewKeys - setOf("request_expires_at", "claims", "selected_claim_ids", "selected_claims")
+    val reviewKeys: Set<String> = baseReviewKeys + if ("native_continuation_enabled" in review) setOf("native_continuation_enabled") else emptySet()
+    val stringFields = reviewKeys - setOf("request_expires_at", "claims", "selected_claim_ids", "selected_claims", "native_continuation_enabled")
     if (review.keys != reviewKeys || stringFields.any { review[it] !is String } ||
-        review["action"] !in setOf("signup", "signup_recovery")
+        review["action"] !in setOf("signup", "signup_recovery") ||
+        ("native_continuation_enabled" in review && review["native_continuation_enabled"] !is Boolean)
     ) throw WalletDisclosureRequestException()
     val requestExpiry = exactLong(review["request_expires_at"])
     if (approvedAt < 1 || approvedAt > Long.MAX_VALUE - 300 ||

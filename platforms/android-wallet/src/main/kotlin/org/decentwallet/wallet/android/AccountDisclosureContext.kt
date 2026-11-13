@@ -41,6 +41,7 @@ class AccountDisclosureReview internal constructor(
     claims: List<AccountDisclosureClaimReview>,
     val identityId: String,
     val expiresAtEpochSeconds: Long,
+    val nativeContinuationEnabled: Boolean = false,
 ) {
     val claims: List<AccountDisclosureClaimReview> = Collections.unmodifiableList(ArrayList(claims))
 
@@ -127,6 +128,7 @@ internal class WalletAccountDisclosureContext(
     val purpose: String,
     val claims: List<RequestedAccountClaim>,
     val expiresAtEpochSeconds: Long,
+    val nativeContinuationEnabled: Boolean = false,
 )
 
 internal object WalletAccountDisclosureContextParser {
@@ -138,6 +140,7 @@ internal object WalletAccountDisclosureContextParser {
         "profile", "keycloak_issuer", "rp_client_id", "rp_display_name", "rp_origin",
         "action", "request_id", "transaction_id", "oidc_nonce", "purpose", "claims", "expires_at",
     )
+    private val nativeContextKeys = contextKeys + "decent_native_continuation"
     private val claimKeys = setOf("id", "required")
     private val allowedClaims = setOf("given_name", "family_name", "email", "phone", "locale")
     private val bidiControls = setOf(0x061C, 0x200E, 0x200F) + (0x202A..0x202E) + (0x2066..0x2069)
@@ -153,7 +156,14 @@ internal object WalletAccountDisclosureContextParser {
         try {
             if (raw.isEmpty() || raw.size > MAX_CONTEXT_BYTES || nowEpochSeconds < 1) reject()
             val parsed = WalletJson.parse(raw, MAX_CONTEXT_BYTES) as? Map<*, *> ?: reject()
-            if (parsed.keys != contextKeys) reject()
+            val nativeContinuationEnabled = when (parsed.keys) {
+                contextKeys -> false
+                nativeContextKeys -> {
+                    if (parsed["decent_native_continuation"] != true) reject()
+                    true
+                }
+                else -> reject()
+            }
             if (parsed["profile"] != PROFILE) reject()
 
             val issuer = text(parsed["keycloak_issuer"], 2048)
@@ -192,7 +202,7 @@ internal object WalletAccountDisclosureContextParser {
 
             return WalletAccountDisclosureContext(
                 issuer, clientId, displayName, origin, action, requestId, transactionId,
-                nonce, purpose, Collections.unmodifiableList(claims), expiresAt,
+                nonce, purpose, Collections.unmodifiableList(claims), expiresAt, nativeContinuationEnabled,
             )
         } catch (failure: WalletDisclosureRequestException) {
             throw failure

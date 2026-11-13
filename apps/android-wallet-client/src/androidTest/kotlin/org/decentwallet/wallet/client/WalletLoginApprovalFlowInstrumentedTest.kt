@@ -42,6 +42,9 @@ class WalletLoginApprovalFlowInstrumentedTest {
             fixture.start()
             DebugWalletLoginApplication.install(WalletLoginIdentity(session, identityId))
             ActivityScenario.launch<WalletLoginActivity>(intent(context)).use { scenario ->
+                val contextGet = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
+                assertEquals("GET", contextGet.method)
+                assertEquals("$path/disclosure-context", contextGet.path)
                 val get = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
                 assertEquals("GET", get.method)
                 assertEquals(path, get.path)
@@ -50,7 +53,7 @@ class WalletLoginApprovalFlowInstrumentedTest {
                 val post = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
                 assertEquals("POST", post.method)
                 assertEquals(path, post.path)
-                assertEquals(2, fixture.server.requestCount)
+                assertEquals(3, fixture.server.requestCount)
                 val body = post.body.readByteArray()
                 try {
                     val parsed = org.json.JSONObject(String(body, Charsets.UTF_8))
@@ -84,6 +87,30 @@ class WalletLoginApprovalFlowInstrumentedTest {
 
     @Test fun cancellationSendsNoProof() = assertDecisionSendsNoProof("Cancel", "Wallet login cancelled")
 
+    @Test fun nativeContextWithoutHostTrustDoesNotDowngradeToLoginOrSendOutput() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val walletFile = File(context.cacheDir, "wallet-native-no-trust-${UUID.randomUUID()}.wallet")
+        val session = AndroidWallet.createWithGeneratedKey(walletFile.toPath(), walletPassword, walletPassword)
+        val fixture = ProviderFixture()
+        try {
+            fixture.start(nativeContext = true)
+            DebugWalletLoginApplication.install(WalletLoginIdentity(session, "test:native-no-trust"))
+            ActivityScenario.launch<WalletLoginActivity>(intent(context)).use { scenario ->
+                val request = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
+                assertEquals("GET", request.method)
+                assertEquals("$path/disclosure-context", request.path)
+                waitForText(scenario, "trusted")
+                assertEquals(1, fixture.server.requestCount)
+                assertNull("native request downgraded or submitted output", fixture.server.takeRequest(300, TimeUnit.MILLISECONDS))
+            }
+        } finally {
+            DebugWalletLoginApplication.clear()
+            session.close()
+            walletFile.delete()
+            fixture.close()
+        }
+    }
+
     private fun assertDecisionSendsNoProof(button: String, terminalText: String) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val walletFile = File(context.cacheDir, "wallet-login-${UUID.randomUUID()}.wallet")
@@ -93,13 +120,16 @@ class WalletLoginApprovalFlowInstrumentedTest {
             fixture.start()
             DebugWalletLoginApplication.install(WalletLoginIdentity(session, "test:activity-${UUID.randomUUID()}"))
             ActivityScenario.launch<WalletLoginActivity>(intent(context)).use { scenario ->
+                val contextGet = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
+                assertEquals("GET", contextGet.method)
+                assertEquals("$path/disclosure-context", contextGet.path)
                 val get = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
                 assertEquals("GET", get.method)
                 assertEquals(path, get.path)
                 waitForConsent(scenario, "test:activity-")
                 scenario.onActivity { activity -> WalletLoginTestViews.button(activity.window.decorView, button).performClick() }
                 waitForText(scenario, terminalText)
-                assertEquals("decision sent an unexpected request", 1, fixture.server.requestCount)
+                assertEquals("decision sent an unexpected request", 2, fixture.server.requestCount)
                 assertNull("decision sent a proof", fixture.server.takeRequest(300, TimeUnit.MILLISECONDS))
             }
         } finally {
@@ -141,7 +171,7 @@ class WalletLoginApprovalFlowInstrumentedTest {
     private inner class ProviderFixture : AutoCloseable {
         val server = MockWebServer()
 
-        fun start() {
+        fun start(nativeContext: Boolean = false) {
             val assets = InstrumentationRegistry.getInstrumentation().context.assets
             val certificate = assets.open("wallet_login_test_cert.pem").use {
                 CertificateFactory.getInstance("X.509").generateCertificate(it) as java.security.cert.X509Certificate
@@ -154,8 +184,15 @@ class WalletLoginApprovalFlowInstrumentedTest {
             val serverTls = HandshakeCertificates.Builder().heldCertificate(held).build()
             server.useHttps(serverTls.sslSocketFactory(), false)
             val challengeJson = """{"profile":"decent-wallet-login-v1","challenge":"$challenge","csrf_token":"fixture-only"}"""
-            server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(challengeJson))
-            server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+            if (nativeContext) {
+                server.enqueue(MockResponse().setResponseCode(200).setHeader("Cache-Control", "no-store")
+                    .setHeader("Referrer-Policy", "no-referrer").setHeader("Content-Type", "application/json")
+                    .setBody("""{"profile":"decent-account-disclosure-v1","keycloak_issuer":"https://issuer.example","decent_native_continuation":true}"""))
+            } else {
+                server.enqueue(MockResponse().setResponseCode(204).setHeader("Cache-Control", "no-store").setHeader("Referrer-Policy", "no-referrer"))
+                server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(challengeJson))
+                server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+            }
             server.start(8443)
         }
 
