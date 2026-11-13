@@ -63,6 +63,24 @@ class ApprovalAttemptGateTest {
         assertNull(outcome)
     }
 
+    @Test fun affirmativeConsentCannotBeReusedForASecondPromptOrProofPost() {
+        val gate = ApprovalAttemptGate()
+        val prompts = AtomicInteger(1)
+        val proofCreations = AtomicInteger()
+        val posts = AtomicInteger()
+        assertEquals("accepted", gate.approve(
+            createProof = { proofCreations.incrementAndGet(); "proof" },
+            submit = { posts.incrementAndGet(); "accepted" },
+        ))
+        assertNull(gate.approve(
+            createProof = { prompts.incrementAndGet(); proofCreations.incrementAndGet(); "proof-again" },
+            submit = { posts.incrementAndGet(); "accepted-again" },
+        ))
+        assertEquals(1, prompts.get())
+        assertEquals(1, proofCreations.get())
+        assertEquals(1, posts.get())
+    }
+
     @Test fun submissionDecisionAndCancellationAreMutuallyExclusive() {
         val gate = ApprovalAttemptGate()
         var submitted = false

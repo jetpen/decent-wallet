@@ -67,6 +67,21 @@ internal object WalletOid4vpRequestVerifier {
     private val p256GeneratorY = BigInteger("4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5", 16)
     private val p256Order = BigInteger("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551", 16)
 
+    /** Extracts an untrusted embedded binding only so WalletSession can feed it to the full verifier. */
+    fun extractUntrustedOwnerKeyBinding(requestObjectJws: String): String {
+        val compact = splitCompactJws(requestObjectJws)
+        return try {
+            val payload = parseJson(compact.payloadBytes) as? Map<*, *> ?: reject()
+            val extension = payload["decent_account"] as? Map<*, *> ?: reject()
+            (extension["owner_key_binding"] as? String)?.takeIf { it.isNotEmpty() } ?: reject()
+        } finally {
+            compact.headerBytes.fill(0)
+            compact.payloadBytes.fill(0)
+            compact.signatureBytes.fill(0)
+            compact.signingInput.fill(0)
+        }
+    }
+
     fun verify(
         outerAuthorizationParameters: Map<*, *>,
         requestObjectJws: String,

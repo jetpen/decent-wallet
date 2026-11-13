@@ -34,6 +34,67 @@ class AccountDisclosurePresentationTest {
     }
 
     @Test
+    fun publicWalletOwnedBindingAdapterAcceptsAdoptedValidRequestAndPreservesExplicitApi() {
+        val adoptedFixture = fixture(publicTimeRelative = true)
+        var submission: AccountPresentationSubmission? = null
+        try {
+            submission = adoptedFixture.wallet.prepareAccountPresentation(
+                adoptedFixture.pending, adoptedFixture.issuerJwks, adoptedFixture.outerRequest,
+                adoptedFixture.requestObject, adoptedFixture.registration,
+            )
+            assertEquals(adoptedFixture.expectedState, submission.state)
+            adoptedFixture.wallet.finishAccountPresentationAt(
+                adoptedFixture.pending, PresentationDeliveryOutcome.CANCELLED, nowEpochSeconds = adoptedFixture.now,
+            )
+            val second = fixture(publicTimeRelative = true)
+            try {
+                val explicitSubmission = second.wallet.prepareAccountPresentation(
+                    second.pending, second.bindingJws, second.issuerJwks, second.outerRequest,
+                    second.requestObject, second.registration,
+                )
+                try { assertEquals(second.expectedState, explicitSubmission.state) }
+                finally { explicitSubmission.close() }
+            } finally { second.close() }
+        } finally {
+            submission?.close()
+            adoptedFixture.close()
+        }
+    }
+
+    @Test
+    fun walletOwnedBindingAdapterRejectsMissingAndDuplicateEmbeddedFields() {
+        val malformedRequests = listOf(
+            compactRequestWithPayload("""{"decent_account":{}}"""),
+            compactRequestWithPayload("""{"decent_account":{"owner_key_binding":"not-a-jws"}}"""),
+            compactRequestWithPayload(
+                """{"decent_account":{"owner_key_binding":"one","owner_key_binding":"two"}}""",
+            ),
+        )
+        for (request in malformedRequests) {
+            val fixture = fixture(publicTimeRelative = true)
+            var reopened: WalletSession? = null
+            try {
+                val validAt = fixture.pending.approvedAtEpochSeconds
+                assertEquals(fixture.pending.handle, fixture.wallet.recoverPendingAccountApprovalAt(validAt)?.handle)
+                assertThrows(WalletDisclosureRequestException::class.java) {
+                    fixture.wallet.prepareAccountPresentation(
+                        fixture.pending, fixture.issuerJwks, fixture.outerRequest, request, fixture.registration,
+                    )
+                }
+                fixture.wallet.lock()
+                reopened = AndroidWallet.open(fixture.directory.resolve("wallet.dw"), TEST_PASSWORD)
+                assertEquals(null, reopened.recoverPendingAccountApprovalAt(validAt + 1))
+            } finally {
+                reopened?.close()
+                fixture.close()
+            }
+        }
+    }
+
+    private fun compactRequestWithPayload(payload: String): String =
+        "e30.${Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray(StandardCharsets.UTF_8))}.AA"
+
+    @Test
     fun expiredContinuationClearsDurableApprovalAndCannotBeUsedAfterReopen() {
         val fixture = fixture(requestExpiry = 1_800_000_006L)
         var reopened: WalletSession? = null
@@ -289,7 +350,10 @@ class AccountDisclosurePresentationTest {
 
     @Test
     fun preparesOwnerSignedCredentialAndPresentationAndPersistsExactSubmissionBeforeRelease() {
-        val fixture = fixture(reverseClaims = true)
+        val fixture = fixture(
+            reverseClaims = true,
+            proofChallenge = "UFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm8",
+        )
         try {
             val submission = fixture.wallet.prepareAccountPresentationAt(
                 fixture.pending, fixture.bindingJws, fixture.issuerJwks, fixture.outerRequest,
@@ -486,13 +550,19 @@ class AccountDisclosurePresentationTest {
         }
     }
 
-    private fun fixture(reverseClaims: Boolean = false, requestExpiry: Long? = null): Fixture {
+    private fun fixture(
+        reverseClaims: Boolean = false,
+        requestExpiry: Long? = null,
+        publicTimeRelative: Boolean = false,
+        proofChallenge: String? = null,
+    ): Fixture {
         val root = checkNotNull(javaClass.classLoader?.getResourceAsStream(
             "wallet-account-disclosure-v1/vectors/valid-signup.json",
         )).use { WalletJson.parse(it.readBytes(), 64 * 1024) as Map<*, *> }
-        val now = (root["validation_time"] as BigInteger).toLong()
+        val now = if (publicTimeRelative) System.currentTimeMillis() / 1000 else (root["validation_time"] as BigInteger).toLong()
         @Suppress("UNCHECKED_CAST")
         val context = WalletJson.copyPayload(root["keycloak_context"] as Map<*, *>) as MutableMap<String, Any?>
+        if (publicTimeRelative) context["expires_at"] = BigInteger.valueOf(now + 299)
         if (reverseClaims) context["claims"] = (context["claims"] as List<*>).reversed()
         val contextBytes = WalletJson.canonicalBytes(context)
         val identityId = "test:android-disclosure-presentation"
@@ -514,7 +584,7 @@ class AccountDisclosurePresentationTest {
                 review, selected, now, currentTimeEpochSeconds = { now },
             ) { true }
             wallet.createAccountLoginProofAt(
-                pending, context["oidc_nonce"] as String, now,
+                pending, proofChallenge ?: context["oidc_nonce"] as String, now,
                 currentTimeEpochSeconds = { now },
             )
             val (bindingJws, issuerJwks, ownerKeyThumbprint) = createBinding(context, ownerPublicKey, identityId, now)
@@ -528,7 +598,9 @@ class AccountDisclosurePresentationTest {
                 rpClientId = context["rp_client_id"] as String,
             )
             val (registration, requestToken) = rebindRequest(
-                root, registrationSeed, bindingJws, context, reverseClaims, requestExpiry,
+                root, registrationSeed, bindingJws, context, reverseClaims,
+                requestExpiry = requestExpiry ?: if (publicTimeRelative) now + 299 else null,
+                requestIssuedAt = if (publicTimeRelative) now else null,
             )
             val requestPayloadBytes = Base64.getUrlDecoder().decode(requestToken.split('.')[1])
             val requestPayload = try { WalletJson.parse(requestPayloadBytes, 64 * 1024) as Map<*, *> }
@@ -560,6 +632,7 @@ class AccountDisclosurePresentationTest {
         context: Map<*, *>,
         reverseClaims: Boolean,
         requestExpiry: Long?,
+        requestIssuedAt: Long? = null,
     ): Pair<TrustedWalletRelyingPartyRegistration, String> {
         val generator = KeyPairGenerator.getInstance("EC")
         generator.initialize(java.security.spec.ECGenParameterSpec("secp256r1"))
@@ -595,6 +668,7 @@ class AccountDisclosurePresentationTest {
         extension["transaction_id"] = context["transaction_id"]
         extension["purpose"] = context["purpose"]
         if (requestExpiry != null) payload["exp"] = BigInteger.valueOf(requestExpiry)
+        if (requestIssuedAt != null) payload["iat"] = BigInteger.valueOf(requestIssuedAt)
         extension["claims"] = context["claims"]
         if (reverseClaims) {
             @Suppress("UNCHECKED_CAST")

@@ -15,6 +15,32 @@ import java.util.concurrent.TimeUnit
 
 class AccountDisclosureApprovalTest {
     @Test
+    fun nativeOptInApprovalPersistsThroughPublicApprovalAndReopen() {
+        val testFixture = fixture(nativeContinuation = true)
+        try {
+            val selected = testFixture.review.claims.filter { it.required }.map { it.id }.toSet()
+            val pending = testFixture.wallet.approveAccountDisclosure(testFixture.review, selected) { true }
+            testFixture.wallet.lock()
+            val reopened = AndroidWallet.open(testFixture.path, testFixture.password)
+            try {
+                val payload = reopened.readPayload()
+                try {
+                    val approval = payload["pending_account_disclosure_approval"] as Map<*, *>
+                    val review = approval["review"] as Map<*, *>
+                    assertEquals(true, review["native_continuation_enabled"])
+                    assertEquals(pending.handle, approval["handle"])
+                } finally {
+                    WalletJson.clearByteArrays(payload)
+                }
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            testFixture.close()
+        }
+    }
+
+    @Test
     fun nativeContinuationCapabilityPersistsOnlyAfterProofAndRecoversRedactedAfterReopen() {
         val testFixture = fixture()
         try {
@@ -748,7 +774,7 @@ class AccountDisclosureApprovalTest {
         }
     }
 
-    private fun fixture(email: String = "ada@example.test"): Fixture {
+    private fun fixture(email: String = "ada@example.test", nativeContinuation: Boolean = false): Fixture {
         val bytes = checkNotNull(javaClass.classLoader?.getResourceAsStream(
             "wallet-account-disclosure-v1/vectors/valid-signup.json",
         )).use { it.readBytes() }
@@ -756,6 +782,7 @@ class AccountDisclosureApprovalTest {
         val context = LinkedHashMap(root["keycloak_context"] as Map<*, *>)
         val now = System.currentTimeMillis() / 1000
         context["expires_at"] = BigInteger.valueOf(now + 299)
+        if (nativeContinuation) context["decent_native_continuation"] = true
         val rawContext = WalletJson.canonicalBytes(context)
         val handle = root["transaction_handle"] as String
         val directory = Files.createTempDirectory("wallet-android-disclosure-approval-")

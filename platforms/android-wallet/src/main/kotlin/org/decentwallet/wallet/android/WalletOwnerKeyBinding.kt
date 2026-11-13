@@ -29,6 +29,7 @@ internal data class VerifiedOwnerKeyBinding(
     val expiresAtEpochSeconds: Long,
     val jti: String,
     val compactJwsSha256: String,
+    val continuationCapabilityHash: String?,
 )
 
 /** Verifies the Keycloak-signed owner-key binding after trusted HTTPS JWKS retrieval. */
@@ -39,7 +40,7 @@ internal object WalletOwnerKeyBindingVerifier {
     private const val MAX_ISSUER_JWKS_KEYS = 64
     private val base64UrlPattern = Regex("[A-Za-z0-9_-]+")
     private val headerKeys = setOf("alg", "typ", "kid")
-    private val payloadKeys = setOf(
+    private val basePayloadKeys = setOf(
         "v", "iss", "aud", "sub", "identity_id", "owner_key", "owner_key_thumbprint",
         "action", "transaction_id", "request_id", "oidc_nonce", "iat", "exp", "jti",
     )
@@ -84,7 +85,9 @@ internal object WalletOwnerKeyBindingVerifier {
             if (!verifier.verify(decodeSegment(signatureSegment))) reject()
 
             val payload = parseObject(decodeSegment(payloadSegment))
-            if (payload.keys != payloadKeys || payload["v"] != BigInteger.ONE) reject()
+            val native = pendingContext.nativeContinuationEnabled
+            val expectedPayloadKeys = if (native) basePayloadKeys + "continuation_capability_hash" else basePayloadKeys
+            if (payload.keys != expectedPayloadKeys || payload["v"] != BigInteger.ONE) reject()
             val owner = payload["owner_key"] as? Map<*, *> ?: reject()
             if (owner.keys != setOf("kty", "crv", "x") || owner["kty"] != "OKP" || owner["crv"] != "Ed25519") reject()
             val ownerX = requireText(owner["x"], 64)
@@ -131,6 +134,11 @@ internal object WalletOwnerKeyBindingVerifier {
                 expiresAtEpochSeconds = expiresAt,
                 jti = jti,
                 compactJwsSha256 = digest.joinToString("") { "%02x".format(it) },
+                continuationCapabilityHash = if (native) {
+                    val value = requireText(payload["continuation_capability_hash"], 64)
+                    decodeBase64Url(value, 64).also { if (it.size != 32) reject() }.fill(0)
+                    value
+                } else null,
             )
         } catch (failure: WalletDisclosureRequestException) {
             throw failure

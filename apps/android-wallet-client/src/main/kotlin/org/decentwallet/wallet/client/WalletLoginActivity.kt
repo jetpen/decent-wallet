@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -16,16 +17,20 @@ import java.util.concurrent.Executors
 /** Host boundary: supply only an already-unlocked wallet session and exact identity identifier. */
 interface WalletLoginHost {
     fun acquireWalletLoginIdentity(activity: Activity): WalletLoginIdentity?
+
+    /** Optional, statically configured trust. Never derive these anchors from provider responses. */
+    fun nativeDisclosureTrust(activity: Activity): NativeDisclosureTrustConfig? = null
 }
 
 data class WalletLoginIdentity(val session: WalletSession, val identityId: String)
 
-/** Wallet-login-only app-link consent UI. It does not handle account disclosure or browser callbacks. */
+/** Native login plus explicitly opted-in account-disclosure continuation UI. */
 class WalletLoginActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private var terminal = false
     private var approvalGate = ApprovalAttemptGate()
+    private var nativeGate: NativeDisclosureCancellationGate? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,15 +46,74 @@ class WalletLoginActivity : Activity() {
             showMessage("An already-unlocked wallet is required. No proof was sent.")
             return
         }
+        val host = application as? WalletLoginHost
+        val trust = try { host?.nativeDisclosureTrust(this) } catch (_: Exception) { null }
         worker.execute {
-            val challenge = try { NativeWalletLoginHttpClient(this).getChallenge(transaction) } catch (_: Exception) { null }
+            val start = try {
+                NativeDisclosureWorkflow(AndroidNativeDisclosureOperations(NativeDisclosureHttpClient(this), trust, NativeWalletLoginHttpClient(this)))
+                    .start(transaction, identity.session, identity.identityId, trust)
+            } catch (_: Exception) { null }
+            val challenge = if (start == NativeDisclosureStart.LoginOnly) {
+                try { NativeWalletLoginHttpClient(this).getChallenge(transaction) } catch (_: Exception) { null }
+            } else null
             main.post {
                 if (isFinishing || isDestroyed || terminal) return@post
-                if (challenge == null) showMessage("The provider request could not be verified. No proof was sent.")
-                else if (challenge.isExpiredAt(nowEpochSeconds())) showMessage("The wallet login request expired. No proof was sent.")
-                else showConsent(transaction, identity, challenge)
+                when {
+                    start == null -> showMessage("The provider request could not be verified or trusted. No proof was sent.")
+                    start is NativeDisclosureStart.Native -> showNativeConsent(transaction, identity, start.review)
+                    challenge == null -> showMessage("The provider request could not be verified. No proof was sent.")
+                    challenge.isExpiredAt(nowEpochSeconds()) -> showMessage("The wallet login request expired. No proof was sent.")
+                    else -> showConsent(transaction, identity, challenge)
+                }
             }
         }
+    }
+
+    private fun showNativeConsent(transaction: WalletLoginTransactionUrl, identity: WalletLoginIdentity, consent: NativeDisclosureReview) {
+        val review = consent.review
+        val layout = column()
+        addText(layout, "Account information request")
+        nativeDisclosureConsentLines(consent).forEach { addText(layout, it) }
+        val selected = linkedSetOf<String>()
+        val requiredValueUnavailable = review.claims.any { it.required && it.value == null }
+        review.claims.forEach { claim ->
+            if (claim.required) selected += claim.id
+            layout.addView(CheckBox(this).apply {
+                text = "Share ${claim.id}${if (claim.required) " (required)" else " (optional)"}"
+                isChecked = claim.required
+                isEnabled = !claim.required && claim.value != null
+                setOnCheckedChangeListener { _, checked -> if (checked) selected.add(claim.id) else selected.remove(claim.id) }
+            })
+        }
+        if (requiredValueUnavailable) addText(layout, "A required value is unavailable. Deny this request; partial approval is not allowed.")
+        val approve = Button(this).apply { text = "Approve account request"; isEnabled = !requiredValueUnavailable }
+        val deny = Button(this).apply { text = "Deny" }
+        val cancel = Button(this).apply { text = "Cancel" }
+        val buttons = listOf(approve, deny, cancel)
+        val gate = NativeDisclosureCancellationGate()
+        nativeGate = gate
+        approve.setOnClickListener {
+            if (terminal) return@setOnClickListener
+            buttons.forEach { it.isEnabled = false }
+            val selectedSnapshot = selected.toSet()
+            worker.execute {
+                val result = try {
+                    NativeDisclosureWorkflow(AndroidNativeDisclosureOperations(NativeDisclosureHttpClient(this), consent.trust, NativeWalletLoginHttpClient(this)))
+                        .approve(transaction, identity.session, identity.identityId, consent, selectedSnapshot,
+                            cancelled = gate::isCancelled, beginAttempt = gate::beginAttempt)
+                    "Account presentation submitted. Return to the original browser to continue."
+                } catch (_: Exception) { "Account request did not complete. Check the original browser; no retry was made." }
+                main.post {
+                    if (isFinishing || isDestroyed || gate.isCancelled()) return@post
+                    terminal = true
+                    showMessage(result)
+                }
+            }
+        }
+        deny.setOnClickListener { terminal = true; gate.cancel(); showMessage("Account request denied. No proof or presentation was sent.") }
+        cancel.setOnClickListener { terminal = true; gate.cancel(); showMessage("Account request cancelled. No proof or presentation was sent.") }
+        buttons.forEach(layout::addView)
+        install(layout)
     }
 
     private fun showConsent(
@@ -170,9 +234,11 @@ class WalletLoginActivity : Activity() {
 
     override fun onDestroy() {
         approvalGate.cancel()
+        nativeGate?.cancel()
         worker.shutdownNow()
         super.onDestroy()
     }
 
     private enum class ApprovalResult { SUBMITTED, EXPIRED, FAILED }
+
 }
