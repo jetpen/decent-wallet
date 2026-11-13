@@ -2206,7 +2206,10 @@ class Wallet:
                         raise AccountDisclosureError() from None
                     raise AccountDisclosureError()
                 return PendingAccountApproval(record["handle"], expiry)
-        except AccountDisclosureError:
+        except AccountDisclosureError as error:
+            # ``from None`` hides context in formatted tracebacks but leaves it
+            # reachable through ``__context__`` on the public exception object.
+            error.__context__ = None
             raise
         except WalletError:
             raise

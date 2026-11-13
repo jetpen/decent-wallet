@@ -914,3 +914,156 @@ def test_approval_fails_closed_when_context_expires_during_persistence(tmp_path,
     reopened = Wallet.open(tmp_path / "wallet.json", "correct horse battery")
     assert "pending_account_disclosure_v1" not in reopened._payload
     reopened.lock()
+
+
+def test_wallet_security_boundary_is_local_redacted_and_selection_scoped(tmp_path, monkeypatch, caplog, capsys, request):
+    """Security evidence checklist:
+    (a) one unchanged encrypted container plus its lock sidecar; no separate key,
+    envelope, entity file, media-type field, or network call from this wallet API path;
+    (b) safe DTO/error/repr/traceback/log/stdout/stderr and locked public reads;
+    (c) persist and independently verify only the approved claim value. This does not
+    qualify Keycloak, RP, external Storage/Registry, or device/runtime components.
+    """
+    import logging
+    import socket
+    import traceback
+
+    from decent_wallet import WalletLockedError, verify_account_presentation
+    from decent_wallet.account_disclosure import verify_owner_key_binding
+    from decent_wallet.oid4vp_request import verify_oid4vp_authorization_request
+
+    selected = "SECBOUND_SELECTED_" + "a" * 160
+    unselected = "SECBOUND_UNSELECTED_" + "b" * 160
+    unrequested = "SECBOUND_UNREQUESTED_" + "c" * 160
+    callback_marker = "SECBOUND_CALLBACK_EXCEPTION_" + "d" * 160
+    login = json.loads(LOGIN_VECTOR.read_text())
+    path = tmp_path / "boundary-wallet.json"
+    sessions = []
+
+    def track(session):
+        sessions.append(session)
+        return session
+
+    def close_sessions():
+        for session in sessions:
+            if session.is_unlocked:
+                session.lock()
+
+    request.addfinalizer(close_sessions)
+    wallet = track(Wallet._create_storage(
+        path, "correct horse battery", "correct horse battery",
+        {"private_seed": base64.urlsafe_b64decode(login["test_private_seed_b64url"] + "="),
+         "public_key": base64.urlsafe_b64decode(login["public_key_b64url"] + "=")},
+    ))
+    caplog.set_level(logging.DEBUG)
+    network_calls = []
+
+    def blocked_network(*args, **kwargs):
+        network_calls.append((args, kwargs))
+        raise AssertionError("wallet disclosure attempted external networking")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked_network)
+    monkeypatch.setattr(socket, "create_connection", blocked_network)
+    wallet.set_master_account_entity(
+        {"given_name": selected, "email": unselected, "other": unrequested}
+    )
+    context = context_for_handle()
+    review = wallet.review_account_disclosure(context, HANDLE, IDENTITY_ID)
+
+    def broken_consent(_review):
+        raise RuntimeError(callback_marker)
+
+    with pytest.raises(ValueError) as rejected:
+        wallet.approve_account_disclosure(review, [GIVEN], consent=broken_consent)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__context__ is None
+    error_output = "\n".join((str(rejected.value), repr(rejected.value),
+        "".join(traceback.format_exception(rejected.value)),
+        "".join(traceback.format_exception(rejected.value.__cause__)) if rejected.value.__cause__ else "",
+        "".join(traceback.format_exception(rejected.value.__context__)) if rejected.value.__context__ else ""))
+    assert callback_marker not in error_output
+    assert "pending_account_disclosure_v1" not in wallet._payload
+    failed_reopen = track(Wallet.open(path, "correct horse battery"))
+    assert "pending_account_disclosure_v1" not in failed_reopen._payload
+    failed_reopen.lock()
+
+    pending = wallet.approve_account_disclosure(
+        review, [GIVEN], consent=lambda candidate: candidate == review
+    )
+    assert wallet.get_master_account_entity() == {
+        "given_name": selected, "email": unselected, "other": unrequested,
+    }
+    for obj in (review, pending):
+        assert all(marker not in repr(obj) and marker not in str(obj)
+                   for marker in (selected, unselected, unrequested, callback_marker))
+    reopened = track(Wallet.open(path, "correct horse battery"))
+    record = reopened._payload["pending_account_disclosure_v1"]
+    assert record["approved_claim_ids"] == [GIVEN]
+    assert record["approved_values"] == {GIVEN: selected}
+    reopened.lock()
+
+    proof = wallet.create_account_login_proof(pending, challenge=login["challenge"])
+    assert proof.proof == login["proof"]
+    assert set(proof.proof) == {"profile", "challenge", "identity_id", "signature"}
+    binding_jws, jwks, outer, request_object, registration = continuation_artifacts(
+        context, wallet.public_key, 1_800_000_001
+    )
+    submission = wallet.prepare_account_presentation(
+        pending, binding_jws=binding_jws, keycloak_jwks=jwks, outer_request=outer,
+        request_object=request_object, registration=registration,
+    )
+    for obj in (review, pending, proof, submission):
+        assert all(marker not in repr(obj) and marker not in str(obj)
+                   for marker in (selected, unselected, unrequested, callback_marker))
+    stored = track(Wallet.open(path, "correct horse battery"))
+    prepared = stored._payload["pending_account_disclosure_v1"]
+    assert prepared["approved_values"] == {GIVEN: selected}
+    assert set(prepared["submission"]) == {
+        "response_uri", "state", "body", "presentation_jws", "expires_at",
+    }
+    assert "content_type" not in prepared["submission"]
+    assert prepared["submission"]["body"] == submission.body.decode("ascii")
+    assert prepared["submission"]["presentation_jws"] == submission.presentation_jws
+    stored.lock()
+
+    binding = verify_owner_key_binding(binding_jws, jwks, context,
+        expected_identity_id=IDENTITY_ID, now=1_800_000_001)
+    request = verify_oid4vp_authorization_request(outer, request_object=request_object,
+        registration=registration, context=context, owner_key_binding_jws=binding_jws,
+        verified_binding=binding, now=1_800_000_001)
+    verified = verify_account_presentation(submission.presentation_jws, context=context,
+        binding=binding, request=request, approved_claim_ids=[GIVEN],
+        approval_expires_at=pending.expires_at, now=1_800_000_001)
+    assert verified.claims == {GIVEN: selected}
+    assert EMAIL not in verified.claims
+    for marker in (unselected, unrequested, callback_marker):
+        assert marker not in submission.body.decode("ascii")
+        assert marker not in submission.presentation_jws
+
+    envelope = json.loads(path.read_bytes())
+    assert set(envelope) == {"format", "version", "kdf", "wrap", "payload"}
+    assert set(envelope["wrap"]) == {"algorithm", "nonce", "ciphertext", "tag"}
+    assert set(envelope["payload"]) == {"algorithm", "nonce", "ciphertext", "tag"}
+    assert sorted(item.name for item in tmp_path.iterdir()) == [".boundary-wallet.json.lock", "boundary-wallet.json"]
+    wallet.lock()
+    locked_bytes = path.read_bytes()
+    with pytest.raises(WalletLockedError) as locked:
+        wallet.get_master_account_entity()
+    with pytest.raises(ValueError) as locked_review:
+        wallet.review_account_disclosure(context, HANDLE, IDENTITY_ID)
+    with pytest.raises(WalletLockedError) as locked_proof:
+        wallet.create_account_login_proof(pending, challenge=login["challenge"])
+    locked_output = "\n".join((str(locked.value), repr(locked.value),
+        "".join(traceback.format_exception(locked.value)),
+        str(locked_review.value), repr(locked_review.value),
+        "".join(traceback.format_exception(locked_review.value)),
+        str(locked_proof.value), repr(locked_proof.value),
+        "".join(traceback.format_exception(locked_proof.value))))
+    assert path.read_bytes() == locked_bytes
+    assert all(marker not in locked_output
+               for marker in (selected, unselected, unrequested, callback_marker))
+    assert network_calls == []
+    captured = capsys.readouterr()
+    for marker in (selected, unselected, unrequested, callback_marker):
+        assert marker not in captured.out and marker not in captured.err and marker not in caplog.text
+        assert marker.encode() not in path.read_bytes()
