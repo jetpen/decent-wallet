@@ -30,6 +30,7 @@
     "tests.test_account_disclosure_lifecycle::test_prepare_rejects_stale_now_without_mutation_then_expires_request",
     "tests.test_account_disclosure_lifecycle::test_proof_rejects_stale_now_without_mutation_then_expires",
     "tests.test_account_disclosure_lifecycle::test_public_local_privacy_canary_for_selected_account_disclosure",
+    "tests.test_account_disclosure_lifecycle::test_wallet_security_boundary_is_local_redacted_and_selection_scoped",
     "tests.test_account_disclosure_lifecycle::test_required_missing_and_invalid_claim_values_fail_closed",
     "tests.test_account_disclosure_lifecycle::test_second_approval_is_rejected_and_entity_edit_does_not_change_approved_snapshot",
     "tests.test_account_disclosure_lifecycle::test_signed_binding_mismatch_invalidates_durable_approval_and_stale_handle_after_reopen",
