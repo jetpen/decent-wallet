@@ -24,6 +24,31 @@ class WalletLoginActivityIntentTest {
         }
     }
 
+    @Test fun malformedAppLinkInputsAreRejectedAtTheActivityBoundary() {
+        val origin = BuildConfig.WALLET_LOGIN_ORIGIN
+        val validPath = "/realms/demo/decent-wallet-login/v1/transactions/${"A".repeat(43)}"
+        val invalidUrls = listOf(
+            "http://${Uri.parse(origin).host}$validPath",
+            "https://unconfigured.example.invalid$validPath",
+            "https://user@${Uri.parse(origin).host}$validPath",
+            "$origin$validPath#fragment",
+            "$origin$validPath?unexpected=1",
+            "$origin/realms/%64emo/decent-wallet-login/v1/transactions/${"A".repeat(43)}",
+            "$origin/realms/demo/wrong-profile/v1/transactions/${"A".repeat(43)}",
+            "$origin/realms/demo/decent-wallet-login/v1/transactions/short",
+        )
+
+        invalidUrls.forEach { url ->
+            launch(url).use { scenario ->
+                scenario.onActivity { activity ->
+                    val matches = ArrayList<View>()
+                    activity.window.decorView.findViewsWithText(matches, "invalid or not trusted", View.FIND_VIEWS_WITH_TEXT)
+                    assertTrue("unsafe app-link input was not rejected", matches.any { it is TextView })
+                }
+            }
+        }
+    }
+
     @Test fun missingUnlockedHostSessionFailsBeforeNetworkOrProof() {
         val link = "${BuildConfig.WALLET_LOGIN_ORIGIN}/realms/demo/decent-wallet-login/v1/transactions/${"A".repeat(43)}"
         val scenario = launch(link)
