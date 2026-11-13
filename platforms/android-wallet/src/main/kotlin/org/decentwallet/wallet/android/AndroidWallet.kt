@@ -1376,18 +1376,24 @@ class WalletSession internal constructor(
                             @Suppress("UNCHECKED_CAST")
                             val candidate = WalletJson.copyPayload(payload) as MutableMap<String, Any?>
                             val updated = candidate["pending_account_disclosure_approval"] as MutableMap<String, Any?>
-                            updated["presentation"] = linkedMapOf(
-                                "state" to "prepared",
-                                "submission" to linkedMapOf(
-                                    "client_id" to request.clientId,
-                                    "response_uri" to request.responseUri,
-                                    "state" to request.state,
-                                    "presentation_jws" to presentationJws,
-                                    "body" to bodyBytes.copyOf(),
-                                    "expires_at" to BigInteger.valueOf(expiry),
-                                ),
-                            )
-                            persistPayloadCandidate(candidate)
+                            val detachedCapability = (updated.remove("native_continuation") as? Map<*, *>)
+                                ?.get("capability") as? ByteArray
+                            try {
+                                updated["presentation"] = linkedMapOf(
+                                    "state" to "prepared",
+                                    "submission" to linkedMapOf(
+                                        "client_id" to request.clientId,
+                                        "response_uri" to request.responseUri,
+                                        "state" to request.state,
+                                        "presentation_jws" to presentationJws,
+                                        "body" to bodyBytes.copyOf(),
+                                        "expires_at" to BigInteger.valueOf(expiry),
+                                    ),
+                                )
+                                persistPayloadCandidate(candidate)
+                            } finally {
+                                detachedCapability?.fill(0)
+                            }
                             val committedNow = currentTimeEpochSeconds()
                             if (committedNow < finalNow || committedNow >= expiry) {
                                 clearPendingApprovalAfterExpiry()
@@ -1730,8 +1736,9 @@ class WalletSession internal constructor(
         val vpJsonBytes = WalletJson.canonicalBytes(vpToken)
         try {
             val vpJson = String(vpJsonBytes, StandardCharsets.UTF_8)
-            val encoded = "state=${java.net.URLEncoder.encode(state, StandardCharsets.UTF_8)}" +
-                "&vp_token=${java.net.URLEncoder.encode(vpJson, StandardCharsets.UTF_8)}"
+            val encoding = StandardCharsets.UTF_8.name()
+            val encoded = "state=${java.net.URLEncoder.encode(state, encoding)}" +
+                "&vp_token=${java.net.URLEncoder.encode(vpJson, encoding)}"
             return encoded.toByteArray(StandardCharsets.US_ASCII)
         } finally {
             vpJsonBytes.fill(0)
