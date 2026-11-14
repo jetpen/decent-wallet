@@ -963,6 +963,8 @@ def test_wallet_security_boundary_is_local_redacted_and_selection_scoped(tmp_pat
         raise AssertionError("wallet disclosure attempted external networking")
 
     monkeypatch.setattr(socket.socket, "connect", blocked_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked_network)
+    monkeypatch.setattr(socket.socket, "sendto", blocked_network)
     monkeypatch.setattr(socket, "create_connection", blocked_network)
     wallet.set_master_account_entity(
         {"given_name": selected, "email": unselected, "other": unrequested}
@@ -1067,3 +1069,207 @@ def test_wallet_security_boundary_is_local_redacted_and_selection_scoped(tmp_pat
     for marker in (selected, unselected, unrequested, callback_marker):
         assert marker not in captured.out and marker not in captured.err and marker not in caplog.text
         assert marker.encode() not in path.read_bytes()
+
+
+def test_wallet_entity_and_disclosure_use_only_local_v2_storage_and_redact_key_material(
+    tmp_path, monkeypatch, caplog, capsys, request,
+):
+    """Observe wallet-owned paths only; not external component/runtime qualification."""
+    import logging
+    import socket
+    import traceback
+
+    import decent_wallet.container as container
+    import decent_wallet.identity as identity
+    import decent_wallet.registry_transport as registry_transport
+    from decent_wallet import PresentationDeliveryOutcome, WalletLockedError
+
+    path = tmp_path / "wallet.json"
+    vector = json.loads(LOGIN_VECTOR.read_text())
+    wallet = Wallet._create_storage(
+        path, "correct horse battery", "correct horse battery",
+        {"private_seed": base64.urlsafe_b64decode(vector["test_private_seed_b64url"] + "="),
+         "public_key": base64.urlsafe_b64decode(vector["public_key_b64url"] + "=")},
+    )
+    sessions = [wallet]
+    request.addfinalizer(lambda: [session.lock() for session in sessions if session.is_unlocked])
+    caplog.set_level(logging.DEBUG)
+
+    # Observe each Python socket outbound entry point and the optional Registry
+    # adapter/transport entry points. These sentinels are test-only and raise if
+    # any real wallet-owned operation tries to use them.
+    outbound_attempts = []
+    def blocked_route(route):
+        def reject(*_args, **_kwargs):
+            outbound_attempts.append(route)
+            raise AssertionError("wallet-owned disclosure attempted a forbidden outbound route")
+        return reject
+
+    for route, target, attribute in (
+        ("socket.connect", socket.socket, "connect"),
+        ("socket.connect_ex", socket.socket, "connect_ex"),
+        ("socket.send", socket.socket, "send"),
+        ("socket.sendall", socket.socket, "sendall"),
+        ("socket.sendmsg", socket.socket, "sendmsg"),
+        ("socket.sendto", socket.socket, "sendto"),
+        ("socket.sendfile", socket.socket, "sendfile"),
+        ("socket.create_connection", socket, "create_connection"),
+        ("socket.getaddrinfo", socket, "getaddrinfo"),
+        ("socket.gethostbyname", socket, "gethostbyname"),
+    ):
+        if hasattr(target, attribute):
+            monkeypatch.setattr(target, attribute, blocked_route(route))
+
+    registry_attempts = []
+    def blocked_registry(route):
+        def reject(*_args, **_kwargs):
+            registry_attempts.append(route)
+            raise AssertionError("wallet-owned disclosure attempted a Registry operation")
+        return reject
+
+    for target, names in (
+        (identity.RegistryAdapter, ("__init__", "read_state", "publish_bundle")),
+        (registry_transport.RegistryTransport,
+         ("__init__", "get_identity_envelope", "get_identity_envelope_by_hash",
+          "get_remote_identity_envelope", "put_identity_envelope")),
+    ):
+        for name in names:
+            monkeypatch.setattr(target, name, blocked_registry(f"{target.__name__}.{name}"))
+
+    # Count actual durable wallet writes, preserving the real implementation.
+    durable_targets = []
+    atomic_write = container._atomic_write
+    def observe_wallet_write(target, data, *, replace=True):
+        durable_targets.append(Path(target).resolve())
+        return atomic_write(target, data, replace=replace)
+    monkeypatch.setattr(container, "_atomic_write", observe_wallet_write)
+
+    private_value = "WALLET_PRIVATE_FIELD_FOR_BOUNDARY_TEST_" + "p" * 128
+    selected = "WALLET_SELECTED_FIELD_FOR_BOUNDARY_TEST_" + "s" * 128
+    entity_before = dict(wallet._payload)
+    assert "master_account_entity" not in entity_before
+    key_draw_lengths = []
+    original_token_bytes = container.secrets.token_bytes
+
+    def observe_random_draw(length):
+        if length == 32:
+            key_draw_lengths.append(length)
+        return original_token_bytes(length)
+
+    with monkeypatch.context() as scoped_patch:
+        scoped_patch.setattr(container.secrets, "token_bytes", observe_random_draw)
+        wallet.set_master_account_entity({"given_name": selected, "email": private_value})
+    entity_after = wallet._payload
+    changed_payload_keys = {
+        key for key in entity_before.keys() | entity_after.keys()
+        if key not in entity_before or key not in entity_after or entity_before[key] != entity_after[key]
+    }
+    assert changed_payload_keys == {"master_account_entity"}
+    assert entity_after["master_account_entity"] == {
+        "given_name": selected, "email": private_value,
+    }
+    assert key_draw_lengths == []
+    entity_result = wallet.get_master_account_entity()
+    assert entity_result == {"given_name": selected, "email": private_value}
+    context = context_for_handle()
+    review = wallet.review_account_disclosure(context, HANDLE, IDENTITY_ID)
+    approved = wallet.approve_account_disclosure(
+        review, [GIVEN], consent=lambda candidate: candidate == review,
+    )
+    proof = wallet.create_account_login_proof(
+        approved, challenge=vector["challenge"],
+    )
+    assert set(proof.proof) == {"profile", "challenge", "identity_id", "signature"}
+    binding, jwks, outer, request, registration = continuation_artifacts(
+        context, wallet.public_key, 1_800_000_001,
+    )
+    submission = wallet.prepare_account_presentation(
+        approved, binding_jws=binding, keycloak_jwks=jwks, outer_request=outer,
+        request_object=request, registration=registration,
+    )
+    wallet.finish_account_presentation(approved, PresentationDeliveryOutcome.AMBIGUOUS)
+    retry = wallet.get_account_presentation_retry(approved)
+    assert (retry.response_uri, retry.state, retry.body, retry.presentation_jws) == (
+        submission.response_uri, submission.state, submission.body, submission.presentation_jws,
+    )
+
+    # Exact on-disk envelope and sidecar inventory: the entity/pending state
+    # has no second file or media-type/envelope, and all writes target that file.
+    assert durable_targets and set(durable_targets) == {path.resolve()}
+    assert sorted(item.name for item in tmp_path.iterdir()) == [
+        ".wallet.json.lock", "wallet.json",
+    ]
+    envelope = json.loads(path.read_bytes())
+    assert set(envelope) == {"format", "version", "kdf", "wrap", "payload"}
+    assert envelope["format"] == "decent-wallet" and envelope["version"] == 2
+    assert set(envelope["payload"]) == {"algorithm", "nonce", "ciphertext", "tag"}
+    reopened = Wallet.open(path, "correct horse battery")
+    sessions.append(reopened)
+    assert reopened.get_master_account_entity() == {
+        "given_name": selected, "email": private_value,
+    }
+    assert reopened._payload["master_account_entity"] == {
+        "given_name": selected, "email": private_value,
+    }
+    assert not {
+        "master_record_key", "master_account_key", "master_record_envelope",
+        "master_account_envelope", "master_record_media_type", "master_account_media_type",
+    } & reopened._payload.keys()
+    assert "content_type" not in reopened._payload["pending_account_disclosure_v1"]["submission"]
+
+    # Compare the actual Wallet DEK and password-derived KEK against raw and
+    # ordinary encoded representations in diagnostic/public sinks. Keep only
+    # owned mutable copies here; never render either secret in failures.
+    dek_buffer = wallet._dek
+    assert dek_buffer is not None
+    dek_copy = bytearray(dek_buffer)
+    kdf_salt = base64.b64decode(envelope["kdf"]["salt"])
+    kek_buffer = container._derive_kek("correct horse battery", kdf_salt)
+    kek_copy = bytearray(kek_buffer)
+    container._wipe(kek_buffer)
+    unlocked_wallet_repr = repr(wallet)
+    wallet.lock()
+    locked_bytes = path.read_bytes()
+    with pytest.raises(WalletLockedError) as locked:
+        wallet.get_master_account_entity()
+    locked_output = "\n".join((str(locked.value), repr(locked.value),
+        "".join(traceback.format_exception(locked.value)), unlocked_wallet_repr, repr(wallet), repr(entity_result),
+        repr(review), repr(approved), repr(proof), repr(proof.proof), repr(submission),
+        repr(submission.body), repr(retry), repr(retry.body)))
+    assert path.read_bytes() == locked_bytes
+    reopened.lock()
+    captured = capsys.readouterr()
+    sinks = "\n".join((locked_output, captured.out, captured.err, caplog.text)).encode("utf-8")
+
+    def contains_key_representation(secret, observed_sinks):
+        raw = None
+        representations = None
+        try:
+            raw = bytes(secret)
+            representations = (
+                raw,
+                repr(raw).encode("ascii"),
+                raw.hex().encode("ascii"),
+                base64.b64encode(raw),
+                base64.urlsafe_b64encode(raw).rstrip(b"="),
+            )
+            return any(candidate in observed_sinks for candidate in representations)
+        finally:
+            # Owned mutable DEK/KEK copies are wiped by the caller's finally.
+            # Immutable Python comparison temporaries cannot be reliably wiped;
+            # they stay within this predicate and only a boolean escapes. This is
+            # best-effort test hygiene, not process-memory erasure.
+            representations = None
+            raw = None
+
+    try:
+        key_material_leaked = (
+            contains_key_representation(dek_copy, sinks)
+            or contains_key_representation(kek_copy, sinks)
+        )
+    finally:
+        container._wipe(dek_copy)
+        container._wipe(kek_copy)
+    assert not key_material_leaked, "Wallet key material appeared in a diagnostic sink"
+    assert outbound_attempts == []
+    assert registry_attempts == []
