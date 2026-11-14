@@ -68,6 +68,11 @@ class NativeDisclosureActivityInstrumentedTest {
     }
 
     @Test
+    fun terminalContinuation410ClearsPendingApprovalWithoutFetchingOrDisclosingProfile() {
+        runNativeSignup(bindingTransactionMismatch = false, terminalContinuation410 = true)
+    }
+
+    @Test
     fun persistedPresentationIsRecoveredOnlyAfterExplicitRetry() {
         runNativeSignup(bindingTransactionMismatch = false, exerciseRecovery = true)
     }
@@ -87,6 +92,7 @@ class NativeDisclosureActivityInstrumentedTest {
         exerciseRecovery: Boolean = false,
         definitiveRetry: Boolean = false,
         finalizationFailure: Boolean = false,
+        terminalContinuation410: Boolean = false,
     ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -99,7 +105,13 @@ class NativeDisclosureActivityInstrumentedTest {
         var fixture: NativeFixture? = null
         try {
             session.setMasterAccountEntity(mapOf("given_name" to marker, "email" to email))
-            val activeFixture = NativeFixture(bindingTransactionMismatch, ownerPublicKey, identityId, exerciseRecovery)
+            val activeFixture = NativeFixture(
+                bindingTransactionMismatch,
+                ownerPublicKey,
+                identityId,
+                exerciseRecovery,
+                terminalContinuation410,
+            )
             fixture = activeFixture
             activeFixture.start()
             DebugWalletLoginApplication.install(
@@ -145,12 +157,28 @@ class NativeDisclosureActivityInstrumentedTest {
                 assertEquals("GET", poll.method)
                 assertEquals("/oid4vp/continuations/${activeFixture.transactionId}", poll.path)
                 assertEquals("Bearer ${activeFixture.capability}", poll.getHeader("Authorization"))
-                val requestObject = request(activeFixture.server)
-                assertEquals("GET", requestObject.method)
-                assertEquals(activeFixture.requestPath, requestObject.path)
-                assertEquals("application/oauth-authz-req+jwt", requestObject.getHeader("Accept"))
 
-                if (bindingTransactionMismatch) {
+                if (terminalContinuation410) {
+                    waitUntil(scenario) { texts -> texts.any { it.contains("did not complete") } }
+                    assertEquals("terminal continuation must stop after four requests", 4, activeFixture.server.requestCount)
+                    assertEquals("terminal continuation left a recoverable pending approval", null, session.recoverPendingAccountApproval())
+                    assertNoRequest(activeFixture.server)
+                    scenario.close()
+                    session.close()
+                    session = AndroidWallet.open(walletFile.toPath(), walletPassword)
+                    assertEquals("reopened wallet recovered a terminal pending approval", null, session.recoverPendingAccountApproval())
+                    assertEquals("wallet made a request after terminal continuation", 4, activeFixture.server.requestCount)
+                    assertNoRequest(activeFixture.server)
+                } else {
+                    val requestObject = request(activeFixture.server)
+                    assertEquals("GET", requestObject.method)
+                    assertEquals(activeFixture.requestPath, requestObject.path)
+                    assertEquals("application/oauth-authz-req+jwt", requestObject.getHeader("Accept"))
+                }
+
+                if (terminalContinuation410) {
+                    // The owner-facing terminal state and no-release assertions were checked above.
+                } else if (bindingTransactionMismatch) {
                     waitUntil(scenario) { texts -> texts.any { it.contains("did not complete") } }
                     assertEquals("mismatched authenticated continuation produced a POST", 5, activeFixture.server.requestCount)
                     assertNoRequest(activeFixture.server)
@@ -423,6 +451,7 @@ class NativeDisclosureActivityInstrumentedTest {
         ownerPublicKey: ByteArray,
         identityId: String,
         private val ambiguousFirstPost: Boolean = false,
+        private val terminalContinuation410: Boolean = false,
     ) : AutoCloseable {
         val server = MockWebServer()
         val challenge = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { (it + 41).toByte() })
@@ -511,8 +540,12 @@ class NativeDisclosureActivityInstrumentedTest {
             server.enqueue(response(200, JSONObject().put("profile", "decent-wallet-login-v1")
                 .put("challenge", challenge).put("csrf_token", "fixture-only").toString(), "application/json"))
             server.enqueue(response(200, responses.capabilityBody, "application/json"))
-            server.enqueue(response(200, JSONObject().put("client_id", oid4vpClientId)
-                .put("request_uri", "https://localhost:8443$requestPath").toString(), "application/json"))
+            server.enqueue(if (terminalContinuation410) {
+                response(410, "", "application/json")
+            } else {
+                response(200, JSONObject().put("client_id", oid4vpClientId)
+                    .put("request_uri", "https://localhost:8443$requestPath").toString(), "application/json")
+            })
             server.enqueue(response(200, responses.requestObject, "application/oauth-authz-req+jwt"))
             val redirectCode = base64Url(ByteArray(32) { (it + 121).toByte() })
             server.enqueue(response(if (ambiguousFirstPost) 503 else 200, JSONObject().put(
