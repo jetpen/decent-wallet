@@ -18,6 +18,32 @@ ENTITY = {
 }
 
 
+def test_master_account_entity_source_ownership_stays_in_wallet_container_and_core():
+    repo = Path(__file__).resolve().parents[1]
+    production_roots = (
+        repo / "src" / "decent_wallet",
+        repo / "platforms" / "android-wallet" / "src" / "main",
+        repo / "apps" / "android-wallet-client" / "src" / "main",
+    )
+    entity_markers = ("master_account_entity", "MasterAccountEntity", "Master Account Entity")
+    references = set()
+    for root in production_roots:
+        for source in root.rglob("*"):
+            if source.suffix not in {".py", ".kt", ".java"}:
+                continue
+            text = source.read_text(encoding="utf-8")
+            if any(marker.lower() in text.lower() for marker in entity_markers):
+                references.add(source.relative_to(repo).as_posix())
+
+    # These are the only production owners of the entity state/API. This source
+    # inventory is bounded to checked-in Python and Android production sources;
+    # it does not prove absence of indirect calls or runtime behavior.
+    assert references == {
+        "src/decent_wallet/container.py",
+        "platforms/android-wallet/src/main/kotlin/org/decentwallet/wallet/android/AndroidWallet.kt",
+    }
+
+
 def test_master_account_entity_is_local_encrypted_v2_state_and_survives_reopen_import(tmp_path: Path):
     source = tmp_path / "source.dw"
     imported_path = tmp_path / "imported.dw"

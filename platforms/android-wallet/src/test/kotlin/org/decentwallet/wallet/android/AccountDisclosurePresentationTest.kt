@@ -62,6 +62,324 @@ class AccountDisclosurePresentationTest {
     }
 
     @Test
+    fun androidEntityPersistsAndProducesApprovedDisclosure() {
+        val fixture = fixture()
+        try {
+            assertEquals(
+                mapOf("given_name" to "Ada", "email" to "ada@example.test"),
+                fixture.wallet.getMasterAccountEntity(),
+            )
+            val submission = fixture.wallet.prepareAccountPresentationAt(
+                fixture.pending, fixture.bindingJws, fixture.issuerJwks, fixture.outerRequest,
+                fixture.requestObject, fixture.registration, fixture.now,
+                currentTimeEpochSeconds = { fixture.now },
+            )
+            try {
+                val vp = verifyJws(
+                    submission.presentationJws, "decent-account-presentation+jwt",
+                    fixture.ownerPublicKey, fixture.ownerKeyThumbprint,
+                )
+                val vpObject = vp["vp"] as Map<*, *>
+                val credentialJws = (vpObject["verifiableCredential"] as List<*>).single() as String
+                val credential = verifyJws(
+                    credentialJws, "decent-account-credential+jwt",
+                    fixture.ownerPublicKey, fixture.ownerKeyThumbprint,
+                )
+                assertEquals(
+                    mapOf(
+                        "urn:decent:account:v1:given_name" to "Ada",
+                        "urn:decent:account:v1:email" to "ada@example.test",
+                    ),
+                    credential["claims"],
+                )
+                assertEquals(
+                    setOf("wallet.dw", ".decent-wallet-install.lock"),
+                    Files.list(fixture.directory).use { paths -> paths.map { it.fileName.toString() }.toList().toSet() },
+                )
+            } finally {
+                submission.close()
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun lockedEntityReadAndAmbiguousRetryRecoveryRejectWithoutDisclosureOrDurableChange() {
+        val marker = "ANDROID_LOCKED_PRIVATE_ENTITY_MARKER_" + "m".repeat(160)
+        val fixture = fixture(publicTimeRelative = true, entityEmail = marker)
+        var eligibleRetry: AccountPresentationSubmission? = null
+        try {
+            val review = fixture.review
+            val emailClaim = review.claims.single { it.id.endsWith(":email") }
+            assertEquals(marker, emailClaim.value) // Intended owner review while unlocked.
+            assertFalse(emailClaim.toString().contains(marker))
+            assertFalse(review.toString().contains(marker))
+            assertFalse(fixture.pending.toString().contains(marker))
+
+            assertEquals(marker, fixture.wallet.getMasterAccountEntity()["email"])
+            val submission = fixture.wallet.prepareAccountPresentationAt(
+                fixture.pending, fixture.bindingJws, fixture.issuerJwks, fixture.outerRequest,
+                fixture.requestObject, fixture.registration, fixture.now,
+                currentTimeEpochSeconds = { fixture.now },
+            )
+            try {
+                assertFalse(submission.toString().contains(marker))
+                fixture.wallet.finishAccountPresentationAt(
+                    fixture.pending, PresentationDeliveryOutcome.AMBIGUOUS,
+                    nowEpochSeconds = fixture.now,
+                )
+                eligibleRetry = fixture.wallet.getAccountPresentationRetry(
+                    fixture.pending, fixture.registration,
+                )
+                assertEquals(submission.presentationJws, eligibleRetry.presentationJws)
+                assertFalse("retry DTO exposed the entity marker", eligibleRetry.toString().contains(marker))
+                val recovered = fixture.wallet.recoverPendingAccountApproval()
+                assertEquals(fixture.pending.handle, recovered?.handle)
+                assertFalse("recovered pending DTO exposed the entity marker", recovered.toString().contains(marker))
+
+                val path = fixture.directory.resolve("wallet.dw")
+                val before = Files.readAllBytes(path)
+                try {
+                    fixture.wallet.lock()
+                    val operations: List<Pair<String, () -> Any?>> = listOf(
+                        "entity-get" to { fixture.wallet.getMasterAccountEntity() },
+                        "retry" to { fixture.wallet.getAccountPresentationRetry(fixture.pending, fixture.registration) },
+                        "recover" to { fixture.wallet.recoverPendingAccountApproval() },
+                    )
+                    for ((name, operation) in operations) {
+                        val rejected = assertThrows(WalletLockedException::class.java) { operation() }
+                        assertEquals(WalletLockedException::class.java, rejected.javaClass)
+                        val output = buildString {
+                            val seen = java.util.Collections.newSetFromMap(
+                                java.util.IdentityHashMap<Throwable, Boolean>(),
+                            )
+                            fun appendThrowable(current: Throwable?) {
+                                if (current == null || !seen.add(current)) return
+                                append(current.message).append(current.toString())
+                                append(current.stackTraceToString())
+                                current.suppressed.forEach(::appendThrowable)
+                                appendThrowable(current.cause)
+                            }
+                            appendThrowable(rejected)
+                        }
+                        assertFalse("$name exposed the entity marker", output.contains(marker))
+                        val afterOperation = Files.readAllBytes(path)
+                        try {
+                            assertTrue("$name changed the encrypted wallet", before.contentEquals(afterOperation))
+                        } finally {
+                            afterOperation.fill(0)
+                        }
+                    }
+                } finally {
+                    before.fill(0)
+                }
+            } finally {
+                submission.close()
+            }
+        } finally {
+            eligibleRetry?.close()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun lockedReviewRejectsValidStageWithoutReturningPlaintext() {
+        val marker = "ANDROID_LOCKED_REVIEW_MARKER_" + "r".repeat(160)
+        val stage = disclosureStageFixture(marker)
+        var control: WalletSession? = null
+        var before: ByteArray? = null
+        try {
+            val review = stage.wallet.reviewAccountDisclosure(
+                stage.contextBytes, stage.transactionHandle, stage.issuer, stage.identityId,
+            )
+            assertEquals(marker, review.claims.single { it.id.endsWith(":given_name") }.value)
+            val path = stage.directory.resolve("wallet.dw")
+            val beforeBytes = Files.readAllBytes(path)
+            before = beforeBytes
+            val controlDirectory = Files.createTempDirectory("wallet-android-review-control-")
+            try {
+                val controlPath = controlDirectory.resolve("wallet.dw")
+                Files.write(controlPath, beforeBytes)
+                control = AndroidWallet.open(controlPath, TEST_PASSWORD)
+                val controlReview = control!!.reviewAccountDisclosure(
+                    stage.contextBytes, stage.transactionHandle, stage.issuer, stage.identityId,
+                )
+                assertEquals(marker, controlReview.claims.single { it.id.endsWith(":given_name") }.value)
+                control!!.close()
+                control = null
+                stage.wallet.lock()
+                val rejected = assertThrows(WalletLockedException::class.java) {
+                    stage.wallet.reviewAccountDisclosure(
+                        stage.contextBytes, stage.transactionHandle, stage.issuer, stage.identityId,
+                    )
+                }
+                assertEquals(WalletLockedException::class.java, rejected.javaClass)
+                assertFalse(throwableText(rejected).contains(marker))
+                val after = Files.readAllBytes(path)
+                try { assertTrue(beforeBytes.contentEquals(after)) } finally { after.fill(0) }
+            } finally {
+                control?.close()
+                control = null
+                Files.walk(controlDirectory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+            }
+        } finally {
+            before?.fill(0)
+            control?.close()
+            stage.close()
+        }
+    }
+
+    @Test
+    fun lockedApprovalRejectsValidReviewWithoutCallingConsent() {
+        val marker = "ANDROID_LOCKED_APPROVAL_MARKER_" + "a".repeat(160)
+        val stage = disclosureStageFixture(marker)
+        var control: WalletSession? = null
+        var before: ByteArray? = null
+        var lockedConsentCalls = 0
+        try {
+            val selected = setOf("urn:decent:account:v1:given_name", "urn:decent:account:v1:email")
+            val targetReview = stage.wallet.reviewAccountDisclosure(
+                stage.contextBytes, stage.transactionHandle, stage.issuer, stage.identityId,
+            )
+            val path = stage.directory.resolve("wallet.dw")
+            val beforeBytes = Files.readAllBytes(path)
+            before = beforeBytes
+            val controlDirectory = Files.createTempDirectory("wallet-android-approval-control-")
+            try {
+                val controlPath = controlDirectory.resolve("wallet.dw")
+                Files.write(controlPath, beforeBytes)
+                control = AndroidWallet.open(controlPath, TEST_PASSWORD)
+                val controlReview = control!!.reviewAccountDisclosure(
+                    stage.contextBytes, stage.transactionHandle, stage.issuer, stage.identityId,
+                )
+                var controlConsentCalls = 0
+                val controlPending = control!!.approveAccountDisclosure(controlReview, selected) {
+                    controlConsentCalls += 1
+                    true
+                }
+                assertTrue(controlPending.handle.isNotEmpty())
+                assertEquals(1, controlConsentCalls)
+                control!!.close()
+                control = null
+                stage.wallet.lock()
+                val rejected = assertThrows(WalletLockedException::class.java) {
+                    stage.wallet.approveAccountDisclosure(targetReview, selected) {
+                        lockedConsentCalls += 1
+                        true
+                    }
+                }
+                assertEquals(WalletLockedException::class.java, rejected.javaClass)
+                assertEquals(0, lockedConsentCalls)
+                assertFalse(throwableText(rejected).contains(marker))
+                val after = Files.readAllBytes(path)
+                try { assertTrue(beforeBytes.contentEquals(after)) } finally { after.fill(0) }
+            } finally {
+                control?.close()
+                control = null
+                Files.walk(controlDirectory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+            }
+        } finally {
+            before?.fill(0)
+            control?.close()
+            stage.close()
+        }
+    }
+
+    @Test
+    fun lockedLoginProofRejectsApprovedPreproofStageWithoutReturningProof() {
+        val marker = "ANDROID_LOCKED_PROOF_MARKER_" + "p".repeat(160)
+        val stage = disclosureStageFixture(marker)
+        var control: WalletSession? = null
+        var before: ByteArray? = null
+        try {
+            val review = stage.wallet.reviewAccountDisclosure(
+                stage.contextBytes, stage.transactionHandle, stage.issuer, stage.identityId,
+            )
+            val selected = setOf("urn:decent:account:v1:given_name", "urn:decent:account:v1:email")
+            val targetPending = stage.wallet.approveAccountDisclosure(review, selected) { true }
+            val path = stage.directory.resolve("wallet.dw")
+            val beforeBytes = Files.readAllBytes(path)
+            before = beforeBytes
+            val controlDirectory = Files.createTempDirectory("wallet-android-proof-control-")
+            try {
+                val controlPath = controlDirectory.resolve("wallet.dw")
+                Files.write(controlPath, beforeBytes)
+                control = AndroidWallet.open(controlPath, TEST_PASSWORD)
+                val controlPending = checkNotNull(control!!.recoverPendingAccountApproval())
+                val controlProof = control!!.createAccountLoginProof(controlPending, stage.challenge)
+                assertEquals(stage.challenge, controlProof.challenge)
+                assertFalse(controlProof.toString().contains(marker))
+                control!!.close()
+                control = null
+                stage.wallet.lock()
+                val rejected = assertThrows(WalletLockedException::class.java) {
+                    stage.wallet.createAccountLoginProof(targetPending, stage.challenge)
+                }
+                assertEquals(WalletLockedException::class.java, rejected.javaClass)
+                assertFalse(throwableText(rejected).contains(marker))
+                val after = Files.readAllBytes(path)
+                try { assertTrue(beforeBytes.contentEquals(after)) } finally { after.fill(0) }
+            } finally {
+                control?.close()
+                control = null
+                Files.walk(controlDirectory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+            }
+        } finally {
+            before?.fill(0)
+            control?.close()
+            stage.close()
+        }
+    }
+
+    @Test
+    fun lockedPreparationRejectsValidProofIssuedStageWithoutSubmission() {
+        val marker = "ANDROID_LOCKED_PREPARE_MARKER_" + "s".repeat(160)
+        val fixture = fixture(publicTimeRelative = true, entityEmail = marker)
+        var control: WalletSession? = null
+        var before: ByteArray? = null
+        try {
+            val path = fixture.directory.resolve("wallet.dw")
+            val beforeBytes = Files.readAllBytes(path)
+            before = beforeBytes
+            val controlDirectory = Files.createTempDirectory("wallet-android-prepare-control-")
+            try {
+                val controlPath = controlDirectory.resolve("wallet.dw")
+                Files.write(controlPath, beforeBytes)
+                control = AndroidWallet.open(controlPath, TEST_PASSWORD)
+                val controlPending = checkNotNull(control!!.recoverPendingAccountApproval())
+                val controlSubmission = control!!.prepareAccountPresentation(
+                    controlPending, fixture.bindingJws, fixture.issuerJwks, fixture.outerRequest,
+                    fixture.requestObject, fixture.registration,
+                )
+                try { assertEquals(fixture.expectedState, controlSubmission.state) }
+                finally { controlSubmission.close() }
+                control!!.close()
+                control = null
+                fixture.wallet.lock()
+                val rejected = assertThrows(WalletLockedException::class.java) {
+                    fixture.wallet.prepareAccountPresentation(
+                        fixture.pending, fixture.bindingJws, fixture.issuerJwks, fixture.outerRequest,
+                        fixture.requestObject, fixture.registration,
+                    )
+                }
+                assertEquals(WalletLockedException::class.java, rejected.javaClass)
+                assertFalse(throwableText(rejected).contains(marker))
+                val after = Files.readAllBytes(path)
+                try { assertTrue(beforeBytes.contentEquals(after)) } finally { after.fill(0) }
+            } finally {
+                control?.close()
+                control = null
+                Files.walk(controlDirectory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+            }
+        } finally {
+            before?.fill(0)
+            control?.close()
+            fixture.close()
+        }
+    }
+
+    @Test
     fun walletOwnedBindingAdapterRejectsMissingAndDuplicateEmbeddedFields() {
         val malformedRequests = listOf(
             compactRequestWithPayload("""{"decent_account":{}}"""),
@@ -548,9 +866,65 @@ class AccountDisclosurePresentationTest {
         assertEquals(value, Base64.getUrlEncoder().withoutPadding().encodeToString(it))
     }
 
+    private data class DisclosureStageFixture(
+        val directory: java.nio.file.Path,
+        val wallet: WalletSession,
+        val contextBytes: ByteArray,
+        val transactionHandle: String,
+        val issuer: String,
+        val identityId: String,
+        val challenge: String,
+    ) : AutoCloseable {
+        override fun close() {
+            wallet.close()
+            contextBytes.fill(0)
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    private fun disclosureStageFixture(entityEmail: String): DisclosureStageFixture {
+        val root = checkNotNull(javaClass.classLoader?.getResourceAsStream(
+            "wallet-account-disclosure-v1/vectors/valid-signup.json",
+        )).use { WalletJson.parse(it.readBytes(), 64 * 1024) as Map<*, *> }
+        val now = System.currentTimeMillis() / 1000
+        @Suppress("UNCHECKED_CAST")
+        val context = WalletJson.copyPayload(root["keycloak_context"] as Map<*, *>) as MutableMap<String, Any?>
+        context["expires_at"] = BigInteger.valueOf(now + 299)
+        val contextBytes = WalletJson.canonicalBytes(context)
+        val directory = Files.createTempDirectory("wallet-android-disclosure-stage-")
+        val wallet = AndroidWallet.createWithGeneratedKey(
+            directory.resolve("wallet.dw"), TEST_PASSWORD, TEST_PASSWORD,
+        )
+        try {
+            wallet.setMasterAccountEntity(mapOf("given_name" to entityEmail, "email" to "private@example.test"))
+            val challenge = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { (it + 1).toByte() })
+            return DisclosureStageFixture(
+                directory, wallet, contextBytes, root["transaction_handle"] as String,
+                context["keycloak_issuer"] as String, "test:android-disclosure-stage", challenge,
+            )
+        } catch (failure: Exception) {
+            wallet.close()
+            contextBytes.fill(0)
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+            throw failure
+        }
+    }
+
+    private fun throwableText(failure: Throwable): String = buildString {
+        val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+        fun appendThrowable(current: Throwable?) {
+            if (current == null || !seen.add(current)) return
+            append(current.message).append(current.toString()).append(current.stackTraceToString())
+            current.suppressed.forEach(::appendThrowable)
+            appendThrowable(current.cause)
+        }
+        appendThrowable(failure)
+    }
+
     private data class Fixture(
         val directory: java.nio.file.Path,
         val wallet: WalletSession,
+        val review: AccountDisclosureReview,
         val pending: PendingAccountApproval,
         val ownerPublicKey: ByteArray,
         val identityId: String,
@@ -580,6 +954,7 @@ class AccountDisclosurePresentationTest {
         requestExpiry: Long? = null,
         publicTimeRelative: Boolean = false,
         proofChallenge: String? = null,
+        entityEmail: String = "ada@example.test",
     ): Fixture {
         val root = checkNotNull(javaClass.classLoader?.getResourceAsStream(
             "wallet-account-disclosure-v1/vectors/valid-signup.json",
@@ -595,7 +970,7 @@ class AccountDisclosurePresentationTest {
         val path = directory.resolve("wallet.dw")
         val wallet = AndroidWallet.createWithGeneratedKey(path, TEST_PASSWORD, TEST_PASSWORD)
         try {
-            wallet.setMasterAccountEntity(mapOf("given_name" to "Ada", "email" to "ada@example.test"))
+            wallet.setMasterAccountEntity(mapOf("given_name" to "Ada", "email" to entityEmail))
             val ownerPublicKey = wallet.ownerPublicKey
             val review = wallet.reviewAccountDisclosureAt(
                 contextBytes, root["transaction_handle"] as String,
@@ -634,7 +1009,7 @@ class AccountDisclosurePresentationTest {
             val requestNonce = requestPayload["nonce"] as String
             val claims = (context["claims"] as List<*>).map { (it as Map<*, *>)["id"] as String }.toSet()
             return Fixture(
-                directory, wallet, pending, ownerPublicKey, identityId, now, requestExpiry ?: now + 299,
+                directory, wallet, review, pending, ownerPublicKey, identityId, now, requestExpiry ?: now + 299,
                 root["transaction_handle"] as String, { WalletJson.copyPayload(context) as Map<*, *> }, bindingJws, issuerJwks,
                 root["oid4vp_authorization_parameters"] as Map<*, *>, requestToken, registration,
                 requestState, requestNonce, selected, ownerKeyThumbprint,

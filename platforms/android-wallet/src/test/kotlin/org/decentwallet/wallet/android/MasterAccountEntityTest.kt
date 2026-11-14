@@ -2,6 +2,7 @@ package org.decentwallet.wallet.android
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -67,6 +68,56 @@ class MasterAccountEntityTest {
                 reopened.close()
             }
         } finally {
+            wallet.close()
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun exportedV2PayloadContainsEntityOnlyAtWalletEntityKey() {
+        val directory = Files.createTempDirectory("wallet-master-account-entity-payload-")
+        val path = directory.resolve("wallet.dw")
+        val importedPath = directory.resolve("imported.dw")
+        val password = "a sufficiently long test password"
+        val marker = "ANDROID_ENTITY_PLAINTEXT_MARKER_" + "z".repeat(160)
+        val expected = mapOf("display_name" to marker, "locale" to "en-GB")
+        val wallet = AndroidWallet.createWithGeneratedKey(path, password, password)
+        var raw: ByteArray? = null
+        try {
+            val initialPayload = wallet.readPayload()
+            val initialPayloadKeys = try {
+                assertEquals(setOf("private_seed", "public_key"), initialPayload.keys)
+                initialPayload.keys.toSet()
+            } finally {
+                WalletJson.clearByteArrays(initialPayload)
+            }
+            wallet.setMasterAccountEntity(expected)
+            val updatedPayload = wallet.readPayload()
+            try {
+                assertEquals(initialPayloadKeys + "master_account_entity", updatedPayload.keys)
+                assertEquals(expected, updatedPayload["master_account_entity"])
+            } finally {
+                WalletJson.clearByteArrays(updatedPayload)
+            }
+            val exported = wallet.exportContainer()
+            raw = exported
+            assertFalse(exported.toString(Charsets.UTF_8).contains(marker))
+            val imported = AndroidWallet.importContainer(importedPath, exported, password)
+            try {
+                val payload = imported.readPayload()
+                try {
+                    assertEquals(initialPayloadKeys + "master_account_entity", payload.keys)
+                    assertEquals(expected, payload["master_account_entity"])
+                } finally {
+                    WalletJson.clearByteArrays(payload)
+                }
+            } finally {
+                imported.close()
+            }
+        } finally {
+            raw?.fill(0)
             wallet.close()
             Files.walk(directory).use { paths ->
                 paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
