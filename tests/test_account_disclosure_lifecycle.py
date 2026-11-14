@@ -1273,3 +1273,255 @@ def test_wallet_entity_and_disclosure_use_only_local_v2_storage_and_redact_key_m
     assert not key_material_leaked, "Wallet key material appeared in a diagnostic sink"
     assert outbound_attempts == []
     assert registry_attempts == []
+
+
+def test_locked_pending_submission_apis_cannot_release_entity_or_change_container(
+    tmp_path, monkeypatch,
+):
+    import traceback
+
+    from decent_wallet import WalletLockedError, PresentationDeliveryOutcome
+
+    marker = "PY_LOCKED_DISCLOSURE_PRIVATE_MARKER_" + "q" * 160
+    login = json.loads(LOGIN_VECTOR.read_text())
+    path = tmp_path / "locked-disclosure-wallet.json"
+    wallet = Wallet._create_storage(
+        path, "correct horse battery", "correct horse battery",
+        {"private_seed": base64.urlsafe_b64decode(login["test_private_seed_b64url"] + "="),
+         "public_key": base64.urlsafe_b64decode(login["public_key_b64url"] + "=")},
+    )
+    try:
+        wallet.set_master_account_entity({"given_name": marker, "email": "private@example.test"})
+        context = context_for_handle()
+        review = wallet.review_account_disclosure(context, HANDLE, IDENTITY_ID)
+        assert dict(review.values)[GIVEN] == marker  # Owner consent review intentionally contains plaintext.
+        pending = wallet.approve_account_disclosure(
+            review, [GIVEN], consent=lambda candidate: candidate == review,
+        )
+        wallet.create_account_login_proof(pending, challenge=login["challenge"])
+        binding, jwks, outer, request_object, registration = continuation_artifacts(
+            context, wallet.public_key, 1_800_000_001,
+        )
+        submission = wallet.prepare_account_presentation(
+            pending, binding_jws=binding, keycloak_jwks=jwks, outer_request=outer,
+            request_object=request_object, registration=registration,
+        )
+        wallet.finish_account_presentation(pending, PresentationDeliveryOutcome.AMBIGUOUS)
+        # Snapshot the ambiguous persisted state, then prove the eligible public
+        # operations on an independent session opened from the exact same bytes.
+        before = path.read_bytes()
+        control_path = tmp_path / "locked-disclosure-control.json"
+        control_path.write_bytes(before)
+        control = Wallet.open(control_path, "correct horse battery")
+        try:
+            assert control.get_master_account_entity() == {
+                "given_name": marker, "email": "private@example.test",
+            }
+            control.set_master_account_entity({"given_name": marker, "email": "private@example.test"})
+            retry = control.get_account_presentation_retry(pending)
+            assert retry.presentation_jws == submission.presentation_jws
+            del retry
+            recovered = control.recover_account_presentation_retry()
+            assert recovered is not None
+            del recovered
+        finally:
+            control.lock()
+
+        operations = (
+            ("get", WalletLockedError, lambda: wallet.get_master_account_entity()),
+            ("set", WalletLockedError, lambda: wallet.set_master_account_entity({"given_name": marker})),
+            ("retry", WalletLockedError, lambda: wallet.get_account_presentation_retry(pending)),
+            ("recover", WalletLockedError, lambda: wallet.recover_account_presentation_retry()),
+        )
+        wallet.lock()
+        observed = []
+        for name, expected_error, operation in operations:
+            with pytest.raises(expected_error) as rejected:
+                operation()
+            assert type(rejected.value) is expected_error, name
+            error = rejected.value
+            output = "\n".join((str(error), repr(error), "".join(traceback.format_exception(error)),
+                                 repr(error.__cause__), repr(error.__context__)))
+            assert marker not in output, name
+            assert path.read_bytes() == before, name
+            observed.append(output)
+        assert path.read_bytes() == before
+        assert marker.encode() not in before
+        assert all(marker not in output for output in observed)
+    finally:
+        if wallet.is_unlocked:
+            wallet.lock()
+
+
+def test_named_wallet_diagnostic_sink_calls_are_absent_from_owned_production_roots():
+    repo = Path(__file__).resolve().parents[1]
+    roots = (
+        repo / "src" / "decent_wallet",
+        repo / "platforms" / "android-wallet" / "src" / "main",
+        repo / "apps" / "android-wallet-client" / "src" / "main",
+    )
+    named_sinks = (
+        "android.util.Log", "Log.d(", "Log.i(", "Log.w(", "Log.e(", "Log.v(",
+        "Timber.", "FirebaseCrashlytics", "Crashlytics.", "Sentry.", "Telemetry.",
+        "sentry_sdk.", "opentelemetry.",
+    )
+    violations = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for source in root.rglob("*"):
+            if source.suffix not in {".py", ".kt", ".java"}:
+                continue
+            text = source.read_text(encoding="utf-8")
+            for sink in named_sinks:
+                if sink in text:
+                    violations.append((source.relative_to(repo).as_posix(), sink))
+    assert violations == [], "Named wallet-owned diagnostic sink reference found"
+
+
+def _locked_stage_wallet(tmp_path, name, marker):
+    from decent_wallet import WalletLockedError
+    login = json.loads(LOGIN_VECTOR.read_text())
+    path = tmp_path / f"{name}.json"
+    wallet = Wallet._create_storage(
+        path, "correct horse battery", "correct horse battery",
+        {"private_seed": base64.urlsafe_b64decode(login["test_private_seed_b64url"] + "="),
+         "public_key": base64.urlsafe_b64decode(login["public_key_b64url"] + "=")},
+    )
+    wallet.set_master_account_entity({"given_name": marker, "email": "private@example.test"})
+    return wallet, path, login
+
+
+def _assert_locked_stage_rejection(wallet, path, before, marker, operation, expected_error):
+    import traceback
+    wallet.lock()
+    with pytest.raises(expected_error) as rejected:
+        operation()
+    error = rejected.value
+    assert type(error) is expected_error
+    rendered = "\n".join((str(error), repr(error), "".join(traceback.format_exception(error)),
+                          repr(error.__cause__), repr(error.__context__),
+                          repr(getattr(error, "__notes__", ()))))
+    assert marker not in rendered
+    assert path.read_bytes() == before
+
+
+def test_locked_review_rejects_before_review_without_returning_plaintext(tmp_path):
+    from decent_wallet.account_issuance import AccountDisclosureError
+    marker = "PY_LOCKED_REVIEW_MARKER_" + "r" * 160
+    wallet, path, _ = _locked_stage_wallet(tmp_path, "review-target", marker)
+    try:
+        context = context_for_handle()
+        unlocked = wallet.review_account_disclosure(context, HANDLE, IDENTITY_ID)
+        assert dict(unlocked.values)[GIVEN] == marker
+        before = path.read_bytes()
+        control_path = tmp_path / "review-control.json"
+        control_path.write_bytes(before)
+        control = Wallet.open(control_path, "correct horse battery")
+        try:
+            control_result = control.review_account_disclosure(context, HANDLE, IDENTITY_ID)
+            assert dict(control_result.values)[GIVEN] == marker
+        finally:
+            control.lock()
+        _assert_locked_stage_rejection(
+            wallet, path, before, marker,
+            lambda: wallet.review_account_disclosure(context, HANDLE, IDENTITY_ID), AccountDisclosureError,
+        )
+    finally:
+        if wallet.is_unlocked: wallet.lock()
+
+
+def test_locked_approval_rejects_valid_review_without_persisting_approval(tmp_path):
+    from decent_wallet import WalletLockedError
+    expected_error = WalletLockedError
+    marker = "PY_LOCKED_APPROVAL_MARKER_" + "a" * 160
+    wallet, path, _ = _locked_stage_wallet(tmp_path, "approval-target", marker)
+    callbacks = []
+    try:
+        context = context_for_handle()
+        review = wallet.review_account_disclosure(context, HANDLE, IDENTITY_ID)
+        before = path.read_bytes()
+        control_path = tmp_path / "approval-control.json"
+        control_path.write_bytes(before)
+        control = Wallet.open(control_path, "correct horse battery")
+        try:
+            control_review = control.review_account_disclosure(context, HANDLE, IDENTITY_ID)
+            eligible = control.approve_account_disclosure(
+                control_review, [GIVEN], consent=lambda candidate: candidate is control_review,
+            )
+            assert eligible is not None
+        finally:
+            control.lock()
+        _assert_locked_stage_rejection(
+            wallet, path, before, marker,
+            lambda: wallet.approve_account_disclosure(
+                review, [GIVEN], consent=lambda candidate: callbacks.append(candidate) or True,
+            ), expected_error,
+        )
+        assert callbacks == []
+    finally:
+        if wallet.is_unlocked: wallet.lock()
+
+
+def test_locked_login_proof_rejects_approved_preproof_pending_without_artifact(tmp_path):
+    from decent_wallet import WalletLockedError
+    expected_error = WalletLockedError
+    marker = "PY_LOCKED_PROOF_MARKER_" + "p" * 160
+    wallet, path, login = _locked_stage_wallet(tmp_path, "proof-target", marker)
+    try:
+        review = wallet.review_account_disclosure(context_for_handle(), HANDLE, IDENTITY_ID)
+        pending = wallet.approve_account_disclosure(review, [GIVEN], consent=lambda _: True)
+        before = path.read_bytes()
+        control_path = tmp_path / "proof-control.json"
+        control_path.write_bytes(before)
+        control = Wallet.open(control_path, "correct horse battery")
+        try:
+            control_pending = type(pending)(pending.handle, pending.expires_at)
+            proof = control.create_account_login_proof(control_pending, challenge=login["challenge"])
+            assert proof is not None
+        finally:
+            control.lock()
+        _assert_locked_stage_rejection(
+            wallet, path, before, marker,
+            lambda: wallet.create_account_login_proof(pending, challenge=login["challenge"]), expected_error,
+        )
+    finally:
+        if wallet.is_unlocked: wallet.lock()
+
+
+def test_locked_prepare_rejects_proof_issued_unprepared_state_without_submission(tmp_path):
+    from decent_wallet import WalletLockedError
+    expected_error = WalletLockedError
+    marker = "PY_LOCKED_PREPARE_MARKER_" + "s" * 160
+    wallet, path, login = _locked_stage_wallet(tmp_path, "prepare-target", marker)
+    try:
+        context = context_for_handle()
+        review = wallet.review_account_disclosure(context, HANDLE, IDENTITY_ID)
+        pending = wallet.approve_account_disclosure(review, [GIVEN], consent=lambda _: True)
+        wallet.create_account_login_proof(pending, challenge=login["challenge"])
+        before = path.read_bytes()
+        control_path = tmp_path / "prepare-control.json"
+        control_path.write_bytes(before)
+        control = Wallet.open(control_path, "correct horse battery")
+        try:
+            control_pending = type(pending)(pending.handle, pending.expires_at)
+            binding, jwks, outer, request_object, registration = continuation_artifacts(
+                context, control.public_key, 1_800_000_001,
+            )
+            submission = control.prepare_account_presentation(
+                control_pending, binding_jws=binding, keycloak_jwks=jwks, outer_request=outer,
+                request_object=request_object, registration=registration,
+            )
+            assert submission is not None
+            del submission
+        finally:
+            control.lock()
+        _assert_locked_stage_rejection(
+            wallet, path, before, marker,
+            lambda: wallet.prepare_account_presentation(
+                pending, binding_jws=binding, keycloak_jwks=jwks, outer_request=outer,
+                request_object=request_object, registration=registration,
+            ), expected_error,
+        )
+    finally:
+        if wallet.is_unlocked: wallet.lock()
