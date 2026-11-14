@@ -963,6 +963,8 @@ def test_wallet_security_boundary_is_local_redacted_and_selection_scoped(tmp_pat
         raise AssertionError("wallet disclosure attempted external networking")
 
     monkeypatch.setattr(socket.socket, "connect", blocked_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked_network)
+    monkeypatch.setattr(socket.socket, "sendto", blocked_network)
     monkeypatch.setattr(socket, "create_connection", blocked_network)
     wallet.set_master_account_entity(
         {"given_name": selected, "email": unselected, "other": unrequested}
