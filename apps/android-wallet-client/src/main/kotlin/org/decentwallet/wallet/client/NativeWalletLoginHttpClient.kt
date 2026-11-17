@@ -94,7 +94,7 @@ internal class NativeWalletLoginHttpClient internal constructor(
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(10, TimeUnit.SECONDS)
                 .apply {
-                    if (BuildConfig.DEBUG && context != null) {
+                    if (BuildConfig.WALLET_DEBUG_TLS_ENABLED && context != null) {
                         try {
                             val tls = Class.forName("org.decentwallet.wallet.client.DebugWalletLoginTls")
                             tls.getMethod("configure", Context::class.java, OkHttpClient.Builder::class.java)

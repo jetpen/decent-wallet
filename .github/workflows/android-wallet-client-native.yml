@@ -46,11 +46,14 @@ jobs:
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
         with:
           packages: "platform-tools platforms;android-37.0 build-tools;37.0.0"
-      - name: Run pinned app/core host tests, Android-test compilation, and lint
+      - name: Run host tests, Android-test compilation, lint, and qualification build
         run: >-
           ./gradlew --no-daemon --dependency-verification=strict
           -PwalletLoginHost=login.example.com -PwalletLoginPort=443
-          :apps:android-wallet-client:testDebugUnitTest
+          -PwalletQualificationOffline=true
+          :apps:android-wallet-client:testStandardDebugUnitTest
+          :apps:android-wallet-client:testQualificationDebugUnitTest
           :platforms:android-wallet:testDebugUnitTest
-          :apps:android-wallet-client:compileDebugAndroidTestKotlin
-          :apps:android-wallet-client:lintDebug
+          :apps:android-wallet-client:compileStandardDebugAndroidTestKotlin
+          :apps:android-wallet-client:compileQualificationDebugAndroidTestKotlin
+          :apps:android-wallet-client:assembleQualificationDebug

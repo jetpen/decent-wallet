@@ -15,7 +15,12 @@ import javax.net.ssl.X509TrustManager
 object DebugWalletLoginTls {
     @JvmStatic
     fun configure(context: Context, builder: OkHttpClient.Builder) {
-        val certificate = context.resources.openRawResource(R.raw.wallet_login_test_ca).use {
+        val testResources = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().context.resources
+        val certificateId = testResources.getIdentifier(
+            "wallet_login_test_ca", "raw", "org.decentwallet.wallet.client"
+        )
+        require(certificateId != 0) { "instrumentation test CA resource is missing" }
+        val certificate = testResources.openRawResource(certificateId).use {
             CertificateFactory.getInstance("X.509").generateCertificate(it) as X509Certificate
         }
         val system = defaultTrustManager(null)
