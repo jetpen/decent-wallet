@@ -230,7 +230,7 @@ internal class NativeDisclosureHttpClient(
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .apply {
-                if (BuildConfig.DEBUG && context != null) {
+                if (BuildConfig.WALLET_DEBUG_TLS_ENABLED && context != null) {
                     val tls = Class.forName("org.decentwallet.wallet.client.DebugWalletLoginTls")
                     tls.getMethod("configure", Context::class.java, OkHttpClient.Builder::class.java)
                         .invoke(null, context.applicationContext, this)

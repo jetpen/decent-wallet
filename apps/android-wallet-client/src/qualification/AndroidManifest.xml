@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:name=".QualificationWalletHostApplication" android:label="@string/wallet_qualification_label" android:allowBackup="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name=".QualificationWalletSetupActivity" android:exported="true">
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="${walletLoginHost}" android:pathPrefix="/realms/" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".WalletLoginActivity" android:exported="false" />
+    </application>
+</manifest>

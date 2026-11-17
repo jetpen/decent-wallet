@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:name=".DebugWalletLoginApplication" android:label="Decent Wallet Login">
+        <activity android:name=".WalletLoginActivity" android:exported="true">
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="${walletLoginHost}" android:pathPrefix="/realms/" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
