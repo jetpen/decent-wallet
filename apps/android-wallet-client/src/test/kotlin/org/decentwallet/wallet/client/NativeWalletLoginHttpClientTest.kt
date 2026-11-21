@@ -131,6 +131,23 @@ class NativeWalletLoginHttpClientTest {
         assertNull(server.takeRequest(150, TimeUnit.MILLISECONDS))
     }
 
+    @Test fun malformedChallengeFailureDoesNotExposeResponseOrIdentityMarkers() {
+        val responseMarker = "response-secret-marker-42c9"
+        val identityMarker = "identity-secret-marker-8b11"
+        val signatureMarker = "signature-secret-marker-d730"
+        server.enqueue(MockResponse().setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("$responseMarker:$identityMarker:$signatureMarker"))
+
+        try {
+            client.getChallenge(transaction)
+            fail("malformed challenge was accepted")
+        } catch (failure: WalletLoginTransportException) {
+            assertSafeFailure(failure, responseMarker, identityMarker, signatureMarker, transaction.url)
+        }
+        assertEquals(1, server.requestCount)
+    }
+
     @Test fun untrustedTlsPeerIsRejectedBeforeTheFixtureReceivesARequest() {
         val untrusted = NativeWalletLoginHttpClient(OkHttpClient.Builder().cookieJar(CookieJar.NO_COOKIES).build())
         try {
@@ -175,5 +192,13 @@ class NativeWalletLoginHttpClientTest {
         assertNull("Cookie", request.getHeader("Cookie"))
         assertNull("X-Decent-CSRF", request.getHeader("X-Decent-CSRF"))
         assertNull("Authorization", request.getHeader("Authorization"))
+    }
+
+    private fun assertSafeFailure(failure: Throwable, vararg markers: String) {
+        val chain = generateSequence(failure) { it.cause }
+            .flatMap { sequenceOf(it.message.orEmpty(), it.toString()) }
+            .toList()
+        markers.forEach { marker -> assertTrue(chain.none { marker in it }) }
+        assertNull(failure.cause)
     }
 }

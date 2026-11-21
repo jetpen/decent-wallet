@@ -1,4 +1,4 @@
-package org.decentwallet.wallet.client
+package org.decentwallet.wallet.client.test
 
 import android.content.Context
 import okhttp3.OkHttpClient
@@ -12,7 +12,7 @@ import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
 /** Debug-only additive root. OkHttp's normal hostname verifier remains in force. */
-object DebugWalletLoginTls {
+object TestDebugWalletLoginTls {
     @JvmStatic
     fun configure(context: Context, builder: OkHttpClient.Builder) {
         val testResources = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().context.resources

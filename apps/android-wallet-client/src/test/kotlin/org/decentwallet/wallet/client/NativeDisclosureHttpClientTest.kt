@@ -280,6 +280,24 @@ class NativeDisclosureHttpClientTest {
         grant.close()
     }
 
+    @Test fun rejectedContinuationPollDoesNotExposeResponseCapabilityOrTransactionMarkers() {
+        val responseMarker = "response-secret-marker-1f3a"
+        val capabilityMarker = "capability-secret-marker-a06e"
+        val transactionMarker = "transaction-secret-marker-5d91"
+        server.enqueue(MockResponse().setResponseCode(503)
+            .setHeader("Cache-Control", "no-store")
+            .setHeader("Referrer-Policy", "no-referrer")
+            .setBody("$responseMarker:$capabilityMarker:$transactionMarker"))
+
+        try {
+            http.pollContinuation(rpOrigin, transactionId, capability)
+            fail("server error was accepted as continuation state")
+        } catch (failure: NativeDisclosureTransportException) {
+            assertSafeFailure(failure, responseMarker, capabilityMarker, transactionMarker, bearer, transactionId)
+        }
+        assertEquals(1, server.requestCount)
+    }
+
     @Test fun retryScheduleHasExponentialBackoffJitterAndRetryAfterAsFloor() {
         assertEquals(1L, NativeContinuationRetry.delaySeconds(0, 0, 0.0))
         assertEquals(2L, NativeContinuationRetry.delaySeconds(0, 0, 1.0))
@@ -291,5 +309,13 @@ class NativeDisclosureHttpClientTest {
         listOf("Origin", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Sec-Fetch-User", "Cookie", "X-Decent-CSRF").forEach {
             assertNull(it, request.getHeader(it))
         }
+    }
+
+    private fun assertSafeFailure(failure: Throwable, vararg markers: String) {
+        val chain = generateSequence(failure) { it.cause }
+            .flatMap { sequenceOf(it.message.orEmpty(), it.toString()) }
+            .toList()
+        markers.forEach { marker -> assertTrue(chain.none { marker in it }) }
+        assertNull(failure.cause)
     }
 }

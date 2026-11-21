@@ -197,8 +197,8 @@ android {
         getByName("androidTest") {
             java.srcDir("src/androidTest/kotlin/org/decentwallet/wallet/client/test")
             assets.srcDir("src/androidTest/assets")
-            assets.srcDir("tests/vectors/native-continuation")
-            assets.srcDir("tests/vectors/wallet-account-disclosure-v1/vectors")
+            assets.srcDir(rootProject.file("tests/vectors/native-continuation"))
+            assets.srcDir(rootProject.file("tests/vectors/wallet-account-disclosure-v1/vectors"))
         }
         getByName("qualification") {
             manifest.srcFile("src/qualification/AndroidManifest.xml")

@@ -111,6 +111,7 @@ class WalletLoginApprovalFlowInstrumentedTest {
         }
     }
 
+
     private fun assertDecisionSendsNoProof(button: String, terminalText: String) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val walletFile = File(context.cacheDir, "wallet-login-${UUID.randomUUID()}.wallet")
@@ -198,4 +199,5 @@ class WalletLoginApprovalFlowInstrumentedTest {
 
         override fun close() = server.shutdown()
     }
+
 }
