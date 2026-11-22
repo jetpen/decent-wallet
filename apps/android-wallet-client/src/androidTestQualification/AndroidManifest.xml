@@ -1,0 +1,26 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The system picker and fixture staging exist only in qualification instrumentation. -->
+    <queries>
+        <package android:name="org.decentwallet.wallet.client.qualification" />
+    </queries>
+    <application>
+        <activity
+            android:name="org.decentwallet.wallet.client.QualificationDocumentProviderBootstrapActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <provider
+            android:name="org.decentwallet.wallet.client.QualificationWalletFixtureStagingProvider"
+            android:authorities="org.decentwallet.wallet.client.test.fixturestaging"
+            android:exported="true" />
+        <provider
+            android:name="org.decentwallet.wallet.client.QualificationWalletDocumentProvider"
+            android:authorities="org.decentwallet.wallet.client.test.walletprovider"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+    </application>
+</manifest>

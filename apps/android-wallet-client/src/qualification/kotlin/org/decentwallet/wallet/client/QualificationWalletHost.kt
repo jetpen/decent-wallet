@@ -93,7 +93,7 @@ class QualificationWalletSetupActivity : Activity() {
         selectedContainer = savedInstanceState?.getString(STATE_CONTAINER_URI)?.let(Uri::parse)
         showSetup()
         if (savedInstanceState != null) foregroundLockOnResume = true
-        forwardIfSessionReady()
+        else forwardIfSessionReady()
     }
 
     override fun onNewIntent(intent: Intent?) {

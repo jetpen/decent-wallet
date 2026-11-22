@@ -39,6 +39,7 @@ class NativeWalletLoginHttpClientTest {
         transaction = WalletLoginTransactionUrl.parse(server.url(path).toString(), "https://localhost:${server.port}")
         val testHttp = OkHttpClient.Builder()
             .sslSocketFactory(trusted.sslSocketFactory(), trusted.trustManager)
+            .retryOnConnectionFailure(false)
             .build()
         client = NativeWalletLoginHttpClient(testHttp)
     }
@@ -123,12 +124,39 @@ class NativeWalletLoginHttpClientTest {
         assertNull(server.takeRequest(150, TimeUnit.MILLISECONDS))
     }
 
+    @Test fun retryAfterZeroDoesNotResubmitProof() {
+        server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0"))
+        // A follow-up would falsely interpret this as acceptance.
+        server.enqueue(MockResponse().setResponseCode(202))
+        val accepted = client.submitProof(transaction, proof())
+        assertEquals(1, server.requestCount)
+        assertFalse("the rejected proof appeared accepted", accepted)
+        assertEquals("POST", requireNotNull(server.takeRequest(5, TimeUnit.SECONDS)).method)
+    }
+
     @Test fun ambiguousPostFailureIsNotRetried() {
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
         try { client.submitProof(transaction, proof()) } catch (_: WalletLoginTransportException) { }
         requireNotNull(server.takeRequest(5, TimeUnit.SECONDS))
         assertEquals(1, server.requestCount)
         assertNull(server.takeRequest(150, TimeUnit.MILLISECONDS))
+    }
+
+    @Test fun malformedChallengeFailureDoesNotExposeResponseOrIdentityMarkers() {
+        val responseMarker = "response-secret-marker-42c9"
+        val identityMarker = "identity-secret-marker-8b11"
+        val signatureMarker = "signature-secret-marker-d730"
+        server.enqueue(MockResponse().setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("$responseMarker:$identityMarker:$signatureMarker"))
+
+        try {
+            client.getChallenge(transaction)
+            fail("malformed challenge was accepted")
+        } catch (failure: WalletLoginTransportException) {
+            assertSafeFailure(failure, responseMarker, identityMarker, signatureMarker, transaction.url)
+        }
+        assertEquals(1, server.requestCount)
     }
 
     @Test fun untrustedTlsPeerIsRejectedBeforeTheFixtureReceivesARequest() {
@@ -175,5 +203,13 @@ class NativeWalletLoginHttpClientTest {
         assertNull("Cookie", request.getHeader("Cookie"))
         assertNull("X-Decent-CSRF", request.getHeader("X-Decent-CSRF"))
         assertNull("Authorization", request.getHeader("Authorization"))
+    }
+
+    private fun assertSafeFailure(failure: Throwable, vararg markers: String) {
+        val chain = generateSequence(failure) { it.cause }
+            .flatMap { sequenceOf(it.message.orEmpty(), it.toString()) }
+            .toList()
+        markers.forEach { marker -> assertTrue(chain.none { marker in it }) }
+        assertNull(failure.cause)
     }
 }

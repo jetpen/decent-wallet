@@ -33,7 +33,8 @@ class NativeDisclosureHttpClientTest {
         server = MockWebServer().apply { useHttps(serverTls.sslSocketFactory(), false); start() }
         rpOrigin = "https://localhost:${server.port}"
         http = NativeDisclosureHttpClient(OkHttpClient.Builder()
-            .sslSocketFactory(trusted.sslSocketFactory(), trusted.trustManager).build())
+            .sslSocketFactory(trusted.sslSocketFactory(), trusted.trustManager)
+            .retryOnConnectionFailure(false).build())
     }
 
     @After fun tearDown() { capability.fill(0); server.shutdown() }
@@ -79,6 +80,30 @@ class NativeDisclosureHttpClientTest {
         assertEquals("application/json", post.getHeader("Content-Type"))
         assertArrayEquals(proofBody, post.body.readByteArray())
         assertBrowserHeadersAbsent(post)
+    }
+
+    @Test fun retryAfterZeroDoesNotResubmitNativeProof() {
+        val txn = WalletLoginTransactionUrl.parse("$rpOrigin/realms/demo/decent-wallet-login/v1/transactions/$transactionId", rpOrigin)
+        server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0"))
+        server.enqueue(MockResponse().setResponseCode(503))
+        try {
+            http.submitNativeProof(txn, byteArrayOf(1)).close()
+            fail("negative native proof response was accepted")
+        } catch (_: NativeDisclosureTransportException) { }
+        assertEquals(1, server.requestCount)
+        assertEquals("POST", requireNotNull(server.takeRequest(5, TimeUnit.SECONDS)).method)
+    }
+
+    @Test fun retryAfterZeroDoesNotResubmitPresentation() {
+        server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0")
+            .setHeader("Cache-Control", "no-store").setHeader("Referrer-Policy", "no-referrer"))
+        server.enqueue(MockResponse().setResponseCode(503)
+            .setHeader("Cache-Control", "no-store").setHeader("Referrer-Policy", "no-referrer"))
+        http.submitPresentationOnce("$rpOrigin/response", rpOrigin, "fixture-body".toByteArray()).use {
+            assertEquals(503, it.statusCode)
+        }
+        assertEquals(1, server.requestCount)
+        assertEquals("POST", requireNotNull(server.takeRequest(5, TimeUnit.SECONDS)).method)
     }
 
     @Test fun capabilityExpiryIsBoundToProofAcceptanceNotResponseArrival() {
@@ -280,6 +305,24 @@ class NativeDisclosureHttpClientTest {
         grant.close()
     }
 
+    @Test fun rejectedContinuationPollDoesNotExposeResponseCapabilityOrTransactionMarkers() {
+        val responseMarker = "response-secret-marker-1f3a"
+        val capabilityMarker = "capability-secret-marker-a06e"
+        val transactionMarker = "transaction-secret-marker-5d91"
+        server.enqueue(MockResponse().setResponseCode(503)
+            .setHeader("Cache-Control", "no-store")
+            .setHeader("Referrer-Policy", "no-referrer")
+            .setBody("$responseMarker:$capabilityMarker:$transactionMarker"))
+
+        try {
+            http.pollContinuation(rpOrigin, transactionId, capability)
+            fail("server error was accepted as continuation state")
+        } catch (failure: NativeDisclosureTransportException) {
+            assertSafeFailure(failure, responseMarker, capabilityMarker, transactionMarker, bearer, transactionId)
+        }
+        assertEquals(1, server.requestCount)
+    }
+
     @Test fun retryScheduleHasExponentialBackoffJitterAndRetryAfterAsFloor() {
         assertEquals(1L, NativeContinuationRetry.delaySeconds(0, 0, 0.0))
         assertEquals(2L, NativeContinuationRetry.delaySeconds(0, 0, 1.0))
@@ -291,5 +334,13 @@ class NativeDisclosureHttpClientTest {
         listOf("Origin", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Sec-Fetch-User", "Cookie", "X-Decent-CSRF").forEach {
             assertNull(it, request.getHeader(it))
         }
+    }
+
+    private fun assertSafeFailure(failure: Throwable, vararg markers: String) {
+        val chain = generateSequence(failure) { it.cause }
+            .flatMap { sequenceOf(it.message.orEmpty(), it.toString()) }
+            .toList()
+        markers.forEach { marker -> assertTrue(chain.none { marker in it }) }
+        assertNull(failure.cause)
     }
 }

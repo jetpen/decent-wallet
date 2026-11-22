@@ -41,7 +41,7 @@ class QualificationWalletHostInstrumentedTest {
             assertTrue("setup Activity must remain visible before wallet unlock", !activity.isFinishing)
             assertNull("fresh qualification host unexpectedly contains wallet identity", acquireIdentity.invoke(app, activity))
             assertNull("offline qualification host unexpectedly has static native trust", nativeTrust.invoke(app, activity))
-            assertFalse("incoming App Link was forwarded before wallet unlock", instrumentation.checkMonitorHit(monitor, 0))
+            assertFalse("incoming App Link was forwarded before wallet unlock", monitor.hits > 0)
             val forward = activity.javaClass.getDeclaredMethod("walletLoginIntent", Uri::class.java).apply { isAccessible = true }
             val retained = forward.invoke(activity, uri) as Intent
             assertEquals(uri, retained.data)

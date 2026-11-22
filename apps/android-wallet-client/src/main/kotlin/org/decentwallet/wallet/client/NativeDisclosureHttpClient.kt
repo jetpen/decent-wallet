@@ -2,10 +2,9 @@ package org.decentwallet.wallet.client
 
 import android.content.Context
 import okhttp3.CookieJar
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.MediaType.Companion.toMediaType
 import okio.Buffer
 import java.net.URI
 import java.nio.charset.StandardCharsets
@@ -45,7 +44,7 @@ internal class NativeDisclosureHttpClient(
         // Capture the acceptance window immediately before the only proof POST attempt.
         val proofAcceptanceStartedAt = System.currentTimeMillis() / 1000
         val response = execute(Request.Builder().url(transaction.url)
-            .post(proof.toRequestBody(JSON)).header("Accept", "application/json").build())
+            .post(proof.toOneShotRequestBody(JSON)).header("Accept", "application/json").build())
         if (response.code != 200 || !response.hasMediaType("application/json") || !response.isNoStore || !response.isNoReferrer) {
             response.body.fill(0)
             throw NativeDisclosureTransportException()
@@ -113,7 +112,7 @@ internal class NativeDisclosureHttpClient(
         val origin = canonicalHttpsOrigin(expectedRpOrigin)
         val uri = parseSameOriginHttpsUrl(responseUri, origin, allowPath = true)
         val response = execute(Request.Builder().url(uri)
-            .post(persistedBody.toRequestBody(FORM))
+            .post(persistedBody.toOneShotRequestBody(FORM))
             .header("Accept", "application/json").build())
         if (!response.isNoStore || !response.isNoReferrer ||
             (response.code == 200 && !response.hasMediaType("application/json"))

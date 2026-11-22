@@ -25,6 +25,7 @@ import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
+/** Exercises the production Activity with Standard's synthetic session and loopback TLS fixture. */
 @RunWith(AndroidJUnit4::class)
 class WalletLoginApprovalFlowInstrumentedTest {
     private val challenge = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { it.toByte() })
@@ -49,6 +50,7 @@ class WalletLoginApprovalFlowInstrumentedTest {
                 assertEquals("GET", get.method)
                 assertEquals(path, get.path)
                 waitForConsent(scenario, identityId)
+                assertNull("request sent before approval", fixture.server.takeRequest(300, TimeUnit.MILLISECONDS))
                 scenario.onActivity { activity -> WalletLoginTestViews.button(activity.window.decorView, "Approve wallet login").performClick() }
                 val post = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
                 assertEquals("POST", post.method)
@@ -72,6 +74,7 @@ class WalletLoginApprovalFlowInstrumentedTest {
                 } finally {
                     body.fill(0)
                 }
+                waitForText(scenario, "Wallet login proof submitted")
                 assertNull("approval sent an extra request", fixture.server.takeRequest(300, TimeUnit.MILLISECONDS))
             }
         } finally {
@@ -86,6 +89,69 @@ class WalletLoginApprovalFlowInstrumentedTest {
     @Test fun denialSendsNoProof() = assertDecisionSendsNoProof("Deny", "Wallet login denied")
 
     @Test fun cancellationSendsNoProof() = assertDecisionSendsNoProof("Cancel", "Wallet login cancelled")
+
+    @Test fun rejectedProofShowsFailureAndIsNotRetried() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val identity = "test:activity-rejected-proof"
+        val walletFile = File(context.cacheDir, "wallet-login-rejected-${UUID.randomUUID()}.wallet")
+        val session = AndroidWallet.createWithGeneratedKey(walletFile.toPath(), walletPassword, walletPassword)
+        ProviderFixture().use { fixture ->
+            try {
+                fixture.start(rejectProofWithRetryAfterZero = true)
+                DebugWalletLoginApplication.install(WalletLoginIdentity(session, identity))
+                ActivityScenario.launch<WalletLoginActivity>(intent(context)).use { scenario ->
+                    waitForConsent(scenario, identity)
+                    repeat(2) {
+                        assertEquals("GET", requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS)).method)
+                    }
+                    assertNull("request sent before approval", fixture.server.takeRequest(300, TimeUnit.MILLISECONDS))
+                    scenario.onActivity { activity ->
+                        WalletLoginTestViews.button(activity.window.decorView, "Approve wallet login").performClick()
+                    }
+                    val request = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
+                    assertEquals("POST", request.method)
+                    assertTrue("proof was submitted to the wrong fixture route", request.path == path)
+                    waitForText(scenario, "Wallet login did not complete. Check the original browser; no retry was made.")
+                    assertNull("failed proof was retried", fixture.server.takeRequest(300, TimeUnit.MILLISECONDS))
+                    assertEquals(3, fixture.server.requestCount)
+                }
+            } finally {
+                DebugWalletLoginApplication.clear()
+                session.close()
+                walletFile.delete()
+            }
+        }
+    }
+
+    @Test fun malformedChallengeOffersNoApprovalAndSendsNoProof() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val walletFile = File(context.cacheDir, "wallet-login-malformed-${UUID.randomUUID()}.wallet")
+        val session = AndroidWallet.createWithGeneratedKey(walletFile.toPath(), walletPassword, walletPassword)
+        ProviderFixture().use { fixture ->
+            try {
+                fixture.start(challengeResponse = """{"profile":"decent-wallet-login-v1","challenge":false}""")
+                DebugWalletLoginApplication.install(WalletLoginIdentity(session, "test:malformed-challenge"))
+                ActivityScenario.launch<WalletLoginActivity>(intent(context)).use { scenario ->
+                    waitForText(scenario, "The provider request could not be verified. No proof was sent.")
+                    scenario.onActivity { activity ->
+                        assertTrue("invalid challenge exposed an approval action",
+                            "Approve wallet login" !in WalletLoginTestViews.texts(activity.window.decorView))
+                    }
+                    val contextGet = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
+                    val challengeGet = requireNotNull(fixture.server.takeRequest(10, TimeUnit.SECONDS))
+                    assertEquals("GET", contextGet.method)
+                    assertEquals("GET", challengeGet.method)
+                    assertTrue("challenge fixture was not reached", challengeGet.path == path)
+                    assertNull("malformed challenge allowed extra HTTP output", fixture.server.takeRequest(300, TimeUnit.MILLISECONDS))
+                    assertEquals(2, fixture.server.requestCount)
+                }
+            } finally {
+                DebugWalletLoginApplication.clear()
+                session.close()
+                walletFile.delete()
+            }
+        }
+    }
 
     @Test fun nativeContextWithoutHostTrustDoesNotDowngradeToLoginOrSendOutput() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -110,6 +176,7 @@ class WalletLoginApprovalFlowInstrumentedTest {
             fixture.close()
         }
     }
+
 
     private fun assertDecisionSendsNoProof(button: String, terminalText: String) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -171,7 +238,7 @@ class WalletLoginApprovalFlowInstrumentedTest {
     private inner class ProviderFixture : AutoCloseable {
         val server = MockWebServer()
 
-        fun start(nativeContext: Boolean = false) {
+        fun start(nativeContext: Boolean = false, challengeResponse: String? = null, rejectProofWithRetryAfterZero: Boolean = false) {
             val assets = InstrumentationRegistry.getInstrumentation().context.assets
             val certificate = assets.open("wallet_login_test_cert.pem").use {
                 CertificateFactory.getInstance("X.509").generateCertificate(it) as java.security.cert.X509Certificate
@@ -190,7 +257,10 @@ class WalletLoginApprovalFlowInstrumentedTest {
                     .setBody("""{"profile":"decent-account-disclosure-v1","keycloak_issuer":"https://issuer.example","decent_native_continuation":true}"""))
             } else {
                 server.enqueue(MockResponse().setResponseCode(204).setHeader("Cache-Control", "no-store").setHeader("Referrer-Policy", "no-referrer"))
-                server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(challengeJson))
+                server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(challengeResponse ?: challengeJson))
+                if (rejectProofWithRetryAfterZero) {
+                    server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0"))
+                }
                 server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
             }
             server.start(8443)
@@ -198,4 +268,5 @@ class WalletLoginApprovalFlowInstrumentedTest {
 
         override fun close() = server.shutdown()
     }
+
 }
