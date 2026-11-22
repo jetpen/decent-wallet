@@ -11,7 +11,8 @@ import android.provider.DocumentsProvider;
 import java.io.File;
 import java.io.FileNotFoundException;
 
-/** Test-APK-only read-only DocumentsProvider selected through system DocumentsUI. */
+
+/** Qualification test APK's read-only DocumentsProvider selected through system DocumentsUI. */
 public final class QualificationWalletDocumentProvider extends DocumentsProvider {
   public static final String FILE_NAME = "qualification-wallet-document.bin";
 

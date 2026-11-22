@@ -33,7 +33,8 @@ class NativeDisclosureHttpClientTest {
         server = MockWebServer().apply { useHttps(serverTls.sslSocketFactory(), false); start() }
         rpOrigin = "https://localhost:${server.port}"
         http = NativeDisclosureHttpClient(OkHttpClient.Builder()
-            .sslSocketFactory(trusted.sslSocketFactory(), trusted.trustManager).build())
+            .sslSocketFactory(trusted.sslSocketFactory(), trusted.trustManager)
+            .retryOnConnectionFailure(false).build())
     }
 
     @After fun tearDown() { capability.fill(0); server.shutdown() }
@@ -79,6 +80,30 @@ class NativeDisclosureHttpClientTest {
         assertEquals("application/json", post.getHeader("Content-Type"))
         assertArrayEquals(proofBody, post.body.readByteArray())
         assertBrowserHeadersAbsent(post)
+    }
+
+    @Test fun retryAfterZeroDoesNotResubmitNativeProof() {
+        val txn = WalletLoginTransactionUrl.parse("$rpOrigin/realms/demo/decent-wallet-login/v1/transactions/$transactionId", rpOrigin)
+        server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0"))
+        server.enqueue(MockResponse().setResponseCode(503))
+        try {
+            http.submitNativeProof(txn, byteArrayOf(1)).close()
+            fail("negative native proof response was accepted")
+        } catch (_: NativeDisclosureTransportException) { }
+        assertEquals(1, server.requestCount)
+        assertEquals("POST", requireNotNull(server.takeRequest(5, TimeUnit.SECONDS)).method)
+    }
+
+    @Test fun retryAfterZeroDoesNotResubmitPresentation() {
+        server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0")
+            .setHeader("Cache-Control", "no-store").setHeader("Referrer-Policy", "no-referrer"))
+        server.enqueue(MockResponse().setResponseCode(503)
+            .setHeader("Cache-Control", "no-store").setHeader("Referrer-Policy", "no-referrer"))
+        http.submitPresentationOnce("$rpOrigin/response", rpOrigin, "fixture-body".toByteArray()).use {
+            assertEquals(503, it.statusCode)
+        }
+        assertEquals(1, server.requestCount)
+        assertEquals("POST", requireNotNull(server.takeRequest(5, TimeUnit.SECONDS)).method)
     }
 
     @Test fun capabilityExpiryIsBoundToProofAcceptanceNotResponseArrival() {

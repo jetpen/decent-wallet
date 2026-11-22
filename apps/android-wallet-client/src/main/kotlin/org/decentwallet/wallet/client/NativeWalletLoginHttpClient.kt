@@ -7,7 +7,6 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okio.Buffer
 import org.decentwallet.wallet.android.WalletLoginProofRequest
 import java.util.concurrent.TimeUnit
@@ -58,7 +57,7 @@ internal class NativeWalletLoginHttpClient internal constructor(
         val bytes = try { proof.toJsonBytes() } catch (_: Exception) { throw WalletLoginTransportException() }
         try {
             val request = Request.Builder().url(transaction.url)
-                .post(bytes.toRequestBody(JSON))
+                .post(bytes.toOneShotRequestBody(JSON))
                 .header("Accept", "application/json")
                 .build()
             client.newCall(request).execute().use { return it.isSuccessful }

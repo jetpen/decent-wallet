@@ -39,6 +39,7 @@ class NativeWalletLoginHttpClientTest {
         transaction = WalletLoginTransactionUrl.parse(server.url(path).toString(), "https://localhost:${server.port}")
         val testHttp = OkHttpClient.Builder()
             .sslSocketFactory(trusted.sslSocketFactory(), trusted.trustManager)
+            .retryOnConnectionFailure(false)
             .build()
         client = NativeWalletLoginHttpClient(testHttp)
     }
@@ -121,6 +122,16 @@ class NativeWalletLoginHttpClientTest {
         assertEquals("POST", observed.method)
         assertEquals(path, observed.path)
         assertNull(server.takeRequest(150, TimeUnit.MILLISECONDS))
+    }
+
+    @Test fun retryAfterZeroDoesNotResubmitProof() {
+        server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0"))
+        // A follow-up would falsely interpret this as acceptance.
+        server.enqueue(MockResponse().setResponseCode(202))
+        val accepted = client.submitProof(transaction, proof())
+        assertEquals(1, server.requestCount)
+        assertFalse("the rejected proof appeared accepted", accepted)
+        assertEquals("POST", requireNotNull(server.takeRequest(5, TimeUnit.SECONDS)).method)
     }
 
     @Test fun ambiguousPostFailureIsNotRetried() {

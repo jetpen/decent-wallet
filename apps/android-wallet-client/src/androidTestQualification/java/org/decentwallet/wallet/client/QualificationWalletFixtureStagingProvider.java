@@ -2,8 +2,11 @@ package org.decentwallet.wallet.client;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
+import android.content.Context;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Binder;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 
@@ -12,6 +15,24 @@ import java.io.FileNotFoundException;
 
 /** Test-APK-only bounded staging provider for synthetic wallet-container bytes. */
 public final class QualificationWalletFixtureStagingProvider extends ContentProvider {
+  private static final String TARGET_PACKAGE = "org.decentwallet.wallet.client.qualification";
+
+  private void enforceFixtureCaller() {
+    Context context = getContext();
+    if (context == null) {
+      throw new SecurityException("fixture staging unavailable");
+    }
+    try {
+      int targetUid = context.getPackageManager().getApplicationInfo(TARGET_PACKAGE, 0).uid;
+      if (Binder.getCallingUid() == targetUid) {
+        return;
+      }
+    } catch (PackageManager.NameNotFoundException ignored) {
+      // Fail closed if the instrumentation target is not installed/visible.
+    }
+    throw new SecurityException("fixture staging caller denied");
+  }
+
   private File fixtureFile() throws FileNotFoundException {
     if (getContext() == null) {
       throw new FileNotFoundException("provider context unavailable");
@@ -52,6 +73,7 @@ public final class QualificationWalletFixtureStagingProvider extends ContentProv
 
   @Override
   public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+    enforceFixtureCaller();
     if (!"w".equals(mode) || !"document".equals(uri.getLastPathSegment())) {
       throw new FileNotFoundException("invalid fixture write request");
     }
@@ -64,6 +86,7 @@ public final class QualificationWalletFixtureStagingProvider extends ContentProv
 
   @Override
   public Bundle call(String method, String arg, Bundle extras) {
+    enforceFixtureCaller();
     if (!"clear".equals(method)) {
       throw new IllegalArgumentException("unsupported fixture operation");
     }

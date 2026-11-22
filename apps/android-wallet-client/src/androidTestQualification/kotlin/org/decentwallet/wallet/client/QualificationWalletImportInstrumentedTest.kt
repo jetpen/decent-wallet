@@ -1,15 +1,20 @@
 package org.decentwallet.wallet.client
 
 import android.app.Activity
+import android.app.KeyguardManager
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.graphics.Rect
 import android.net.Uri
+import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.WindowManager
 
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -40,6 +45,13 @@ class QualificationWalletImportInstrumentedTest {
     private val password = UUID.randomUUID().toString()
     private val appLink = Uri.parse("${BuildConfig.WALLET_LOGIN_ORIGIN}/not-a-wallet-login")
     private var setup: Activity? = null
+    private var navigationActionEvidence = "not_attempted"
+    private var navigationNodeClass = "unknown"
+    private var navigationNodeClickable = false
+    private var navigationNodeBounds = "unknown"
+    private var navigationTapCoordinates = "unknown"
+    private var providerPackageStoppedBeforeBootstrap = "unknown"
+    private var providerPackageStoppedAfterBootstrap = "unknown"
 
     @After fun tearDown() {
         for (attempt in 0 until 3) {
@@ -57,10 +69,12 @@ class QualificationWalletImportInstrumentedTest {
             activities.forEach { if (!it.isFinishing) it.finish() }
         }
         setup = null
-        testContext.contentResolver.call(
-            Uri.parse("content://$FIXTURE_AUTHORITY"), "clear", null, null
-        )
-        (context.applicationContext as QualificationWalletHostApplication).lockWalletSession()
+        try {
+            (context.applicationContext as QualificationWalletHostApplication).lockWalletSession()
+            releaseFixtureGrant()
+        } finally {
+            context.contentResolver.call(Uri.parse("content://$FIXTURE_AUTHORITY"), "clear", null, null)
+        }
     }
 
     @Test fun unlockImportsFreshContainerAndForwardsOriginalAppLinkWithExactIdentity() {
@@ -110,17 +124,23 @@ class QualificationWalletImportInstrumentedTest {
             assertFalse("wrong-password fixture secret matched wallet password", wrongPassword == password)
             val directImport = File(context.cacheDir, "qualification-wrong-password-${UUID.randomUUID()}.wallet")
             val fixtureBytes = source.readBytes()
-            var rejected = false
+            val uiDestination: File
             try {
-                AndroidWallet.importContainer(directImport.toPath(), fixtureBytes, wrongPassword).close()
-            } catch (_: WalletUnlockException) {
-                rejected = true
+                uiDestination = WalletContainerImportPath.destination(
+                    File(context.filesDir, "qualification-wallets").toPath(), fixtureBytes,
+                ).toFile()
+                val rejected = try {
+                    AndroidWallet.importContainer(directImport.toPath(), fixtureBytes, wrongPassword).close()
+                    false
+                } catch (_: WalletUnlockException) {
+                    true
+                }
+                assertTrue("wallet-container API accepted an incorrect password", rejected)
+                assertFalse("incorrect-password import wrote a wallet file", directImport.exists())
             } finally {
                 fixtureBytes.fill(0)
                 directImport.delete()
             }
-            assertTrue("wallet-container API accepted an incorrect password", rejected)
-            assertFalse("incorrect-password import wrote a wallet file", directImport.exists())
             val activity = launchSetup()
             selectContainer(activity, source)
             enter(activity, "test:wrong-password", wrongPassword)
@@ -131,6 +151,7 @@ class QualificationWalletImportInstrumentedTest {
                 assertNull("wrong password installed a wallet identity", (context.applicationContext as QualificationWalletHostApplication)
                     .acquireWalletLoginIdentity(activity))
                 assertEquals("wrong password forwarded the App Link", 0, monitor.hits)
+                assertFalse("incorrect-password UI flow wrote a wallet file", uiDestination.exists())
             } finally {
                 instrumentation.removeMonitor(monitor)
             }
@@ -141,7 +162,6 @@ class QualificationWalletImportInstrumentedTest {
         assumeQualificationVariant()
         val source = File(context.cacheDir, "qualification-invalid-${UUID.randomUUID()}.bin")
         source.writeBytes("not an encrypted wallet container".toByteArray())
-        installDocument(source)
         try {
             val monitor = instrumentation.addMonitor(WalletLoginActivity::class.java.name, null, false)
             try {
@@ -165,7 +185,6 @@ class QualificationWalletImportInstrumentedTest {
         assumeQualificationVariant()
         val source = File(context.cacheDir, "qualification-oversized-${UUID.randomUUID()}.bin")
         java.io.RandomAccessFile(source, "rw").use { it.setLength(16L * 1024 * 1024 + 1) }
-        installDocument(source)
         try {
             val monitor = instrumentation.addMonitor(WalletLoginActivity::class.java.name, null, false)
             try {
@@ -202,15 +221,67 @@ class QualificationWalletImportInstrumentedTest {
         }
     }
 
+    @Test fun browserTapHandsOffVerifiedWalletAppLink() {
+        assumeQualificationVariant()
+        wakeDisplayForPicker()
+        val origin = BuildConfig.WALLET_LOGIN_ORIGIN
+        val host = requireNotNull(Uri.parse(origin).host)
+        val packageName = context.packageName
+        val browser = "com.android.chrome"
+        val link = Uri.parse("$origin/realms/demo/decent-wallet-login/v1/transactions/${"A".repeat(43)}")
+        waitUntil("Android verified the Wallet fixture domain") {
+            if (Build.VERSION.SDK_INT >= 31) {
+                shellOutput("pm get-app-links $packageName").lineSequence().any { it.trim() == "$host: verified" }
+            } else {
+                val state = shellOutput("dumpsys package domain-preferred-apps")
+                val verifierReport = state.substringAfter("App verification status:", "")
+                    .substringBefore("App linkages for user ")
+                verifierReport.split(Regex("(?m)^\\s*Package: ")).drop(1).any { report ->
+                    report.lineSequence().firstOrNull()?.trim() == packageName &&
+                        report.lineSequence().any { line ->
+                            line.trim().startsWith("Domains:") && host in line.trim().substringAfter(':').trim().split(Regex("\\s+"))
+                        } && report.lineSequence().any { line ->
+                            line.trim().matches(Regex("Status:\\s+always(?:\\s*:\\s*[0-9a-fA-F]+)?"))
+                        }
+                } && shellOutput("pm get-app-link $packageName").trim() == "always"
+            }
+        }
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("$origin/"))
+            .setPackage(browser).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        var openLink: AccessibilityNodeInfo? = null
+        waitUntil("Chrome Wallet fixture page; complete browser first-run setup manually if needed") {
+            val root = instrumentation.uiAutomation.rootInActiveWindow
+            openLink = root?.takeIf { it.packageName?.toString() == browser }
+                ?.let { findNode(it, "Open the synthetic Wallet link") }
+                ?.takeIf { it.isVisibleToUser && it.isEnabled }
+            openLink != null
+        }
+        clickPickerNode(requireNotNull(openLink), "Wallet fixture browser link")
+        // Android 8 monitors may not count a start initiated in another process.
+        waitUntil("resumed Wallet setup with the exact browser transaction URL") {
+            runOnMain {
+                setup = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
+                    .firstOrNull { it is QualificationWalletSetupActivity && it.intent.data == link }
+            }
+            setup != null
+        }
+    }
+
+    private fun shellOutput(command: String): String = ParcelFileDescriptor.AutoCloseInputStream(
+        instrumentation.uiAutomation.executeShellCommand(command),
+    ).bufferedReader().use { it.readText() }
+
     @Test fun recreationLocksAnAlreadyUnlockedSessionBeforeFurtherUse() {
         assumeQualificationVariant()
         withSyntheticContainer { source ->
             val application = context.applicationContext as QualificationWalletHostApplication
-            val session = AndroidWallet.open(source.toPath(), password)
-            application.installWalletSession("test:qualification-recreation", session)
             val walletMonitor = instrumentation.addMonitor(WalletLoginActivity::class.java.name, null, false)
             try {
-                val activity = launchSetup(incoming = null)
+                val activity = launchSetup()
+                // Start with a real pending link while locked, then install a session to
+                // exercise recreation with both the original link and an unlocked session.
+                val session = AndroidWallet.open(source.toPath(), password)
+                application.installWalletSession("test:qualification-recreation", session)
                 assertTrue("fixture session should begin unlocked", session.isUnlocked)
                 runOnMain { activity.recreate() }
                 var recreatedActivity: Activity? = null
@@ -223,6 +294,7 @@ class QualificationWalletImportInstrumentedTest {
                     recreatedActivity != null
                 }
                 val recreated = requireNotNull(recreatedActivity) as QualificationWalletSetupActivity
+                assertTrue("recreation fixture lost its pending link", appLink == recreated.intent.data)
                 waitForStatus(recreated, "App returned to foreground")
                 assertFalse("recreation did not lock the wallet session", session.isUnlocked)
                 assertNull("recreated setup retained wallet access", application.acquireWalletLoginIdentity(recreated))
@@ -239,48 +311,68 @@ class QualificationWalletImportInstrumentedTest {
     }
 
     private fun launchSetup(incoming: Uri? = appLink): QualificationWalletSetupActivity {
+        wakeDisplayForPicker()
         val intent = Intent(Intent.ACTION_VIEW)
             .setClassName(context.packageName, QualificationWalletSetupActivity::class.java.name)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (incoming != null) intent.data = incoming
-        instrumentation.context.startActivity(intent)
-        var launched: QualificationWalletSetupActivity? = null
-        waitUntil("qualification setup Activity launch") {
-            runOnMain {
-                launched = ActivityLifecycleMonitorRegistry.getInstance()
-                    .getActivitiesInStage(Stage.RESUMED)
-                    .filterIsInstance<QualificationWalletSetupActivity>()
-                    .lastOrNull()
-                if (launched != null) setup = launched
-            }
-            launched != null
+        val launched = instrumentation.startActivitySync(intent)
+        assertTrue("qualification setup Activity was not launched", launched is QualificationWalletSetupActivity)
+        val activity = launched as QualificationWalletSetupActivity
+        setup = activity
+        runOnMain { activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+        return activity
+    }
+
+    private fun wakeDisplayForPicker() {
+        val power = requireNotNull(context.getSystemService(PowerManager::class.java))
+        val keyguard = requireNotNull(context.getSystemService(KeyguardManager::class.java))
+        // A booted AVD can still be asleep; activities may immediately pause without a window.
+        if (!power.isInteractive) {
+            ParcelFileDescriptor.AutoCloseInputStream(
+                instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_WAKEUP")
+            ).use { while (it.read() != -1) Unit }
         }
-        return requireNotNull(launched)
+        waitUntil("interactive Android display") { power.isInteractive }
+        assertFalse("Android keyguard is locked; unlock the test device before running picker tests", keyguard.isKeyguardLocked)
     }
 
     private fun selectContainer(activity: Activity, file: File) {
         installDocument(file)
         val picked = DocumentsContract.buildDocumentUri("org.decentwallet.wallet.client.test.walletprovider", "wallet")
-        context.contentResolver.persistedUriPermissions
-            .filter { it.uri == picked && it.isReadPermission }
-            .forEach { context.contentResolver.releasePersistableUriPermission(it.uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        releaseFixtureGrant()
+        activateDocumentProviderPackage(activity)
         openPicker(activity)
-        waitUntil("DocumentsUI accessibility root") { pickerRoot() != null }
-        val pickerRoot = requireNotNull(pickerRoot())
-        if (findNode(pickerRoot, "Qualification wallets") == null) {
-            val drawer = findNodeDescription(pickerRoot) { "root" in it.lowercase() || "navigation" in it.lowercase() }
+        var visibleRoot: AccessibilityNodeInfo? = null
+        waitUntil("DocumentsUI accessibility root") {
+            visibleRoot = pickerRoot()
+            visibleRoot != null
+        }
+        val root = requireNotNull(visibleRoot)
+        if (findNode(root, "Qualification wallets") == null) {
+            val drawer = findNodeDescription(root) { isPickerRootDrawerDescription(it) }
             assertNotNull("DocumentsUI did not expose its locations drawer", drawer)
-            assertTrue("could not open DocumentsUI locations", requireNotNull(drawer).performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            clickPickerNode(requireNotNull(drawer), "locations drawer")
         }
         clickPickerText("Qualification wallets")
-        waitForPickerText("synthetic-wallet.bin")
         clickPickerText("synthetic-wallet.bin")
         var openAction: String? = null
-        waitUntil("file selection or picker return") {
-            openAction = listOf("Open", "OPEN", "open").firstOrNull { label ->
-                pickerRoot()?.let { findNode(it, label) != null } == true
+        try {
+            waitUntil("file selection or picker return") {
+                val picker = pickerRoot()
+                openAction = listOf("Open", "OPEN", "open").firstOrNull { label ->
+                    picker?.let { findNode(it, label)?.isEnabled } == true
+                }
+                (isActivityResumed(activity) && !documentsUiIsActive()) || openAction != null
             }
-            (isActivityResumed(activity) && !documentsUiIsActive()) || openAction != null
+        } catch (failure: AssertionError) {
+            val fileNode = pickerRoot()?.let { findNode(it, "synthetic-wallet.bin") }
+            throw AssertionError(
+                "picker did not complete selection; fileVisible=${fileNode != null}," +
+                    "fileEnabled=${fileNode?.isEnabled == true},fileSelected=${fileNode?.isSelected == true}," +
+                    "documentsUiActive=${documentsUiIsActive()},walletResumed=${isActivityResumed(activity)}",
+                failure,
+            )
         }
         if (!isActivityResumed(activity) || documentsUiIsActive()) {
             clickPickerText(requireNotNull(openAction) { "DocumentsUI selected no file and exposed no Open action" })
@@ -292,9 +384,16 @@ class QualificationWalletImportInstrumentedTest {
 
     private fun installDocument(source: File) {
         val uri = Uri.parse("content://$FIXTURE_AUTHORITY/document")
-        val descriptor = checkNotNull(testContext.contentResolver.openFileDescriptor(uri, "w"))
+        val descriptor = checkNotNull(context.contentResolver.openFileDescriptor(uri, "w"))
         ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { output ->
             source.inputStream().use { input -> input.copyTo(output) }
+        }
+    }
+
+    private fun releaseFixtureGrant() {
+        val picked = DocumentsContract.buildDocumentUri("org.decentwallet.wallet.client.test.walletprovider", "wallet")
+        if (context.contentResolver.persistedUriPermissions.any { it.uri == picked && it.isReadPermission }) {
+            context.contentResolver.releasePersistableUriPermission(picked, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
     }
 
@@ -304,22 +403,40 @@ class QualificationWalletImportInstrumentedTest {
     }
 
     private fun clickPickerText(label: String) {
-        waitUntil("DocumentsUI item $label") {
-            val root = pickerRoot()
-            root != null && findNode(root, label) != null
+        clickPickerNode(waitForPickerNode(label), label)
+    }
+
+    private fun clickPickerNode(node: AccessibilityNodeInfo, label: String) {
+        if (label == "locations drawer") {
+            navigationNodeClass = node.className?.toString()?.substringAfterLast('.') ?: "unknown"
+            navigationNodeClickable = node.isClickable
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            navigationNodeBounds = "${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}"
+            if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                navigationActionEvidence = "accessibility_action_handled"
+                return
+            }
+            navigationActionEvidence = "accessibility_action_unhandled"
+            tapPickerNode(node, label)
+            navigationActionEvidence = "coordinate_tap_injected"
+            return
         }
-        val root = requireNotNull(pickerRoot())
-        val node = requireNotNull(findNode(root, label))
-        if (label != "synthetic-wallet.bin") {
-            var clickable = node
-            while (!clickable.isClickable && clickable.parent != null) clickable = requireNotNull(clickable.parent)
-            if (clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+        var clickTarget: AccessibilityNodeInfo? = node
+        while (clickTarget != null && !(clickTarget.isClickable && clickTarget.isEnabled)) {
+            clickTarget = clickTarget.parent
         }
+        if (clickTarget?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return
+        tapPickerNode(node, label)
+    }
+
+    private fun tapPickerNode(node: AccessibilityNodeInfo, label: String) {
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
         assertFalse("DocumentsUI item $label has no tappable bounds", bounds.isEmpty)
         val x = bounds.centerX().toFloat()
         val y = bounds.centerY().toFloat()
+        if (label == "locations drawer") navigationTapCoordinates = "${x.toInt()},${y.toInt()}"
         val downTime = SystemClock.uptimeMillis()
         val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
         val up = MotionEvent.obtain(downTime, downTime + 50, MotionEvent.ACTION_UP, x, y, 0)
@@ -334,9 +451,88 @@ class QualificationWalletImportInstrumentedTest {
         }
     }
 
-    private fun waitForPickerText(label: String) = waitUntil("DocumentsUI item $label") {
-        pickerRoot()?.let { findNode(it, label) != null } == true
+    private fun waitForPickerNode(label: String): AccessibilityNodeInfo {
+        var node: AccessibilityNodeInfo? = null
+        try {
+            waitUntil("DocumentsUI item $label") {
+                node = pickerRoot()?.let { findNode(it, label) }
+                    ?.takeIf { it.isVisibleToUser && it.isEnabled }
+                node != null
+            }
+        } catch (failure: AssertionError) {
+            if (label != "Qualification wallets" && label != "synthetic-wallet.bin") throw failure
+            throw AssertionError("qualification picker root unavailable; ${sanitizedPickerDiagnostics()}")
+        }
+        return requireNotNull(node)
     }
+
+    private fun sanitizedPickerDiagnostics(): String {
+        val providerInfo = try {
+            testContext.packageManager.resolveContentProvider("org.decentwallet.wallet.client.test.walletprovider", 0)
+        } catch (_: Exception) {
+            null
+        }
+        val providerRegistered = providerInfo != null
+        val providerPermissionMatches = providerInfo?.readPermission == "android.permission.MANAGE_DOCUMENTS" &&
+            providerInfo.writePermission == "android.permission.MANAGE_DOCUMENTS"
+        val providerExported = providerInfo?.exported == true
+        val providerClassMatches = providerInfo?.name == QualificationWalletDocumentProvider::class.java.name
+        val testCallerHasManageDocuments = testContext.checkSelfPermission("android.permission.MANAGE_DOCUMENTS") ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        val root = pickerRoot()
+        val packageIsDocumentsUi = root?.packageName?.toString()?.contains("documentsui", ignoreCase = true) == true
+        val navigationControlVisible = root?.let {
+            findNodeDescription(it) { description -> isPickerRootDrawerDescription(description) } != null
+        } == true
+        val qualificationRootVisible = root?.let { findNode(it, "Qualification wallets") != null } == true
+        val recentVisible = root?.let { findNode(it, "Recent") != null } == true
+        val browseVisible = root?.let { findNode(it, "Browse") != null } == true
+        return "providerRegistered=$providerRegistered,providerPermissionMatches=$providerPermissionMatches," +
+            "providerExported=$providerExported,providerClassMatches=$providerClassMatches," +
+            "testCallerHasManageDocuments=$testCallerHasManageDocuments," +
+            "navigationAction=$navigationActionEvidence,navigationNodeClass=$navigationNodeClass," +
+            "navigationNodeClickable=$navigationNodeClickable,navigationNodeBounds=$navigationNodeBounds," +
+            "navigationTapCoordinates=$navigationTapCoordinates,documentsUiWindow=$packageIsDocumentsUi," +
+            "navigationControlVisible=$navigationControlVisible,qualificationRootVisible=$qualificationRootVisible," +
+            "recentVisible=$recentVisible,browseVisible=$browseVisible," +
+            "providerPackageStoppedBeforeBootstrap=$providerPackageStoppedBeforeBootstrap," +
+            "providerPackageStoppedAfterBootstrap=$providerPackageStoppedAfterBootstrap," +
+            "providerQueryRoots=not_measured"
+    }
+
+    private fun activateDocumentProviderPackage(activity: Activity) {
+        val stopped = isTestPackageStopped()
+        providerPackageStoppedBeforeBootstrap = stopped.toString()
+        if (!stopped) {
+            providerPackageStoppedAfterBootstrap = "false"
+            return
+        }
+        val intent = Intent().apply {
+            setClassName(
+                testContext.packageName,
+                QualificationDocumentProviderBootstrapActivity::class.java.name,
+            )
+        }
+        runOnMain { activity.startActivity(intent) }
+        waitUntil("test APK package activation") { !isTestPackageStopped() }
+        waitUntil("original setup Activity after provider bootstrap") {
+            var focused = false
+            runOnMain { focused = activity.hasWindowFocus() }
+            focused && isActivityResumed(activity)
+        }
+        providerPackageStoppedAfterBootstrap = isTestPackageStopped().toString()
+        assertFalse(
+            "test APK remained stopped after its bootstrap Activity launch",
+            providerPackageStoppedAfterBootstrap == "true",
+        )
+
+    }
+
+    private fun isTestPackageStopped(): Boolean {
+        val info = testContext.packageManager.getApplicationInfo(testContext.packageName, 0)
+        return (info.flags and ApplicationInfo.FLAG_STOPPED) != 0
+    }
+
 
     private fun findNode(node: AccessibilityNodeInfo, label: String): AccessibilityNodeInfo? {
         if (node.text?.toString() == label || node.contentDescription?.toString() == label) return node
@@ -346,6 +542,10 @@ class QualificationWalletImportInstrumentedTest {
         }
         return null
     }
+
+    private fun isPickerRootDrawerDescription(description: String): Boolean =
+        description.equals("Show roots", ignoreCase = true) ||
+            description.equals("Show navigation drawer", ignoreCase = true)
 
     private fun findNodeDescription(node: AccessibilityNodeInfo, predicate: (String) -> Boolean): AccessibilityNodeInfo? {
         node.contentDescription?.toString()?.let { if (predicate(it)) return node }
@@ -446,14 +646,21 @@ class QualificationWalletImportInstrumentedTest {
         val containerFile = File(context.cacheDir, "qualification-container-${UUID.randomUUID()}.bin")
         val session = AndroidWallet.createWithGeneratedKey(walletFile.toPath(), password, password)
         var bytes: ByteArray? = null
+        var importedWallet: File? = null
         try {
             bytes = session.exportContainer()
             containerFile.writeBytes(bytes)
+            val walletDirectory = File(context.filesDir, "qualification-wallets").toPath()
+            val destination = WalletContainerImportPath.destination(walletDirectory, bytes).toFile()
+            assertFalse("fresh fixture already exists at the import destination", destination.exists())
+            importedWallet = destination
             session.close()
             block(containerFile)
         } finally {
             bytes?.fill(0)
             session.close()
+            (context.applicationContext as QualificationWalletHostApplication).lockWalletSession()
+            importedWallet?.delete()
             walletFile.delete()
             containerFile.delete()
         }
