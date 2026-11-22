@@ -256,14 +256,32 @@ class QualificationWalletImportInstrumentedTest {
                 ?.takeIf { it.isVisibleToUser && it.isEnabled }
             openLink != null
         }
-        clickPickerNode(requireNotNull(openLink), "Wallet fixture browser link")
+        // Exercise Chrome's touchscreen navigation path, not an accessibility click
+        // on an ancestor that may accept ACTION_CLICK without activating the link.
+        tapVisibleNode(requireNotNull(openLink), "Wallet fixture browser link")
         // Android 8 monitors may not count a start initiated in another process.
-        waitUntil("resumed Wallet setup with the exact browser transaction URL") {
-            runOnMain {
-                setup = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
-                    .firstOrNull { it is QualificationWalletSetupActivity && it.intent.data == link }
+        try {
+            waitUntil("resumed Wallet setup with the exact browser transaction URL") {
+                runOnMain {
+                    setup = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
+                        .firstOrNull { it is QualificationWalletSetupActivity && it.intent.data == link }
+                }
+                setup != null
             }
-            setup != null
+        } catch (timeout: AssertionError) {
+            val active = instrumentation.uiAutomation.rootInActiveWindow
+            val inChrome = active?.packageName?.toString() == browser
+            val address = if (inChrome) active?.findAccessibilityNodeInfosByViewId("$browser:id/url_bar")
+                ?.firstOrNull()?.text?.toString() else null
+            val pageStillVisible = inChrome && active?.let { findNode(it, "Open the synthetic Wallet link") } != null
+            val resolver = shellOutput("cmd package resolve-activity --brief -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d $link")
+            val resolvesToWallet = resolver.lineSequence().any { it.trim().startsWith("$packageName/") }
+            throw AssertionError(
+                "browser handoff timed out; chromeForeground=$inChrome,fixtureLinkVisible=$pageStillVisible," +
+                    "chromeAddressReadable=${address != null},chromeAtTransaction=${address?.endsWith(requireNotNull(link.path)) == true}," +
+                    "androidResolvesToWallet=$resolvesToWallet",
+                timeout,
+            )
         }
     }
 
@@ -418,7 +436,7 @@ class QualificationWalletImportInstrumentedTest {
                 return
             }
             navigationActionEvidence = "accessibility_action_unhandled"
-            tapPickerNode(node, label)
+            tapVisibleNode(node, label)
             navigationActionEvidence = "coordinate_tap_injected"
             return
         }
@@ -427,13 +445,13 @@ class QualificationWalletImportInstrumentedTest {
             clickTarget = clickTarget.parent
         }
         if (clickTarget?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return
-        tapPickerNode(node, label)
+        tapVisibleNode(node, label)
     }
 
-    private fun tapPickerNode(node: AccessibilityNodeInfo, label: String) {
+    private fun tapVisibleNode(node: AccessibilityNodeInfo, label: String) {
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
-        assertFalse("DocumentsUI item $label has no tappable bounds", bounds.isEmpty)
+        assertFalse("UI item $label has no tappable bounds", bounds.isEmpty)
         val x = bounds.centerX().toFloat()
         val y = bounds.centerY().toFloat()
         if (label == "locations drawer") navigationTapCoordinates = "${x.toInt()},${y.toInt()}"
@@ -443,8 +461,8 @@ class QualificationWalletImportInstrumentedTest {
         down.source = InputDevice.SOURCE_TOUCHSCREEN
         up.source = InputDevice.SOURCE_TOUCHSCREEN
         try {
-            assertTrue("could not tap DocumentsUI item $label", instrumentation.uiAutomation.injectInputEvent(down, true))
-            assertTrue("could not release DocumentsUI item $label", instrumentation.uiAutomation.injectInputEvent(up, true))
+            assertTrue("could not tap UI item $label", instrumentation.uiAutomation.injectInputEvent(down, true))
+            assertTrue("could not release UI item $label", instrumentation.uiAutomation.injectInputEvent(up, true))
         } finally {
             down.recycle()
             up.recycle()
